@@ -1,6 +1,7 @@
 # delta-exchange-mcp
 
 ![Status: Beta](https://img.shields.io/badge/status-beta-orange)
+[![PyPI version](https://img.shields.io/pypi/v/delta-exchange-mcp)](https://pypi.org/project/delta-exchange-mcp/)
 
 Official MCP (Model Context Protocol) server for **Delta Exchange India**. Lets AI assistants — Claude Desktop, Claude Code, Cursor, Zed, Codex — query Delta Exchange market data and your own account (read-only) through standardized tools.
 
@@ -17,10 +18,10 @@ Official MCP (Model Context Protocol) server for **Delta Exchange India**. Lets 
 Sanity-check the install:
 
 ```bash
-uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git delta-exchange-mcp --help
+uvx delta-exchange-mcp --help
 ```
 
-The server runs **local stdio only**: your MCP client launches it as a subprocess, and your API keys never leave your machine. `uvx` re-fetches the repo on each launch — pin a commit with `git+https://...@<sha>` for reproducibility.
+The server runs **local stdio only**: your MCP client launches it as a subprocess, and your API keys never leave your machine. `uvx` resolves the latest published version from PyPI on each launch — pin a specific version with `uvx "delta-exchange-mcp==0.1.0"` for reproducibility.
 
 ## Install in your MCP client
 
@@ -32,7 +33,7 @@ claude mcp add delta-exchange-mcp \
   --env DELTA_MCP_ENV=india_prod \
   --env DELTA_API_KEY=your-api-key \
   --env DELTA_API_SECRET=your-api-secret \
-  -- uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git delta-exchange-mcp
+  -- uvx delta-exchange-mcp
 ```
 
 `--scope user` makes the server available across all projects. Drop the API-key envs for market-only mode. Verify with `claude mcp list`.
@@ -44,7 +45,7 @@ Add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.delta-exchange-mcp]
 command = "uvx"
-args = ["--from", "git+https://github.com/delta-exchange/delta-exchange-mcp.git", "delta-exchange-mcp"]
+args = ["delta-exchange-mcp"]
 env = { DELTA_MCP_ENV = "india_prod", DELTA_API_KEY = "your-api-key", DELTA_API_SECRET = "your-api-secret" }
 ```
 
@@ -57,11 +58,7 @@ Add to your MCP client's config file:
   "mcpServers": {
     "delta-exchange": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/delta-exchange/delta-exchange-mcp.git",
-        "delta-exchange-mcp"
-      ],
+      "args": ["delta-exchange-mcp"],
       "env": {
         "DELTA_MCP_ENV": "india_prod",
         "DELTA_API_KEY": "your-api-key",
@@ -73,6 +70,16 @@ Add to your MCP client's config file:
 ```
 
 `DELTA_API_KEY` / `DELTA_API_SECRET` are **optional** — without them, only the public market tools register.
+
+### Install from source (optional)
+
+To run an unreleased commit or your own fork instead of the PyPI release:
+
+```bash
+uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git delta-exchange-mcp
+```
+
+Append `@<branch-or-sha>` to the URL to pin to a specific commit.
 
 ## API keys (optional, for account tools)
 

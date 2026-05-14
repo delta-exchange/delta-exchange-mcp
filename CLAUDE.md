@@ -73,7 +73,7 @@ Auth spec lives at `source/includes/_authentication.md` (signing payload format,
 **Local stdio only.** Each user runs the server as a subprocess of their MCP client via `uvx`:
 
 ```bash
-uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git delta-exchange-mcp
+uvx delta-exchange-mcp
 ```
 
 There is intentionally **no HTTP transport, no Docker image, and no shared hosted endpoint**. Per-user API keys can't safely route through a shared HTTP server, and the financial-tool nature of this MCP means users should be able to read the code that runs against their account. If you find yourself adding `streamable-http`, `transport=` flags, or a `Dockerfile`, stop and discuss first.
