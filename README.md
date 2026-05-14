@@ -3,11 +3,11 @@
 ![Status: Beta](https://img.shields.io/badge/status-beta-orange)
 [![PyPI version](https://img.shields.io/pypi/v/delta-exchange-mcp)](https://pypi.org/project/delta-exchange-mcp/)
 
-Official MCP (Model Context Protocol) server for **Delta Exchange India**. Lets AI assistants — Claude Desktop, Claude Code, Cursor, Zed, Codex — query Delta Exchange market data and your own account (read-only) through standardized tools.
+Official MCP (Model Context Protocol) server for **Delta Exchange India**. Lets AI assistants (Claude Desktop, Claude Code, Cursor, Zed, Codex) query Delta Exchange market data and your own account (read-only) through standardized tools.
 
-> **Status — Beta.** Functional and used internally, but the tool surface and configuration may still change. Please [open an issue](https://github.com/delta-exchange/delta-exchange-mcp/issues) for bugs, missing tools, or rough edges — early reports directly shape what ships next.
+> **Status:** Beta. Functional and used internally, but the tool surface and configuration may still change. Please [open an issue](https://github.com/delta-exchange/delta-exchange-mcp/issues) for bugs, missing tools, or rough edges. Early reports directly shape what ships next.
 
-**What you get:** 9 public market-data tools + 12 authenticated read-only account tools (positions, orders, fills, wallet, stats, leverage, preferences, profile). **No mutations** — the server cannot place, edit, or cancel orders.
+**What you get:** 9 public market-data tools + 12 authenticated read-only account tools (positions, orders, fills, wallet, stats, leverage, preferences, profile). **No mutations.** The server cannot place, edit, or cancel orders.
 
 ---
 
@@ -21,7 +21,7 @@ Sanity-check the install:
 uvx delta-exchange-mcp --help
 ```
 
-The server runs **local stdio only**: your MCP client launches it as a subprocess, and your API keys never leave your machine. `uvx` resolves the latest published version from PyPI on each launch — pin a specific version with `uvx "delta-exchange-mcp==0.1.0"` for reproducibility.
+The server runs **local stdio only**: your MCP client launches it as a subprocess, and your API keys never leave your machine. `uvx` resolves the latest published version from PyPI on each launch. To pin a specific version, use `uvx "delta-exchange-mcp==0.1.0"`.
 
 ## Install in your MCP client
 
@@ -69,7 +69,7 @@ Add to your MCP client's config file:
 }
 ```
 
-`DELTA_API_KEY` / `DELTA_API_SECRET` are **optional** — without them, only the public market tools register.
+`DELTA_API_KEY` / `DELTA_API_SECRET` are **optional**: without them, only the public market tools register.
 
 ### Install from source (optional)
 
@@ -84,7 +84,7 @@ Append `@<branch-or-sha>` to the URL to pin to a specific commit.
 ## API keys (optional, for account tools)
 
 1. Create a key at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
-2. Both `api_key` and `api_secret` are shown **once at creation** — save the secret immediately; it can't be re-derived.
+2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
 3. **Read Data** permission is enough. Trading permission is not required and not used.
 4. Recommended: whitelist your IP on the key. Delta blocks non-whitelisted IPs and surfaces your current IP in the error message if it fires.
 5. **Match the environment**: prod keys with `DELTA_MCP_ENV=india_prod`, demo keys with `DELTA_MCP_ENV=india_testnet`. Mixing them returns `InvalidApiKey`.
@@ -94,7 +94,7 @@ Append `@<branch-or-sha>` to the URL to pin to a specific commit.
 | Var | Default | Purpose |
 |---|---|---|
 | `DELTA_MCP_ENV` | `india_prod` | `india_prod` or `india_testnet`. |
-| `DELTA_API_KEY` | _(unset)_ | API key. Optional — when set with `DELTA_API_SECRET`, account tools register. |
+| `DELTA_API_KEY` | _(unset)_ | API key. Optional; when set with `DELTA_API_SECRET`, account tools register. |
 | `DELTA_API_SECRET` | _(unset)_ | API secret matching `DELTA_API_KEY`. |
 
 ## Tools
@@ -132,13 +132,13 @@ Once connected, you can ask things like:
 - "List my fills from the last 24 hours grouped by symbol."
 - "How much USDT do I have free vs blocked in margin?"
 
-The assistant picks the right tool based on the question — you don't need to name the tool.
+The assistant picks the right tool based on the question. You don't need to name the tool.
 
 ## Development
 
 ```bash
 uv sync                       # install deps
-uv run pytest                 # run tests (no network — respx-mocked)
+uv run pytest                 # run tests (no network, respx-mocked)
 uv run ruff check src tests   # lint
 uv run delta-exchange-mcp     # run server (stdio)
 ```
@@ -158,6 +158,8 @@ DELTA_API_KEY=... DELTA_API_SECRET=... \
 # web UI
 bash scripts/inspect.sh        # → http://localhost:6274
 ```
+
+Maintainers: see [`RELEASING.md`](RELEASING.md) for the release procedure.
 
 ## Roadmap
 
@@ -180,5 +182,5 @@ Please redact `api_key` / `api_secret` from any logs or screenshots before attac
 ## Safety
 
 - **No mutations.** Every tool is GET. The server cannot place, edit, or cancel orders.
-- **Local stdio only.** Per-user keys never leave your machine — no shared hosted endpoint.
+- **Local stdio only.** Per-user keys never leave your machine; no shared hosted endpoint.
 - **Read the code.** It's a financial-tool MCP; treat it like one.
