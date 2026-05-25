@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 import pytest
 import respx
@@ -62,6 +64,38 @@ async def test_none_params_are_stripped_before_send(client: DeltaClient):
     assert "contract_types" not in sent
     assert "states=live" in sent
     assert "page_size=3" in sent
+
+
+async def _call_market_tool(client: DeltaClient, name: str, **kwargs: Any) -> Any:
+    from mcp.server.fastmcp import FastMCP
+
+    from delta_exchange_mcp.tools import market
+
+    mcp = FastMCP("test")
+    market.register(mcp, client)
+    return await mcp.call_tool(name, kwargs)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_settlement_prices_filters_states_expired(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/products").mock(
+        return_value=httpx.Response(
+            200, json={"success": True, "result": [], "meta": {"after": None}}
+        )
+    )
+    await _call_market_tool(
+        client,
+        "get_settlement_prices",
+        contract_types=["call_options", "put_options"],
+        page_size=50,
+        after="cur",
+    )
+    url = str(route.calls[0].request.url)
+    assert "states=expired" in url
+    assert "contract_types=call_options%2Cput_options" in url
+    assert "page_size=50" in url
+    assert "after=cur" in url
 
 
 @pytest.mark.asyncio

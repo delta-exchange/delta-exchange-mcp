@@ -103,6 +103,35 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         )
 
     @mcp.tool()
+    async def get_settlement_prices(
+        contract_types: list[str] | None = Field(
+            default=None,
+            description="Filter expired products by contract type (e.g. call_options, put_options, futures).",
+        ),
+        page_size: int = Field(default=100, ge=1, le=500),
+        after: str | None = Field(default=None, description="Cursor from previous response's meta.after."),
+    ) -> dict[str, Any]:
+        """Historical settlement prices for expired/settled derivatives.
+
+        Use for post-expiry P&L reconciliation, backtesting against realized
+        settlements, or trade journaling. Each product object in the response carries
+        the settlement details (settlement_time, settlement_price) alongside the
+        product metadata. Returns paginated result + meta cursors.
+
+        Under the hood this is `list_products(states=["expired"])` — Delta exposes
+        settlement data through the products endpoint rather than a dedicated path.
+        """
+        return await client.get(
+            "/products",
+            params={
+                "contract_types": _csv(contract_types),
+                "states": "expired",
+                "page_size": page_size,
+                "after": after,
+            },
+        )
+
+    @mcp.tool()
     async def get_options_chain(
         underlying: str = Field(description="Underlying asset symbol, e.g. BTC or ETH."),
         expiry_date: str = Field(description="Expiry date in DD-MM-YYYY format (note: different from /products)."),

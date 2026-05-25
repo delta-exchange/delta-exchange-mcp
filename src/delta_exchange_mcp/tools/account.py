@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -20,6 +21,23 @@ def _csv_ints(values: list[int] | None) -> str | None:
     if not values:
         return None
     return ",".join(str(v) for v in values)
+
+
+def _safe_export_path(output_path: str) -> Path:
+    """Resolve `output_path` and reject anything outside cwd or $HOME.
+
+    Guards against path-traversal and absolute writes to unexpected locations,
+    since this tool is the only one that writes to the user's disk.
+    """
+    raw = Path(output_path).expanduser()
+    resolved = (Path.cwd() / raw).resolve() if not raw.is_absolute() else raw.resolve()
+    cwd = Path.cwd().resolve()
+    home = Path.home().resolve()
+    if not (resolved.is_relative_to(cwd) or resolved.is_relative_to(home)):
+        raise ValueError(
+            f"output_path must be inside cwd ({cwd}) or home ({home}); got {resolved}"
+        )
+    return resolved
 
 
 def register(mcp: FastMCP, client: DeltaClient) -> None:
@@ -196,3 +214,52 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     async def get_profile() -> dict[str, Any]:
         """User profile."""
         return await client.get("/profile", auth=True)
+
+    @mcp.tool()
+    async def bulk_fills_export(
+        output_path: str = Field(
+            description=(
+                "Where to write the CSV. Must be inside the current working directory or "
+                "the user's home directory; ~ is expanded."
+            )
+        ),
+        start_time_us: int | None = Field(
+            default=None, description="Window start in microseconds epoch."
+        ),
+        end_time_us: int | None = Field(
+            default=None, description="Window end in microseconds epoch."
+        ),
+        product_ids: list[int] | None = None,
+        contract_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Bulk-export your fills to a CSV file on disk.
+
+        Use this for full-history analysis, tax reports, or backtesting against your
+        own trade record — anything where the paginated `get_fills` would require
+        dozens of round-trips. Calls `/fills/history/download/csv` and writes the
+        raw CSV to `output_path`. Returns `{path, row_count, size_bytes}`.
+
+        The output path is restricted to the current working directory or the user's
+        home directory to keep the write scope predictable.
+        """
+        resolved = _safe_export_path(output_path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        data = await client.get_raw(
+            "/fills/history/download/csv",
+            params={
+                "product_ids": _csv_ints(product_ids),
+                "contract_types": _csv(contract_types),
+                "start_time": start_time_us,
+                "end_time": end_time_us,
+            },
+            auth=True,
+        )
+        resolved.write_bytes(data)
+        # Row count = newline-delimited rows minus header. Be lenient if the response
+        # is empty or missing a trailing newline.
+        row_count = max(0, data.count(b"\n") - 1) if data else 0
+        return {
+            "path": str(resolved),
+            "row_count": row_count,
+            "size_bytes": len(data),
+        }

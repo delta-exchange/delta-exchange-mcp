@@ -47,6 +47,14 @@ class DeltaClient:
     async def get(self, path: str, params: dict[str, Any] | None = None, *, auth: bool = False) -> Any:
         return await self._request("GET", path, params=params, auth=auth)
 
+    async def get_raw(self, path: str, params: dict[str, Any] | None = None, *, auth: bool = False) -> bytes:
+        """Like get(), but returns the response body bytes without JSON unwrap.
+
+        Used for binary/CSV endpoints (e.g. /fills/history/download/csv). JSON error
+        envelopes are still inspected — a {success: false, ...} body raises DeltaApiError.
+        """
+        return await self._request("GET", path, params=params, auth=auth, raw=True)
+
     async def _request(
         self,
         method: str,
@@ -55,6 +63,7 @@ class DeltaClient:
         params: dict[str, Any] | None = None,
         json_body: Any = None,
         auth: bool = False,
+        raw: bool = False,
     ) -> Any:
         headers: dict[str, str] = {}
         body_str = ""  # TODO when POST lands in v2
@@ -99,10 +108,31 @@ class DeltaClient:
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
 
-            return self._unwrap(resp)
+            return self._unwrap_raw(resp) if raw else self._unwrap(resp)
 
         assert last_error is not None
         raise last_error
+
+    @staticmethod
+    def _unwrap_raw(resp: httpx.Response) -> bytes:
+        # Even raw endpoints may return a JSON error envelope on failure — inspect that
+        # path before handing the caller a bytes blob.
+        ctype = resp.headers.get("content-type", "")
+        if "json" in ctype.lower():
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and data.get("success") is False:
+                err = data.get("error") or {}
+                raise DeltaApiError(
+                    code=err.get("code", "unknown"),
+                    context=err.get("context"),
+                    status=resp.status_code,
+                )
+        if resp.status_code >= 400:
+            raise DeltaApiError("http_error", context=resp.text[:500], status=resp.status_code)
+        return resp.content
 
     @staticmethod
     def _unwrap(resp: httpx.Response) -> Any:
