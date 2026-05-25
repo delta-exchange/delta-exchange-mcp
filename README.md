@@ -25,6 +25,8 @@ The server runs **local stdio only**: your MCP client launches it as a subproces
 
 ## Install in your MCP client
 
+`DELTA_API_KEY` / `DELTA_API_SECRET` are **optional** in every snippet below — drop them for public-data-only mode. Set `DELTA_MCP_ENV=india_testnet` for testnet.
+
 ### Claude Code
 
 ```bash
@@ -36,27 +38,16 @@ claude mcp add delta-exchange-mcp \
   -- uvx delta-exchange-mcp
 ```
 
-`--scope user` makes the server available across all projects. Drop the API-key envs for market-only mode. Verify with `claude mcp list`.
+`--scope user` makes the server available across all projects. Verify with `claude mcp list`.
 
-### Codex
+### Cursor
 
-Add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.delta-exchange-mcp]
-command = "uvx"
-args = ["delta-exchange-mcp"]
-env = { DELTA_MCP_ENV = "india_prod", DELTA_API_KEY = "your-api-key", DELTA_API_SECRET = "your-api-secret" }
-```
-
-### Claude Desktop / Zed / Windsurf / other clients
-
-Add to your MCP client's config file:
+Global: `~/.cursor/mcp.json` (or `%USERPROFILE%\.cursor\mcp.json` on Windows). Project-scoped alternative: `.cursor/mcp.json` in the repo root.
 
 ```json
 {
   "mcpServers": {
-    "delta-exchange": {
+    "delta-exchange-mcp": {
       "command": "uvx",
       "args": ["delta-exchange-mcp"],
       "env": {
@@ -69,17 +60,180 @@ Add to your MCP client's config file:
 }
 ```
 
-`DELTA_API_KEY` / `DELTA_API_SECRET` are **optional**: without them, only the public market tools register.
+Restart Cursor or open **Settings → Tools & MCP** to refresh.
 
-### Install from source (optional)
+### Codex
 
-To run an unreleased commit or your own fork instead of the PyPI release:
+Add to `~/.codex/config.toml`:
 
-```bash
-uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git delta-exchange-mcp
+```toml
+[mcp_servers.delta-exchange-mcp]
+command = "uvx"
+args = ["delta-exchange-mcp"]
+env = { DELTA_MCP_ENV = "india_prod", DELTA_API_KEY = "your-api-key", DELTA_API_SECRET = "your-api-secret" }
 ```
 
-Append `@<branch-or-sha>` to the URL to pin to a specific commit.
+### Windsurf
+
+Add to `~/.codeium/windsurf/mcp_config.json` (macOS / Linux) or `%USERPROFILE%\.codeium\windsurf\mcp_config.json` (Windows). UI route: **Settings → Cascade → Plugins (MCP servers) → Manage Plugins → View raw config**.
+
+```json
+{
+  "mcpServers": {
+    "delta-exchange-mcp": {
+      "command": "uvx",
+      "args": ["delta-exchange-mcp"],
+      "env": {
+        "DELTA_MCP_ENV": "india_prod",
+        "DELTA_API_KEY": "your-api-key",
+        "DELTA_API_SECRET": "your-api-secret"
+      }
+    }
+  }
+}
+```
+
+### Zed
+
+Add to `~/.config/zed/settings.json` (user-level) or `.zed/settings.json` (project-level). Zed uses the top-level key `context_servers` and nests `command` as an object — note the shape difference from other clients:
+
+```json
+{
+  "context_servers": {
+    "delta-exchange-mcp": {
+      "command": {
+        "path": "uvx",
+        "args": ["delta-exchange-mcp"],
+        "env": {
+          "DELTA_MCP_ENV": "india_prod",
+          "DELTA_API_KEY": "your-api-key",
+          "DELTA_API_SECRET": "your-api-secret"
+        }
+      }
+    }
+  }
+}
+```
+
+### VS Code (GitHub Copilot)
+
+Add to `.vscode/mcp.json` in your workspace. The top-level key is `servers` and each entry needs an explicit `"type": "stdio"`:
+
+```json
+{
+  "servers": {
+    "delta-exchange-mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["delta-exchange-mcp"],
+      "env": {
+        "DELTA_MCP_ENV": "india_prod",
+        "DELTA_API_KEY": "your-api-key",
+        "DELTA_API_SECRET": "your-api-secret"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Open **Settings → Developer → Edit config**, or edit directly at:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "delta-exchange-mcp": {
+      "command": "uvx",
+      "args": ["delta-exchange-mcp"],
+      "env": {
+        "DELTA_MCP_ENV": "india_prod",
+        "DELTA_API_KEY": "your-api-key",
+        "DELTA_API_SECRET": "your-api-secret"
+      }
+    }
+  }
+}
+```
+
+Quit and relaunch Claude Desktop for changes to take effect.
+
+## Running a dev / unreleased branch
+
+To test an unreleased commit, branch, or fork before it's on PyPI, swap `uvx delta-exchange-mcp` for `uvx --from git+<repo-url>@<ref> delta-exchange-mcp`. `<ref>` can be a branch, tag, or commit SHA.
+
+CLI sanity check:
+
+```bash
+uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git@develop delta-exchange-mcp --help
+```
+
+`uv` caches the git resolution, so to pick up new commits on the same branch:
+
+```bash
+uvx --refresh --from git+https://github.com/delta-exchange/delta-exchange-mcp.git@develop delta-exchange-mcp --help
+```
+
+### In your MCP client config
+
+Replace `args` in any snippet above with the `git+` form. Three flavours:
+
+**Claude Code:**
+
+```bash
+claude mcp add delta-exchange-mcp-dev \
+  --scope user \
+  --env DELTA_MCP_ENV=india_prod \
+  -- uvx --from git+https://github.com/delta-exchange/delta-exchange-mcp.git@develop delta-exchange-mcp
+```
+
+**Cursor / Windsurf / Claude Desktop (any `mcpServers` JSON):**
+
+```json
+{
+  "mcpServers": {
+    "delta-exchange-mcp-dev": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/delta-exchange/delta-exchange-mcp.git@develop",
+        "delta-exchange-mcp"
+      ],
+      "env": {
+        "DELTA_MCP_ENV": "india_prod"
+      }
+    }
+  }
+}
+```
+
+**Zed (nested `command` object):**
+
+```json
+{
+  "context_servers": {
+    "delta-exchange-mcp-dev": {
+      "command": {
+        "path": "uvx",
+        "args": [
+          "--from",
+          "git+https://github.com/delta-exchange/delta-exchange-mcp.git@develop",
+          "delta-exchange-mcp"
+        ],
+        "env": {
+          "DELTA_MCP_ENV": "india_prod"
+        }
+      }
+    }
+  }
+}
+```
+
+Register the dev server under a separate name (e.g. `delta-exchange-mcp-dev`) so it doesn't collide with the PyPI install. The git+URL form rebuilds from source on each launch and is meant for testing unreleased changes — stick with `uvx delta-exchange-mcp` for everyday use.
 
 ## API keys (optional, for account tools)
 
