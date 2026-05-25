@@ -1,9 +1,13 @@
+from typing import Any
+
 import httpx
 import pytest
 import respx
+from mcp.server.fastmcp import FastMCP
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.tools import market
 
 
 @pytest.fixture
@@ -62,6 +66,82 @@ async def test_none_params_are_stripped_before_send(client: DeltaClient):
     assert "contract_types" not in sent
     assert "states=live" in sent
     assert "page_size=3" in sent
+
+
+async def _call_market_tool(client: DeltaClient, name: str, **kwargs: Any) -> Any:
+    mcp = FastMCP("test")
+    market.register(mcp, client)
+    return await mcp.call_tool(name, kwargs)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_indices_hits_indices_endpoint(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/indices").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
+    )
+    await _call_market_tool(client, "get_indices")
+    assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_funding_history_prefixes_symbol(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/history/candles").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
+    )
+    await _call_market_tool(
+        client, "get_funding_history", symbol="BTCUSD", resolution="1h", start=1, end=2
+    )
+    url = str(route.calls[0].request.url)
+    assert "symbol=FUNDING%3ABTCUSD" in url
+    assert "resolution=1h" in url
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_mark_price_history_prefixes_symbol(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/history/candles").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
+    )
+    await _call_market_tool(
+        client,
+        "get_mark_price_history",
+        symbol="C-BTC-66400-010824",
+        resolution="5m",
+        start=1,
+        end=2,
+    )
+    url = str(route.calls[0].request.url)
+    assert "symbol=MARK%3AC-BTC-66400-010824" in url
+    assert "resolution=5m" in url
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_oi_history_prefixes_symbol(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/history/candles").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
+    )
+    await _call_market_tool(
+        client, "get_oi_history", symbol="ETHUSD", resolution="1h", start=1, end=2
+    )
+    url = str(route.calls[0].request.url)
+    assert "symbol=OI%3AETHUSD" in url
+
+
+def test_new_history_tools_are_registered(client: DeltaClient):
+    import asyncio
+
+    mcp = FastMCP("test")
+    market.register(mcp, client)
+    names = {t.name for t in asyncio.run(mcp.list_tools())}
+    assert {
+        "get_indices",
+        "get_funding_history",
+        "get_mark_price_history",
+        "get_oi_history",
+    }.issubset(names)
 
 
 @pytest.mark.asyncio
