@@ -22,6 +22,66 @@ def _csv_ints(values: list[int] | None) -> str | None:
     return ",".join(str(v) for v in values)
 
 
+_OPTION_CONTRACT_TYPES = {"call_options", "put_options"}
+
+
+def _is_option(pos: dict[str, Any]) -> bool:
+    ctype = pos.get("contract_type")
+    if not ctype and isinstance(pos.get("product"), dict):
+        ctype = pos["product"].get("contract_type")
+    if ctype in _OPTION_CONTRACT_TYPES:
+        return True
+    symbol = pos.get("product_symbol") or ""
+    return isinstance(symbol, str) and (symbol.startswith("C-") or symbol.startswith("P-"))
+
+
+def _lookup_contract_value(pos: dict[str, Any]) -> float | None:
+    raw = pos.get("contract_value")
+    if raw is None and isinstance(pos.get("product"), dict):
+        raw = pos["product"].get("contract_value")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _patch_short_option_pnl(result: Any) -> Any:
+    """Server returns unsigned `unrealized_pnl` (premium value) for short options.
+    Recompute the signed P&L for those positions; leave others untouched.
+
+    Reason: upstream bug — for short option positions the API returns
+    mark_price * |size| * contract_value (premium value), ignoring the position
+    direction. Futures and long options are unaffected. See GH #9.
+    """
+    if not isinstance(result, dict):
+        return result
+    positions = result.get("result")
+    if not isinstance(positions, list):
+        return result
+    for pos in positions:
+        if not isinstance(pos, dict) or not _is_option(pos):
+            continue
+        size_raw = pos.get("size")
+        try:
+            size = int(size_raw)
+        except (TypeError, ValueError):
+            continue
+        if size >= 0:
+            continue
+        try:
+            entry = float(pos["entry_price"])
+            mark = float(pos["mark_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        contract_value = _lookup_contract_value(pos)
+        if contract_value is None:
+            continue
+        pos["unrealized_pnl"] = str((mark - entry) * size * contract_value)
+    return result
+
+
 def register(mcp: FastMCP, client: DeltaClient) -> None:
     @mcp.tool()
     async def get_positions(
@@ -48,8 +108,15 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             description="Subset of: perpetual_futures, call_options, put_options.",
         ),
     ) -> dict[str, Any]:
-        """All open margined positions, optionally filtered."""
-        return await client.get(
+        """All open margined positions, optionally filtered.
+
+        Note on `unrealized_pnl` for short options: the upstream API returns
+        the absolute premium value (unsigned) rather than the signed mark-to-market
+        P&L. This tool patches the field client-side using
+        (mark_price - entry_price) * size * contract_value, with `size` signed.
+        Long options and futures pass through unchanged. See GH #9.
+        """
+        result = await client.get(
             "/positions/margined",
             params={
                 "product_ids": _csv_ints(product_ids),
@@ -57,6 +124,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             },
             auth=True,
         )
+        return _patch_short_option_pnl(result)
 
     @mcp.tool()
     async def get_wallet_balances() -> dict[str, Any]:
