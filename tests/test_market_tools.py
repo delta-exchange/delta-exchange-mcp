@@ -1,5 +1,3 @@
-from typing import Any
-
 import httpx
 import pytest
 import respx
@@ -66,7 +64,7 @@ async def test_none_params_are_stripped_before_send(client: DeltaClient):
     assert "page_size=3" in sent
 
 
-async def _call_market_tool(client: DeltaClient, name: str, **kwargs: Any) -> Any:
+async def _call_market_tool(client, name, **kwargs):
     from mcp.server.fastmcp import FastMCP
 
     from delta_exchange_mcp.tools import market

@@ -217,26 +217,22 @@ async def test_get_profile():
 # --- GH #6: bulk_fills_export ----------------------------------------------
 
 
-def test_safe_export_path_accepts_cwd_relative(tmp_path: Any, monkeypatch: Any):
+def test_safe_export_path_accepts_cwd_relative(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    resolved = _safe_export_path("fills.csv")
-    assert resolved == (tmp_path / "fills.csv").resolve()
+    assert _safe_export_path("fills.csv") == (tmp_path / "fills.csv").resolve()
 
 
 def test_safe_export_path_accepts_home_tilde():
-    resolved = _safe_export_path("~/fills.csv")
-    assert resolved == (Path.home() / "fills.csv").resolve()
+    assert _safe_export_path("~/fills.csv") == (Path.home() / "fills.csv").resolve()
 
 
-def test_safe_export_path_rejects_outside_scope(tmp_path: Any, monkeypatch: Any):
+def test_safe_export_path_rejects_outside_scope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError, match="must be inside"):
         _safe_export_path("/etc/passwd")
 
 
-def test_safe_export_path_rejects_dotdot_traversal(tmp_path: Any, monkeypatch: Any):
-    # tmp_path lives under /private/var/... on macOS, neither inside cwd (set below)
-    # nor under $HOME, so a `..` escape from cwd should be rejected.
+def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     monkeypatch.chdir(sandbox)
@@ -246,7 +242,7 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path: Any, monkeypatch: A
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_bulk_fills_export_writes_csv(tmp_path: Any, monkeypatch: Any):
+async def test_bulk_fills_export_writes_csv(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     csv_body = b"id,size,price\n1,10,77000\n2,-5,77100\n"
     respx.get(f"{INDIA_TESTNET_REST}/fills/history/download/csv").mock(
@@ -262,16 +258,15 @@ async def test_bulk_fills_export_writes_csv(tmp_path: Any, monkeypatch: Any):
         product_ids=[1, 2],
     )
     structured = result[1] if isinstance(result, tuple) else result
-    out = (tmp_path / "fills.csv").read_bytes()
-    assert out == csv_body
-    assert structured["row_count"] == 2  # 3 newlines - 1 header
+    assert (tmp_path / "fills.csv").read_bytes() == csv_body
+    assert structured["row_count"] == 2
     assert structured["size_bytes"] == len(csv_body)
     assert structured["path"].endswith("fills.csv")
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_bulk_fills_export_passes_query_params(tmp_path: Any, monkeypatch: Any):
+async def test_bulk_fills_export_passes_query_params(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     route = respx.get(f"{INDIA_TESTNET_REST}/fills/history/download/csv").mock(
         return_value=httpx.Response(200, content=b"a,b\n", headers={"content-type": "text/csv"})
@@ -293,9 +288,8 @@ async def test_bulk_fills_export_passes_query_params(tmp_path: Any, monkeypatch:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_bulk_fills_export_rejects_unsafe_path(tmp_path: Any, monkeypatch: Any):
+async def test_bulk_fills_export_rejects_unsafe_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # Should not even reach the network — raise before issuing the request.
     route = respx.get(f"{INDIA_TESTNET_REST}/fills/history/download/csv").mock(
         return_value=httpx.Response(200, content=b"")
     )

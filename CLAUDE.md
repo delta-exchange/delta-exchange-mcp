@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 FastMCP server (stdio only) that wraps Delta Exchange India's REST API as MCP tools — public market data unconditionally, plus authenticated read-only account tools when `DELTA_API_KEY`/`DELTA_API_SECRET` are set.
 
+## Style
+
+Don't add typing slop. In particular:
+
+- Don't annotate pytest fixtures (`tmp_path`, `monkeypatch`, etc.) — pytest discovers them by name, the annotation adds nothing.
+- Don't write `**kwargs: Any` / `-> Any` on internal test helpers. If the only honest type is `Any`, leave it off.
+- Use `Any` only when it carries real information: a public boundary that genuinely accepts arbitrary JSON, a return type that is genuinely heterogeneous. Otherwise prefer the real type or no annotation at all.
+- Don't add `from typing import Any` just to satisfy a redundant annotation.
+
 ## Commands
 
 ```bash
