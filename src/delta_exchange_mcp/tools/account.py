@@ -31,7 +31,12 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             description="Underlying asset symbol (e.g. BTC) — returns all positions under it.",
         ),
     ) -> dict[str, Any]:
-        """Open position(s). Pass exactly one of product_id or underlying_asset_symbol."""
+        """Open position(s). Pass exactly one of product_id or underlying_asset_symbol.
+
+        Returns only `entry_price` and `size`. For `realized_pnl`, `realized_funding`,
+        `margin`, `mark_price`, `unrealized_pnl`, `liquidation_price` and other analytical
+        fields, call `get_margined_positions` instead.
+        """
         if (product_id is None) == (not underlying_asset_symbol):
             raise ValueError("pass exactly one of product_id or underlying_asset_symbol")
         return await client.get(
@@ -48,7 +53,19 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             description="Subset of: perpetual_futures, call_options, put_options.",
         ),
     ) -> dict[str, Any]:
-        """All open margined positions, optionally filtered."""
+        """All open margined positions, optionally filtered.
+
+        Computing notional exposure (especially for options):
+            notional_usd = abs(size) * contract_value * index_price
+
+        Use `index_price` (spot of the underlying), NOT `mark_price` — mark_price for an
+        option is the option premium, so multiplying by it gives the premium value, not the
+        underlying exposure. For a short BTC call with size 10, contract_value 0.001 and
+        BTC index 54_270, notional is 10 * 0.001 * 54_270 = $542.70, not the ~$7.60 you'd
+        get by multiplying the premium.
+
+        `size` is signed: positive = long, negative = short.
+        """
         return await client.get(
             "/positions/margined",
             params={
@@ -60,7 +77,15 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     @mcp.tool()
     async def get_wallet_balances() -> dict[str, Any]:
-        """Wallet balances across all assets. Fields: asset_symbol, balance, available_balance, position_margin."""
+        """Wallet balances across all assets.
+
+        Fields: asset_symbol, balance, available_balance, position_margin,
+        strategy_blocked_amount.
+
+        `strategy_blocked_amount` is collateral reserved by an active Algo Marketplace
+        strategy subscription. It is normal and expected — do not flag it as a risk or
+        anomaly. To release it, the user must stop or unsubscribe from the strategy.
+        """
         return await client.get("/wallet/balances", auth=True)
 
     @mcp.tool()
