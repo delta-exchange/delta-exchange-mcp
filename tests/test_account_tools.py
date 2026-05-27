@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.tools import account
-from delta_exchange_mcp.tools.account import _safe_export_path
+from delta_exchange_mcp.tools.account import _patch_short_option_pnl, _safe_export_path
 
 
 def _client() -> DeltaClient:
@@ -240,6 +240,99 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
         _safe_export_path("../../../../etc/passwd")
 
 
+# --- GH #9: short-option unrealized_pnl sign fix ---------------------------
+
+
+def _short_call_buggy() -> dict[str, Any]:
+    # Matches the example response in GH #9 (C-BTC-78500-050626 short 10).
+    return {
+        "product_symbol": "C-BTC-78500-050626",
+        "contract_type": "call_options",
+        "size": -10,
+        "entry_price": "1529",
+        "mark_price": "1533.26",
+        "contract_value": "0.001",
+        "unrealized_pnl": "15.41",
+    }
+
+
+def _short_put_buggy() -> dict[str, Any]:
+    return {
+        "product_symbol": "P-BTC-70000-050626",
+        "contract_type": "put_options",
+        "size": -5,
+        "entry_price": "800",
+        "mark_price": "820",
+        "contract_value": "0.001",
+        "unrealized_pnl": "4.10",
+    }
+
+
+def _long_call_pristine() -> dict[str, Any]:
+    return {
+        "product_symbol": "C-BTC-78500-050626",
+        "contract_type": "call_options",
+        "size": 5,
+        "entry_price": "1529",
+        "mark_price": "1533.26",
+        "contract_value": "0.001",
+        "unrealized_pnl": "0.02",  # already signed for longs
+    }
+
+
+def _short_future_pristine() -> dict[str, Any]:
+    return {
+        "product_symbol": "BTCUSD",
+        "contract_type": "perpetual_futures",
+        "size": -10,
+        "entry_price": "77444",
+        "mark_price": "77432.79",
+        "contract_value": "0.001",
+        "unrealized_pnl": "0.11",  # futures already correct upstream
+    }
+
+
+def test_patch_short_call_overwrites_pnl():
+    out = _patch_short_option_pnl({"result": [_short_call_buggy()]})
+    pnl = float(out["result"][0]["unrealized_pnl"])
+    # (1533.26 - 1529) * -10 * 0.001 = -0.0426
+    assert pnl == pytest.approx(-0.0426, abs=1e-6)
+
+
+def test_patch_short_put_overwrites_pnl():
+    out = _patch_short_option_pnl({"result": [_short_put_buggy()]})
+    pnl = float(out["result"][0]["unrealized_pnl"])
+    # (820 - 800) * -5 * 0.001 = -0.1
+    assert pnl == pytest.approx(-0.1, abs=1e-6)
+
+
+def test_patch_leaves_long_option_untouched():
+    out = _patch_short_option_pnl({"result": [_long_call_pristine()]})
+    assert out["result"][0]["unrealized_pnl"] == "0.02"
+
+
+def test_patch_leaves_short_future_untouched():
+    out = _patch_short_option_pnl({"result": [_short_future_pristine()]})
+    assert out["result"][0]["unrealized_pnl"] == "0.11"
+
+
+def test_patch_skips_when_contract_value_missing():
+    pos = _short_call_buggy()
+    del pos["contract_value"]
+    out = _patch_short_option_pnl({"result": [pos]})
+    # Untouched because we can't compute signed pnl without contract_value.
+    assert out["result"][0]["unrealized_pnl"] == "15.41"
+
+
+def test_patch_detects_option_via_product_symbol_prefix():
+    # contract_type missing but product_symbol starts with C- — should still patch.
+    pos = _short_call_buggy()
+    del pos["contract_type"]
+    out = _patch_short_option_pnl({"result": [pos]})
+    pnl = float(out["result"][0]["unrealized_pnl"])
+    assert pnl == pytest.approx(-0.0426, abs=1e-6)
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_bulk_fills_export_writes_csv(tmp_path, monkeypatch):
@@ -296,3 +389,27 @@ async def test_bulk_fills_export_rejects_unsafe_path(tmp_path, monkeypatch):
     with pytest.raises(Exception):
         await _call_tool("bulk_fills_export", output_path="/etc/passwd")
     assert not route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_margined_positions_patches_short_option_pnl():
+    """End-to-end: tool call returns patched response."""
+    respx.get(f"{INDIA_TESTNET_REST}/positions/margined").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": [_short_call_buggy(), _short_future_pristine()],
+            },
+        )
+    )
+    result = await _call_tool("get_margined_positions")
+    # FastMCP returns (content, structured) — the structured dict is what we want.
+    structured = result[1] if isinstance(result, tuple) else result
+    positions = structured["result"] if isinstance(structured, dict) else None
+    assert positions is not None, f"unexpected tool result shape: {result!r}"
+    short_call = next(p for p in positions if p["product_symbol"].startswith("C-"))
+    short_future = next(p for p in positions if p["product_symbol"] == "BTCUSD")
+    assert float(short_call["unrealized_pnl"]) == pytest.approx(-0.0426, abs=1e-6)
+    assert short_future["unrealized_pnl"] == "0.11"

@@ -40,6 +40,66 @@ def _safe_export_path(output_path: str) -> Path:
     return resolved
 
 
+_OPTION_CONTRACT_TYPES = {"call_options", "put_options"}
+
+
+def _is_option(pos: dict[str, Any]) -> bool:
+    ctype = pos.get("contract_type")
+    if not ctype and isinstance(pos.get("product"), dict):
+        ctype = pos["product"].get("contract_type")
+    if ctype in _OPTION_CONTRACT_TYPES:
+        return True
+    symbol = pos.get("product_symbol") or ""
+    return isinstance(symbol, str) and (symbol.startswith("C-") or symbol.startswith("P-"))
+
+
+def _lookup_contract_value(pos: dict[str, Any]) -> float | None:
+    raw = pos.get("contract_value")
+    if raw is None and isinstance(pos.get("product"), dict):
+        raw = pos["product"].get("contract_value")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _patch_short_option_pnl(result: Any) -> Any:
+    """Server returns unsigned `unrealized_pnl` (premium value) for short options.
+    Recompute the signed P&L for those positions; leave others untouched.
+
+    Reason: upstream bug — for short option positions the API returns
+    mark_price * |size| * contract_value (premium value), ignoring the position
+    direction. Futures and long options are unaffected. See GH #9.
+    """
+    if not isinstance(result, dict):
+        return result
+    positions = result.get("result")
+    if not isinstance(positions, list):
+        return result
+    for pos in positions:
+        if not isinstance(pos, dict) or not _is_option(pos):
+            continue
+        size_raw = pos.get("size")
+        try:
+            size = int(size_raw)
+        except (TypeError, ValueError):
+            continue
+        if size >= 0:
+            continue
+        try:
+            entry = float(pos["entry_price"])
+            mark = float(pos["mark_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        contract_value = _lookup_contract_value(pos)
+        if contract_value is None:
+            continue
+        pos["unrealized_pnl"] = str((mark - entry) * size * contract_value)
+    return result
+
+
 def register(mcp: FastMCP, client: DeltaClient) -> None:
     @mcp.tool()
     async def get_positions(
@@ -49,7 +109,12 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             description="Underlying asset symbol (e.g. BTC) — returns all positions under it.",
         ),
     ) -> dict[str, Any]:
-        """Open position(s). Pass exactly one of product_id or underlying_asset_symbol."""
+        """Open position(s). Pass exactly one of product_id or underlying_asset_symbol.
+
+        Returns only `entry_price` and `size`. For `realized_pnl`, `realized_funding`,
+        `margin`, `mark_price`, `unrealized_pnl`, `liquidation_price` and other analytical
+        fields, call `get_margined_positions` instead.
+        """
         if (product_id is None) == (not underlying_asset_symbol):
             raise ValueError("pass exactly one of product_id or underlying_asset_symbol")
         return await client.get(
@@ -66,8 +131,26 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             description="Subset of: perpetual_futures, call_options, put_options.",
         ),
     ) -> dict[str, Any]:
-        """All open margined positions, optionally filtered."""
-        return await client.get(
+        """All open margined positions, optionally filtered.
+
+        Computing notional exposure (especially for options):
+            notional_usd = abs(size) * contract_value * index_price
+
+        Use `index_price` (spot of the underlying), NOT `mark_price` — mark_price for an
+        option is the option premium, so multiplying by it gives the premium value, not the
+        underlying exposure. For a short BTC call with size 10, contract_value 0.001 and
+        BTC index 54_270, notional is 10 * 0.001 * 54_270 = $542.70, not the ~$7.60 you'd
+        get by multiplying the premium.
+
+        `size` is signed: positive = long, negative = short.
+
+        Note on `unrealized_pnl` for short options: the upstream API returns
+        the absolute premium value (unsigned) rather than the signed mark-to-market
+        P&L. This tool patches the field client-side using
+        (mark_price - entry_price) * size * contract_value, with `size` signed.
+        Long options and futures pass through unchanged. See GH #9.
+        """
+        result = await client.get(
             "/positions/margined",
             params={
                 "product_ids": _csv_ints(product_ids),
@@ -75,10 +158,19 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             },
             auth=True,
         )
+        return _patch_short_option_pnl(result)
 
     @mcp.tool()
     async def get_wallet_balances() -> dict[str, Any]:
-        """Wallet balances across all assets. Fields: asset_symbol, balance, available_balance, position_margin."""
+        """Wallet balances across all assets.
+
+        Fields: asset_symbol, balance, available_balance, position_margin,
+        strategy_blocked_amount.
+
+        `strategy_blocked_amount` is collateral reserved by an active Algo Marketplace
+        strategy subscription. It is normal and expected — do not flag it as a risk or
+        anomaly. To release it, the user must stop or unsubscribe from the strategy.
+        """
         return await client.get("/wallet/balances", auth=True)
 
     @mcp.tool()
