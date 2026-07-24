@@ -118,3 +118,16 @@ There is intentionally **no HTTP transport, no Docker image, and no shared hoste
 ## Tests
 
 `respx` mocks httpx for unit tests (no live network). Live verification happens through `scripts/smoke.py` (Python-level) and `scripts/inspect.sh --cli` (MCP-protocol-level) — both hit real testnet/prod and are run manually, not in CI. When fixing a bug surfaced by live use, add a `respx` regression test (see `test_none_params_are_stripped_before_send` and `test_signing_payload_includes_v2_prefix` for the pattern).
+
+## Evals (tool-selection quality)
+
+`evals/` scores whether the tool names/descriptions/schemas lead a real LLM agent to pick the right tool with the right args — run it when renaming tools or rewriting docstrings, **never in CI** (costs Anthropic tokens):
+
+```bash
+uv sync --group evals
+uv run --group evals python -m evals.run --list
+uv run --group evals python -m evals.run --case ticker_basic --no-judge   # cheap smoke
+uv run --group evals python -m evals.run                                  # full run
+```
+
+Deterministic expect/forbid asserts in `evals/dataset.py` are the gate; DeepEval LLM-judge scores (`MCPUseMetric` etc.) are advisory. The harness (`evals/agent.py`) spawns the server over stdio, refuses `india_prod`, and **forces `dry_run=True` on every mutating call** at the `call_tool` boundary — recorded args are the model's own so asserts and judge score its intent. DeepEval 4.x has undocumented shape requirements (`MCPToolCall.result` must be a real `CallToolResult`, one assistant `Turn` per tool call, `structuredContent={"result": ...}`); those workarounds live in `evals/scoring.py`, keep all deepeval imports there.
