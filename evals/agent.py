@@ -1,14 +1,20 @@
 """MCP stdio session + Anthropic tool-use loop for the eval harness."""
 
+from __future__ import annotations
+
 import json
 import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import anthropic
+# type-only so the dry-run boundary stays importable (and testable) from the
+# plain dev environment, which doesn't install the evals group
+if TYPE_CHECKING:
+    import anthropic
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.types import CallToolResult, Tool
