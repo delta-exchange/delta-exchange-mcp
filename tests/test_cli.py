@@ -55,9 +55,9 @@ def test_help_documents_every_environment_variable_the_code_reads():
 
 
 def test_handshake_reports_our_version_not_the_sdk_version():
-    """Left unset, the wrapped server falls back to reporting the mcp SDK's version as ours."""
+    """Left unset, MCPServer reports an empty version, and 1.x reported the SDK's as ours."""
     from importlib.metadata import version
 
-    opts = build_server(_cfg())._mcp_server.create_initialization_options()
-    assert opts.server_version == PACKAGE_VERSION
-    assert opts.server_version != version("mcp")
+    server_version = build_server(_cfg()).version
+    assert server_version == PACKAGE_VERSION
+    assert server_version != version("mcp")

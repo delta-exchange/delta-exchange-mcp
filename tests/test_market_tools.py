@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -69,7 +69,7 @@ async def test_none_params_are_stripped_before_send(client: DeltaClient):
 
 
 async def _call_market_tool(client: DeltaClient, name: str, **kwargs: Any) -> Any:
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     market.register(mcp, client)
     return await mcp.call_tool(name, kwargs)
 
@@ -155,7 +155,7 @@ async def test_get_oi_history_prefixes_symbol(client: DeltaClient):
 def test_new_history_tools_are_registered(client: DeltaClient):
     import asyncio
 
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     market.register(mcp, client)
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert {

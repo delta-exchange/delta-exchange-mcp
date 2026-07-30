@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from delta_exchange_mcp.client import DeltaClient
@@ -119,7 +119,7 @@ def _patch_short_option_pnl(result: Any) -> Any:
     return result
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
+def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mcp.tool()
     async def get_positions(
         product_id: int | None = Field(default=None, description="Single product id."),

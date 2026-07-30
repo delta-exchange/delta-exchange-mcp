@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp import config as config_mod
@@ -30,12 +30,9 @@ client rather than by hand.
 """
 
 
-def build_server(cfg: config_mod.Config | None = None) -> FastMCP:
+def build_server(cfg: config_mod.Config | None = None) -> MCPServer:
     cfg = cfg or config_mod.load()
-    mcp = FastMCP("delta-exchange")
-    # FastMCP has no version argument, and the server it wraps reports the mcp SDK's own
-    # version when this is left unset — so clients would see the SDK version as ours.
-    mcp._mcp_server.version = PACKAGE_VERSION
+    mcp = MCPServer("delta-exchange", version=PACKAGE_VERSION)
     client = DeltaClient(cfg)
 
     log_path = debug_log.configure(cfg)

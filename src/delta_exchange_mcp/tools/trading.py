@@ -12,7 +12,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from delta_exchange_mcp.audit_log import AuditLog
@@ -129,7 +129,7 @@ def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
     return normalized, normalized != price
 
 
-def register(mcp: FastMCP, client: DeltaClient, audit: AuditLog | None = None) -> None:
+def register(mcp: MCPServer, client: DeltaClient, audit: AuditLog | None = None) -> None:
     _uid_cache: dict[str, int] = {}
     # tick_size keyed by both product id (int) and symbol (str); filled lazily.
     _tick_cache: dict[int | str, Decimal] = {}
