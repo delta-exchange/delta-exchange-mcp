@@ -59,7 +59,7 @@ def test_help_documents_every_environment_variable_the_code_reads():
 
 
 def test_handshake_reports_our_version_not_the_sdk_version():
-    """Left unset, MCPServer reports an empty version, and 1.x reported the SDK's as ours."""
+    """A client has to be told this package's version, not the SDK's and not an empty one."""
     from importlib.metadata import version
 
     server_version = build_server(_cfg()).version

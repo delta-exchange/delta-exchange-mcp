@@ -39,8 +39,8 @@ class Session:
 
     async def call(self, name, **arguments):
         result = await self.client.call_tool(name, arguments)
-        if result.structuredContent is not None:
-            return result.structuredContent
+        if result.structured_content is not None:
+            return result.structured_content
         return json.loads(result.content[0].text)
 
     async def raw_call(self, name, **arguments):
@@ -71,7 +71,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
             server_read, server_write = server_streams
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
-                    lambda: app._mcp_server.run(
+                    lambda: app._lowlevel_server.run(
                         server_read,
                         server_write,
                         server.initialization_options(app),
@@ -82,7 +82,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
 
                 async def collect(message):
                     if isinstance(message, types.ServerNotification):
-                        box["session"].notifications.append(message.root)
+                        box["session"].notifications.append(message)
 
                 info = (
                     types.Implementation(name=client_name, version="1")
@@ -135,7 +135,7 @@ async def test_the_server_declares_that_its_tool_list_can_change():
     to say so.
     """
     async with connected() as session:
-        assert session.initialized.capabilities.tools.listChanged is True
+        assert session.initialized.capabilities.tools.list_changed is True
 
 
 async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
@@ -194,7 +194,7 @@ async def test_the_status_tool_reports_the_surface_that_is_actually_live(accepte
 
 
 async def test_a_second_save_does_not_register_the_account_tools_twice(accepted):
-    """Rotating a key goes through the same path, and FastMCP would keep both copies."""
+    """Rotating a key goes through the same path, and the SDK would keep both copies."""
     async with connected() as session:
         await save(session)
         first = await session.tool_names()
@@ -412,7 +412,7 @@ async def test_another_session_cannot_call_a_globally_registered_trade_tool(monk
             assert "place_order" in await trader.tool_names()
 
         # Deliberately skip tools/list. MCP permits a direct tools/call, and the trading
-        # function remains in FastMCP's process-global registry from the prior session.
+        # function remains in the SDK's process-global tool registry from the prior session.
         async with connected(client_name="Reader", mcp=app) as reader:
             result = await reader.raw_call(
                 "place_order",
@@ -422,7 +422,7 @@ async def test_another_session_cannot_call_a_globally_registered_trade_tool(monk
                 order_type="market_order",
                 dry_run=True,
             )
-            assert result.isError is True
+            assert result.is_error is True
             assert "not enabled for this MCP session" in result.content[0].text
     finally:
         await app.close_live_client()

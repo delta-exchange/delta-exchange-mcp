@@ -16,9 +16,10 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
+from delta_exchange_mcp import request
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -57,17 +58,17 @@ class TradeGate:
 
     generation: int = 0
     armed: bool = True
-    session: object | None = None
+    peer: object | None = None
 
-    def bind(self, session: object) -> None:
-        if self.session is not None and self.session is not session:
+    def bind(self, peer: object) -> None:
+        if self.peer is not None and self.peer is not peer:
             self.generation += 1
-        self.session = session
+        self.peer = peer
 
-    def lease(self, session: object | None) -> int:
+    def lease(self, peer: object | None) -> int:
         if not self.armed:
             raise RuntimeError(_REVOKED_MESSAGE)
-        if self.session is not None and self.session is not session:
+        if self.peer is not None and self.peer is not peer:
             raise RuntimeError(_SESSION_MESSAGE)
         return self.generation
 
@@ -184,7 +185,7 @@ def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
 
 
 def register(
-    mcp: FastMCP,
+    mcp: MCPServer,
     client: DeltaClient,
     audit: AuditLog | None = None,
     gate: TradeGate | None = None,
@@ -205,11 +206,7 @@ def register(
 
         @wraps(function)
         async def pinned(*args: Any, **kwargs: Any) -> Any:
-            try:
-                session = mcp.get_context().session
-            except ValueError:
-                session = None
-            lease = gate.lease(session)
+            lease = gate.lease(request.peer(request.session.get()))
             token = active_lease.set(lease)
             try:
                 async with client.pin():

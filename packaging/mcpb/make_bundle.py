@@ -109,9 +109,9 @@ def wheel_name(proj: dict) -> str:
 def render_pyproject(proj: dict) -> str:
     """The bundle's own project file, pinned to the vendored wheel.
 
-    The dependency ceilings are copied from the repo rather than restated. mcp 2.0 removed
-    `mcp.server.fastmcp`, so a bundle that resolved above the repo's ceiling would die at
-    import — and one that pinned below a raised ceiling would too.
+    The dependency ranges are copied from the repo rather than restated. The SDK moved its
+    server class across a major, so a bundle that resolved outside the repo's range would
+    die at import, in either direction.
     """
     deps = [f"{proj['name']}=={proj['version']}", *proj["dependencies"]]
     rendered = ",\n".join(f'    "{d}"' for d in deps)
