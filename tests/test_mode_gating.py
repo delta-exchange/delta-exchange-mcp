@@ -2,7 +2,12 @@
 
 import asyncio
 
+from mcp.server.fastmcp import FastMCP
+
+from delta_exchange_mcp.client import DeltaClient
+from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
+from delta_exchange_mcp.tools import account, trading
 
 
 MARKET_TOOLS = {
@@ -59,3 +64,32 @@ def test_partial_creds_skip_account_tools(monkeypatch):
     names = _tool_names(build_server())
     assert MARKET_TOOLS.issubset(names)
     assert ACCOUNT_TOOLS.isdisjoint(names)
+
+
+def test_account_removal_manifest_matches_the_registered_surface():
+    mcp = FastMCP("account-tools")
+    client = DeltaClient(
+        Config(
+            env="india_testnet",
+            base_url=INDIA_TESTNET_REST,
+            api_key="k",
+            api_secret="s",
+        )
+    )
+    account.register(mcp, client)
+    assert _tool_names(mcp) == account.TOOL_NAMES
+
+
+def test_trading_removal_manifest_matches_the_registered_surface():
+    mcp = FastMCP("trading-tools")
+    client = DeltaClient(
+        Config(
+            env="india_testnet",
+            base_url=INDIA_TESTNET_REST,
+            api_key="k",
+            api_secret="s",
+            mode="trade",
+        )
+    )
+    trading.register(mcp, client)
+    assert _tool_names(mcp) == trading.TOOL_NAMES

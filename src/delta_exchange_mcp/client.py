@@ -6,6 +6,10 @@ import hmac
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -28,14 +32,33 @@ def sign(secret: str, method: str, timestamp: str, path: str, query: str, body: 
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
+@dataclass
+class _ClientState:
+    """One coherent HTTP destination and signing identity for a request."""
+
+    config: Config
+    base_path: str
+    http: httpx.AsyncClient
+    active: int = 0
+    retired: bool = False
+
+
 class DeltaClient:
     def __init__(self, config: Config, http: httpx.AsyncClient | None = None):
-        self.config = config
+        self._state = self._new_state(config, http)
+        self._pinned_state: ContextVar[_ClientState | None] = ContextVar(
+            f"delta_client_state_{id(self)}", default=None
+        )
+        self._retired: dict[int, _ClientState] = {}
+        self._closing: set[asyncio.Task[None]] = set()
+
+    @staticmethod
+    def _new_state(config: Config, http: httpx.AsyncClient | None = None) -> _ClientState:
         # Delta signs the FULL path including the `/v2` prefix; httpx joins base_url+path
         # at request time, but `sign()` only sees the relative path we pass in. Capture
         # the prefix once so authed calls can produce the documented payload shape.
-        self._base_path = urlparse(config.base_url).path.rstrip("/")
-        self._http = http or httpx.AsyncClient(
+        base_path = urlparse(config.base_url).path.rstrip("/")
+        transport = http or httpx.AsyncClient(
             base_url=config.base_url,
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0),
             headers={
@@ -44,9 +67,88 @@ class DeltaClient:
                 "Accept": "application/json",
             },
         )
+        return _ClientState(config=config, base_path=base_path, http=transport)
+
+    @property
+    def config(self) -> Config:
+        return self._state.config
+
+    def rebind(self, config: Config) -> None:
+        """Atomically move future calls to ``config`` without disrupting current calls.
+
+        Tool closures keep this one client for the process lifetime. Swapping one immutable
+        state means market and account tools move environments and credential pairs together;
+        a request already in progress finishes on the state it captured.
+        """
+        old = self._state
+        identity = (config.base_url, config.api_key, config.api_secret)
+        old_identity = (old.config.base_url, old.config.api_key, old.config.api_secret)
+        if identity == old_identity:
+            # HTTP identity is unchanged, so mutating the non-request metadata cannot make
+            # an in-flight signature incoherent and avoids two states sharing one transport.
+            old.config = config
+            return
+        self._state = self._new_state(config)
+        old.retired = True
+        self._retired[id(old)] = old
+        if old.active == 0:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # A synchronous caller has no place to await cleanup; aclose remains the
+                # backstop. Runtime reconciliation always has a loop and closes promptly.
+                return
+            task = loop.create_task(self._close_retired(old))
+            self._closing.add(task)
+            task.add_done_callback(self._closing_done)
+
+    def _closing_done(self, task: asyncio.Task[None]) -> None:
+        self._closing.discard(task)
+        try:
+            task.result()
+        except Exception as exc:  # noqa: BLE001 - cleanup failure is logged and retried at shutdown
+            logger.warning("could not close retired HTTP transport: %s", exc)
+
+    @asynccontextmanager
+    async def pin(self) -> AsyncIterator[None]:
+        """Keep a multi-request operation on one destination and signing identity.
+
+        A trading tool may await a product or profile lookup before sending its mutation.
+        Reconciliation can happen during that await; task-local pinning prevents the later
+        request from jumping to the newly rebound account.
+        """
+        existing = self._pinned_state.get()
+        if existing is not None:
+            yield
+            return
+        state = self._state
+        state.active += 1
+        token = self._pinned_state.set(state)
+        try:
+            yield
+        finally:
+            self._pinned_state.reset(token)
+            await self._release(state)
+
+    async def _release(self, state: _ClientState) -> None:
+        state.active -= 1
+        if state.retired and state.active == 0:
+            await self._close_retired(state)
+
+    async def _close_retired(self, state: _ClientState) -> None:
+        if state.active != 0 or self._retired.get(id(state)) is not state:
+            return
+        await state.http.aclose()
+        if self._retired.get(id(state)) is state:
+            del self._retired[id(state)]
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        if self._closing:
+            await asyncio.gather(*tuple(self._closing), return_exceptions=True)
+        clients = [self._state.http, *(state.http for state in self._retired.values())]
+        self._retired.clear()
+        for client in dict.fromkeys(clients):
+            await client.aclose()
 
     async def get(self, path: str, params: dict[str, Any] | None = None, *, auth: bool = False) -> Any:
         return await self._request("GET", path, params=params, auth=auth)
@@ -78,6 +180,46 @@ class DeltaClient:
         auth: bool = False,
         raw: bool = False,
     ) -> Any:
+        pinned = self._pinned_state.get()
+        state = pinned or self._state
+        if pinned is not None:
+            return await self._request_state(
+                state,
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                auth=auth,
+                raw=raw,
+            )
+        state.active += 1
+        try:
+            return await self._request_state(
+                state,
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                auth=auth,
+                raw=raw,
+            )
+        finally:
+            await self._release(state)
+
+    async def _request_state(
+        self,
+        state: _ClientState,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        auth: bool = False,
+        raw: bool = False,
+    ) -> Any:
+        # Captured once: a form save may rebind the process while this request is awaiting
+        # the network, and its base URL, signing prefix and credential pair must stay one tuple.
+        config = state.config
         headers: dict[str, str] = {}
         # Delta signs the EXACT request body bytes. Serialize once (compact, no spaces) and
         # feed the same string to both sign() and httpx via content= — using json= would let
@@ -95,31 +237,31 @@ class DeltaClient:
             query_str = "?" + httpx.QueryParams(filtered_params).__str__()
 
         if auth:
-            if not self.config.has_credentials:
+            if not config.has_credentials:
                 raise DeltaApiError("credentials_missing", context="set DELTA_API_KEY and DELTA_API_SECRET")
             ts = str(int(time.time()))
             signature = sign(
-                self.config.api_secret or "",  # guarded by has_credentials
+                config.api_secret or "",  # guarded by has_credentials
                 method,
                 ts,
-                f"{self._base_path}{path}",
+                f"{state.base_path}{path}",
                 query_str,
                 body_str,
             )
-            headers["api-key"] = self.config.api_key or ""
+            headers["api-key"] = config.api_key or ""
             headers["signature"] = signature
             headers["timestamp"] = ts
 
         # body_str carries no credentials (those live only in headers, never logged).
         logger.info(
             "→ %s %s params=%s auth=%s body=%s",
-            method, f"{self._base_path}{path}", filtered_params, auth, body_str[:_BODY_LOG_CAP],
+            method, f"{state.base_path}{path}", filtered_params, auth, body_str[:_BODY_LOG_CAP],
         )
 
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                resp = await self._http.request(
+                resp = await state.http.request(
                     method, path, params=filtered_params, content=content, headers=headers
                 )
             except httpx.HTTPError as e:

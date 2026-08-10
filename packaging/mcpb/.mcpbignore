@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+# Build tooling lives at this directory's root; the shipped payload is server/ and wheels/.
+# verify.py asserts the packed file list, so a miss here fails the build rather than shipping.
+/*.py
+/*.sh
+/*.md
+*.mcpb

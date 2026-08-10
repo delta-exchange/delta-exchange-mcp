@@ -20,11 +20,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from delta_exchange_mcp.config import Config
+from delta_exchange_mcp.config import Config, setting
 
 
 def _resolve_path() -> Path:
-    override = os.environ.get("DELTA_MCP_AUDIT_FILE")
+    override = setting("DELTA_MCP_AUDIT_FILE")
     if override:
         return Path(override).expanduser()
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -92,7 +92,7 @@ def configure(cfg: Config) -> AuditLog | None:
     global _INSTANCE
     if cfg.mode != "trade":
         return None
-    if os.environ.get("DELTA_MCP_AUDIT", "").strip().lower() in _DISABLE:
+    if (setting("DELTA_MCP_AUDIT") or "").lower() in _DISABLE:
         return None
     if _INSTANCE is not None:
         return _INSTANCE

@@ -1,0 +1,97 @@
+name: Bundle
+
+on:
+  pull_request:
+    paths:
+      - "packaging/mcpb/**"
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/bundle.yml"
+  push:
+    branches: [develop]
+    paths:
+      - "packaging/mcpb/**"
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/bundle.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every action here is pinned to a full commit SHA, with the tag it came from in the
+# trailing comment. A tag is a moving pointer the action's owner can repoint at any
+# commit, and this workflow builds the .mcpb that gets attached to a release and
+# installed into Claude Desktop, where it can read the user's API credentials. A SHA
+# means the bundle people download was built by the code reviewed here. To bump one,
+# resolve the new tag with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and update
+# both the SHA and the comment together.
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # setup-uv publishes no moving major tag past v7, hence the exact release in the
+      # comment rather than a major.
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      # The mcpb CLI is Node, and build.sh compiles it from a pinned upstream commit
+      # (mcpb_cli.sh) because the published release signs bundles Claude Desktop refuses.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .mcpb-cli
+          key: mcpb-cli-${{ hashFiles('packaging/mcpb/mcpb_cli.sh') }}
+
+      # Builds the wheel, derives the bundle project from pyproject.toml, locks, generates
+      # the manifest, packs, then verifies: archive structure, the exact packed payload, a
+      # real MCP handshake, and that no mutation tool registered.
+      - run: bash packaging/mcpb/build.sh
+        env:
+          MCPB_CLI_CACHE: ${{ github.workspace }}/.mcpb-cli
+
+      # manifest.json is committed so the shipped contract is reviewable in a diff. If a
+      # rebuild would change it, the committed copy is stale — regenerate and commit.
+      - name: Check the committed manifest is current
+        run: git diff --exit-code -- packaging/mcpb/manifest.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: delta-exchange-mcp-bundle
+          path: packaging/mcpb/*.mcpb
+          if-no-files-found: error
+
+  attach:
+    needs: bundle
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: delta-exchange-mcp-bundle
+      # The upload itself uses `gh`, which ships on the runner, so the step that actually
+      # spends contents:write runs no third-party code. The download above does, which is
+      # why it is pinned like the rest.
+      #
+      # Uploaded twice: the versioned name is the archival record, and the unversioned copy
+      # is what /releases/latest/download/ can address, since that URL needs an asset name
+      # that does not change between releases. The README download link points at the alias.
+      - run: |
+          versioned=$(ls ./*.mcpb)
+          cp "$versioned" delta-exchange-mcp.mcpb
+          gh release upload "$TAG" "$versioned" delta-exchange-mcp.mcpb --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}

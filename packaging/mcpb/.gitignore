@@ -1,0 +1,8 @@
+# Build outputs — regenerate with build.sh
+*.mcpb
+wheels/
+uv.lock
+# Derived verbatim from the repo's pyproject.toml by make_bundle.py; nothing to review.
+# manifest.json IS committed: it is the user-facing contract (install copy, tool list,
+# what the bundle can reach), and CI fails if a rebuild would change it.
+pyproject.toml

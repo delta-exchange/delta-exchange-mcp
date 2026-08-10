@@ -14,11 +14,9 @@ def _clear_handlers():
     """Each test attaches a FileHandler to module loggers; remove them after so the open
     file doesn't leak into the next test (and the idempotency guard starts fresh)."""
     yield
+    debug_log.shutdown()
     for name in debug_log.LOGGER_NAMES:
         logger = logging.getLogger(name)
-        for h in list(logger.handlers):
-            h.close()
-            logger.removeHandler(h)
         logger.setLevel(logging.NOTSET)
         logger.propagate = True
 
@@ -88,6 +86,21 @@ def test_debug_off_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "d.log"))
     assert debug_log.configure(_cfg(tmp_path, debug=False)) is None
     assert not (tmp_path / "d.log").exists()
+
+
+def test_shutdown_detaches_and_closes_shared_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "d.log"))
+    debug_log.configure(_cfg(tmp_path, debug=True))
+
+    handler = logging.getLogger("delta_exchange_mcp").handlers[0]
+    assert all(handler in logging.getLogger(name).handlers for name in debug_log.LOGGER_NAMES)
+    assert handler.stream is not None
+
+    debug_log.shutdown()
+
+    assert all(handler not in logging.getLogger(name).handlers for name in debug_log.LOGGER_NAMES)
+    assert handler.stream is None
+    debug_log.shutdown()  # idempotent
 
 
 def test_log_file_is_owner_only(tmp_path, monkeypatch):

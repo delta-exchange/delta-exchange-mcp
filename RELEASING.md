@@ -6,7 +6,12 @@ This covers: bumping the version, publishing to PyPI, tagging, drafting the GitH
 
 ## What gets versioned
 
-The `version` field in `pyproject.toml` is the single source of truth. The `delta-exchange-mcp/<version>` string in `User-Agent` and `Source` request headers is derived from it (see `src/delta_exchange_mcp/client.py`, which reads `importlib.metadata.version("delta-exchange-mcp")`). Bumping the field is enough; nothing else in the code needs to change.
+The `version` field in `pyproject.toml` is the single source of truth. The `delta-exchange-mcp/<version>` string in `User-Agent` and `Source` request headers is derived from it (see `src/delta_exchange_mcp/client.py`, which reads `importlib.metadata.version("delta-exchange-mcp")`). Nothing else in the *code* needs to change.
+
+Two committed files do, though, and both are checked in CI:
+
+- **`uv.lock`** pins the workspace's own version. `uv sync` refreshes it.
+- **`packaging/mcpb/manifest.json`** is generated but committed, so the shipped bundle contract is reviewable in a diff. It carries the version, and the Bundle workflow runs on any change to `pyproject.toml` and then enforces `git diff --exit-code -- packaging/mcpb/manifest.json`. **A version bump with a stale manifest turns the Bundle check red.** Regenerate it in step 3 below.
 
 SemVer while in Beta:
 
@@ -20,6 +25,7 @@ SemVer while in Beta:
 2. A **project-scoped** PyPI API token created under *Manage project → Settings → Create a token*. Store it locally as `UV_PUBLISH_TOKEN` (e.g. in your shell rc or 1Password). Never check it in. Do not reuse account-scoped tokens past the initial-claim release.
 3. `gh` CLI logged in (`gh auth status` is green).
 4. Clean working tree on an up-to-date `main` (`git status` empty, `git pull --ff-only`).
+5. **Node 22+**, for regenerating the bundle manifest. `packaging/mcpb/build.sh` compiles the `mcpb` CLI from a pinned upstream commit rather than installing the npm release, because the published one signs bundles Claude Desktop refuses. First run takes a few minutes; after that it is cached.
 
 ## Cut a release
 
@@ -31,13 +37,18 @@ NEW_VERSION=0.1.1
 sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
 git diff pyproject.toml          # sanity check the diff
 
-# 3. Run tests + lint locally
+# 3. Run tests + lint, and regenerate the bundle
 uv sync                          # regenerates uv.lock with the new workspace version
 uv run pytest
-uv run ruff check src tests scripts
+uv run ruff check src tests scripts packaging
+
+# The manifest carries the version and is committed, so it goes stale on every bump. This
+# rebuilds and verifies the whole bundle; the only tracked file it changes is manifest.json.
+bash packaging/mcpb/build.sh
+git diff --stat packaging/mcpb/manifest.json   # expect the version field, and tools if they moved
 
 # 4. Commit + tag
-git add pyproject.toml uv.lock   # uv.lock pins the workspace's own version; keep them in sync
+git add pyproject.toml uv.lock packaging/mcpb/manifest.json
 git commit -m "Release v$NEW_VERSION"
 git tag -a "v$NEW_VERSION" -m "v$NEW_VERSION"
 
@@ -94,7 +105,21 @@ uvx --refresh delta-exchange-mcp --help
 # 3. Smoke test public tools through the freshly-spawned server
 bash scripts/inspect.sh --cli --method tools/list
 bash scripts/inspect.sh --cli --method tools/call --tool-name get_ticker --tool-arg symbol=BTCUSD
+
+# 4. The bundle actually attached. The Bundle workflow's attach job fires on
+#    `release: published` only, so a draft release gets no asset — and the README's
+#    Claude Desktop install path is only useful once one is there.
+gh release view "v$NEW_VERSION" --json assets -q '.assets[].name'
+curl -sIL -o /dev/null -w '%{http_code}\n' \
+  "https://github.com/delta-exchange/delta-exchange-mcp/releases/latest/download/delta-exchange-mcp.mcpb"
 ```
+
+Expect two asset names — `delta-exchange-mcp-<version>.mcpb` and the unversioned
+`delta-exchange-mcp.mcpb` alias — and `200` from the curl. The alias exists so that
+`/releases/latest/download/` has a name that does not change between releases, and the README
+badge points directly at it. The Bundle workflow's `attach` job uploads the alias only after
+the release is published, so the direct link can briefly return 404 while that job runs. Wait
+for the attach job and this curl to succeed before announcing the release.
 
 ## Rolling back a bad release
 

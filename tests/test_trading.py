@@ -1,5 +1,6 @@
 """Trading tools: body signing, dry-run, validation, user_id caching, audit, mode gating."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -11,10 +12,10 @@ import respx
 
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
-from mcp.server.mcpserver import MCPServer
+from mcp.server.fastmcp import FastMCP
 
 
 def _client() -> DeltaClient:
@@ -25,15 +26,21 @@ def _client() -> DeltaClient:
     return DeltaClient(cfg)
 
 
-async def _call(client: DeltaClient, name: str, audit=None, **kwargs: Any) -> Any:
-    mcp = MCPServer("test")
-    trading.register(mcp, client, audit)
+async def _call(
+    client: DeltaClient,
+    name: str,
+    audit=None,
+    gate: trading.TradeGate | None = None,
+    **kwargs: Any,
+) -> Any:
+    mcp = FastMCP("test")
+    trading.register(mcp, client, audit, gate)
     return await mcp.call_tool(name, kwargs)
 
 
 def _payload(call_result: Any) -> dict[str, Any]:
-    """mcp.call_tool returns a CallToolResult; pull the structured dict out."""
-    structured = call_result.structured_content
+    """mcp.call_tool returns (content, structured); pull the structured dict out."""
+    structured = call_result[1]
     return structured.get("result", structured) if isinstance(structured, dict) else structured
 
 
@@ -60,6 +67,140 @@ async def test_place_order_signs_exact_body_bytes():
     expected = hmac.new(b"s1", f"POST{ts}/v2/orders{body}".encode(), hashlib.sha256).hexdigest()
     assert req.headers["signature"] == expected
     assert req.headers["api-key"] == "k1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_identity_rebind_revokes_a_trade_still_in_preflight():
+    """A lookup cannot finish by mutating either the old or newly rebound account."""
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    old_requests: list[httpx.Request] = []
+
+    async def old_account(request: httpx.Request) -> httpx.Response:
+        old_requests.append(request)
+        if request.method == "GET":
+            lookup_started.set()
+            await release_lookup.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "result": {"id": 84, "symbol": "BTCUSD", "tick_size": "0.1"},
+                },
+            )
+        return httpx.Response(200, json={"success": True, "result": {"id": 7}})
+
+    old_http = httpx.AsyncClient(
+        base_url=INDIA_TESTNET_REST,
+        transport=httpx.MockTransport(old_account),
+    )
+    client = DeltaClient(
+        Config(
+            env="india_testnet",
+            base_url=INDIA_TESTNET_REST,
+            api_key="old-key",
+            api_secret="old-secret",
+            mode="trade",
+        ),
+        http=old_http,
+    )
+    gate = trading.TradeGate()
+    new_account = respx.post(f"{INDIA_PROD_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 8}})
+    )
+
+    call = asyncio.create_task(
+        _call(
+            client,
+            "place_order",
+            gate=gate,
+            product_symbol="BTCUSD",
+            size=1,
+            side="buy",
+            order_type="limit_order",
+            limit_price="62000.07",
+        )
+    )
+    await lookup_started.wait()
+    gate.revoke()
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="new-key",
+            api_secret="new-secret",
+            mode="read",
+        )
+    )
+    release_lookup.set()
+    with pytest.raises(Exception, match="trading was disabled.*no mutation was sent"):
+        await call
+    await client.aclose()
+
+    assert [(request.method, str(request.url)) for request in old_requests] == [
+        ("GET", f"{INDIA_TESTNET_REST}/products/BTCUSD"),
+    ]
+    assert new_account.called is False
+
+
+@pytest.mark.asyncio
+async def test_trade_to_read_revokes_a_trade_still_in_preflight():
+    """Turning trading off wins if an order has not reached its mutation request yet."""
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    requests: list[httpx.Request] = []
+
+    async def account(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        lookup_started.set()
+        await release_lookup.wait()
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {"id": 84, "symbol": "BTCUSD", "tick_size": "0.1"},
+            },
+        )
+
+    http = httpx.AsyncClient(
+        base_url=INDIA_TESTNET_REST,
+        transport=httpx.MockTransport(account),
+    )
+    client = DeltaClient(
+        Config(
+            env="india_testnet",
+            base_url=INDIA_TESTNET_REST,
+            api_key="key",
+            api_secret="secret",
+            mode="trade",
+        ),
+        http=http,
+    )
+    gate = trading.TradeGate()
+    call = asyncio.create_task(
+        _call(
+            client,
+            "place_order",
+            gate=gate,
+            product_symbol="BTCUSD",
+            size=1,
+            side="buy",
+            order_type="limit_order",
+            limit_price="62000.07",
+        )
+    )
+
+    await lookup_started.wait()
+    gate.revoke()
+    release_lookup.set()
+    with pytest.raises(Exception, match="trading was disabled.*no mutation was sent"):
+        await call
+    await client.aclose()
+
+    assert [(request.method, str(request.url)) for request in requests] == [
+        ("GET", f"{INDIA_TESTNET_REST}/products/BTCUSD"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -177,7 +318,7 @@ async def test_close_all_fetches_and_caches_user_id():
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = MCPServer("test")
+    mcp = FastMCP("test")
     trading.register(mcp, client, None)
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
@@ -211,7 +352,7 @@ async def test_audit_records_success_and_error_without_secrets(tmp_path, monkeyp
     client = _client()
     await _call(client, "place_order", audit=audit,
                 product_id=27, size=1, side="buy", order_type="market_order")
-    # MCPServer wraps the DeltaApiError in a ToolError, but _finish records it first.
+    # FastMCP wraps the DeltaApiError in a ToolError, but _finish records it first.
     with pytest.raises(Exception, match="insufficient_margin"):
         await _call(client, "place_order", audit=audit,
                     product_id=27, size=1, side="buy", order_type="market_order")
@@ -266,6 +407,23 @@ def test_trade_tools_present_in_trade_mode(monkeypatch):
         "adjust_position_margin", "close_all_positions", "configure_auto_topup",
     ):
         assert tool in names
+
+
+@pytest.mark.asyncio
+async def test_all_trading_tools_declare_mutating_metadata():
+    mcp = FastMCP("test")
+    client = _client()
+    try:
+        trading.register(mcp, client)
+        tools = await mcp.list_tools()
+    finally:
+        await client.aclose()
+
+    assert len(tools) == 13
+    assert all(
+        tool.meta == {trading.MUTATING_TOOL_META_KEY: True}
+        for tool in tools
+    )
 
 
 # --------------------------------------------------------------- BUG-1: cancel_all defaults
@@ -340,7 +498,7 @@ async def test_place_batch_flags_partial_failure_with_dropped_coids():
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
     assert route.called
-    pf = out.structured_content["partial_failure"]
+    pf = out[1]["partial_failure"]
     assert pf["requested"] == 3 and pf["succeeded"] == 2 and pf["dropped"] == 1
     assert pf["dropped_client_order_ids"] == ["b"]
 
@@ -356,7 +514,7 @@ async def test_cancel_batch_flags_dropped_ids():
         client, "cancel_batch_orders", product_id=84,
         orders=[{"id": 111}, {"id": 999999999}],
     )
-    pf = out.structured_content["partial_failure"]
+    pf = out[1]["partial_failure"]
     assert pf["requested"] == 2 and pf["succeeded"] == 1
     assert pf["dropped_ids"] == [999999999]
 
@@ -373,7 +531,7 @@ async def test_batch_no_partial_flag_when_all_succeed():
         {"side": "buy", "order_type": "limit_order", "limit_price": "61000", "size": 1},
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
-    assert "partial_failure" not in out.structured_content
+    assert "partial_failure" not in out[1]
 
 
 # --------------------------------------------------------------- BUG-4: close_all scope
@@ -483,7 +641,7 @@ async def test_off_tick_price_rounded_to_nearest():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.1"' in route.calls[0].request.content
-    structured = out.structured_content
+    structured = out[1]
     assert structured["price_adjustments"] == [
         {"field": "limit_price", "sent": "62000.07", "normalized": "62000.1"}
     ]
@@ -505,4 +663,4 @@ async def test_tick_rounding_skipped_when_unresolved():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
-    assert "price_adjustments" not in out.structured_content
+    assert "price_adjustments" not in out[1]

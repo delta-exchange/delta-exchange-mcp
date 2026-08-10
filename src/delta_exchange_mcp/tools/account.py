@@ -10,6 +10,24 @@ from pydantic import Field
 
 from delta_exchange_mcp.client import DeltaClient
 
+TOOL_NAMES = frozenset(
+    {
+        "get_positions",
+        "get_margined_positions",
+        "get_wallet_balances",
+        "get_wallet_transactions",
+        "get_fills",
+        "get_open_orders",
+        "get_order_history",
+        "get_order_by_id",
+        "get_product_leverage",
+        "get_trading_stats",
+        "get_trading_preferences",
+        "get_profile",
+        "bulk_fills_export",
+    }
+)
+
 
 _RECENT_WINDOW_NOTICE = (
     "No start_time_us was given, so the API returned only its default recent window "

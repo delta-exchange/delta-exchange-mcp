@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from delta_exchange_mcp.config import Config
+from delta_exchange_mcp.config import Config, setting
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
 LOGGER_NAMES = ("delta_exchange_mcp", "httpx")
@@ -28,7 +28,7 @@ _MARKER = "_delta_debug_handler"
 
 
 def _resolve_path() -> Path:
-    override = os.environ.get("DELTA_MCP_DEBUG_FILE")
+    override = setting("DELTA_MCP_DEBUG_FILE")
     if override:
         return Path(override).expanduser()
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -91,3 +91,19 @@ def configure(cfg: Config) -> Path | None:
         PACKAGE_VERSION, cfg.env, cfg.base_url, surface,
     )
     return path
+
+
+def shutdown() -> None:
+    """Detach and close the debug handler attached by this module, if any."""
+    handlers: set[logging.Handler] = set()
+    for name in LOGGER_NAMES:
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            if getattr(handler, _MARKER, False):
+                logger.removeHandler(handler)
+                handlers.add(handler)
+
+    # The same handler is attached to both module loggers. Close it only after it has been
+    # detached everywhere, and only once, so Windows can remove its containing directory.
+    for handler in handlers:
+        handler.close()

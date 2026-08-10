@@ -1,17 +1,34 @@
 [project]
 name = "delta-exchange-mcp"
-version = "0.4.2"
+version = "0.5.1"
 description = "Official MCP server for Delta Exchange India — market data and account read for AI assistants."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Anuj Sharma", email = "anuj.sharma@delta.exchange" }
 ]
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1,<1",
-    "mcp>=2.0.0,<3",
+    # 1.26 is the floor for the credential form, not a routine bump: `_meta` on a tool
+    # arrived in 1.19 and on a resource in 1.26, and those carry the whole MCP Apps
+    # association — which resource a tool opens, which tools stay hidden from the model,
+    # and how tall the frame opens. Below 1.26 the decorators reject the argument and the
+    # server fails at import. 2.0 removed `mcp.server.fastmcp` entirely.
+    "mcp>=1.26.0,<2",
     "pydantic>=2.13.2,<3",
+    # Already resolved via mcp -> pydantic-settings, but declared because we import it
+    # directly. Hand-rolling the parse is what it replaces: quoted values, an `export`
+    # prefix, a trailing comment or CRLF endings each corrupt a credential silently.
+    "python-dotenv>=1.0,<2",
 ]
+
+[project.urls]
+Homepage = "https://www.delta.exchange"
+Repository = "https://github.com/delta-exchange/delta-exchange-mcp"
+Documentation = "https://github.com/delta-exchange/delta-exchange-mcp#readme"
+Issues = "https://github.com/delta-exchange/delta-exchange-mcp/issues"
 
 [project.scripts]
 delta-exchange-mcp = "delta_exchange_mcp:main"
