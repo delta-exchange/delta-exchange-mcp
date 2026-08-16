@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "delta-exchange-mcp",
   "display_name": "Delta Exchange",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Live market data and your Delta Exchange India account.",
   "long_description": "Ask about Delta Exchange India in plain English: live prices, option chains, order books, funding and open-interest history, plus your own positions, orders, fills and balances.\n\n**Read-only unless you change Mode.** Left at `read`, this cannot place, change or cancel orders, and can never move funds. Set Mode to `trade` and it can place, edit and cancel real orders on the environment you selected \u2014 there is no size limit, and orders are sized in contracts rather than coins. Every mutation is written to an audit log under `~/.delta-exchange-mcp/audit/`. Leave this at `read` unless you specifically want an assistant trading your account.\n\n**Both credential fields or neither.** A key without its matching secret is ignored and you get market data only \u2014 the two are always used together. Trading additionally needs a key with trading permission, not just Read Data.\n\n**Market data needs no setup** \u2014 leave the API key and secret empty and everything except your own account still works.\n\n**To see your account**, create a key at delta.exchange under Account \u2192 API Keys with the **Read Data** permission. Both halves are shown only once, at creation. Paste them into Configure. Your key is stored by this app and is sent only to Delta's API, from your own machine.\n\n**Environment** must be `india_prod` for the real exchange, or `india_testnet` for the practice site at demo.delta.exchange. A key only works against the site it was made on.",
   "author": {

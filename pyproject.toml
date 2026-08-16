@@ -1,6 +1,6 @@
 [project]
 name = "delta-exchange-mcp"
-version = "0.5.1"
+version = "0.6.0"
 description = "Official MCP server for Delta Exchange India — market data and account read for AI assistants."
 readme = "README.md"
 license = "MIT"
