@@ -9,12 +9,50 @@ Unset means there is no protocol session — an in-process call, as the tests ma
 from __future__ import annotations
 
 from contextvars import ContextVar
+from dataclasses import dataclass
 
 from mcp.server.session import ServerSession
 
 session: ContextVar[ServerSession | None] = ContextVar(
     "delta_request_session", default=None
 )
+
+
+@dataclass(frozen=True)
+class Client:
+    """How the connected host names itself in the handshake.
+
+    Self-reported and unauthenticated: a client may claim any name. It scopes convenience
+    settings and labels analytics. It must never gate anything that carries a safety
+    consequence.
+
+    `title` is the host's display name and may be set by the person using it, so it is
+    read for completeness but never sent anywhere or used as a key.
+    """
+
+    name: str = ""
+    title: str = ""
+    version: str = ""
+
+
+UNKNOWN = Client()
+
+
+def client(current: ServerSession | None) -> Client:
+    """Read the handshake identity behind a session.
+
+    Empty fields mean no handshake reached this call — an in-process call, as the tests
+    make. A caller treats an empty name as "this cannot be scoped to a client" and
+    declines to write anything keyed on it, rather than writing under a name that every
+    client on the machine would then share.
+    """
+    if current is None:
+        return UNKNOWN
+    params = current.client_params
+    if params is None:
+        return UNKNOWN
+    info = params.client_info
+    return Client(name=info.name, title=info.title or "", version=info.version)
 
 
 def peer(current: ServerSession | None) -> object | None:

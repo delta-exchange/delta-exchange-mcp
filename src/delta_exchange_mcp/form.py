@@ -792,10 +792,10 @@ def _client_name(ctx: Context) -> str:
     scoped to a client must not be written at all.
     """
     try:
-        params = ctx.session.client_params
+        session = ctx.session
     except ValueError:
         return ""
-    return params.client_info.name if params and params.client_info else ""
+    return request.client(session).name
 
 
 def _opened_message() -> str:

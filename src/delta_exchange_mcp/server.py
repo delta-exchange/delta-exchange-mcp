@@ -71,11 +71,6 @@ at, what this client may do now, what it may do after a restart, and whether one
 """
 
 
-def _session_client_name(session: ServerSession) -> str:
-    params = session.client_params
-    return params.client_info.name if params and params.client_info else ""
-
-
 class DeltaMCP(MCPServer):
     """MCPServer with a pre-list hook for session-scoped entitlements."""
 
@@ -205,7 +200,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         that requested it.
         """
         nonlocal account_registered, live
-        client_name = _session_client_name(session)
+        client_name = request.client(session).name
         shared = store.read()
         next_config = config_mod.load_for_client(client_name, shared)
         identity_changed = http_identity(live) != http_identity(next_config)
@@ -315,7 +310,8 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         or credential fingerprint.
         """
         session = ctx.session
-        client_name = _session_client_name(session)
+        who = request.client(session)
+        client_name = who.name
         next_config, shared = await reconcile(session, allow_trade=False, notify=True)
         overridden = credentials.overridden_by_client(client_name, shared)
         binding = config_mod.mode_key(client_name)
@@ -334,6 +330,10 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             and restart_required(next_config),
             "overridden_by_client": overridden,
             "client_name": client_name,
+            # The build behind the name. A report of "the form did not render" is only
+            # actionable with it: the same client name covers versions that differ in
+            # whether they render an MCP App at all.
+            "client_version": who.version,
             "mode_setting": binding,
             "client_identity": "self-reported name; convenience scope, not authentication",
             "version": PACKAGE_VERSION,

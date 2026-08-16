@@ -19,7 +19,7 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 
 from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, server, store
+from delta_exchange_mcp import credentials, request, server, store
 
 KEY = "typed-into-the-form-key"
 SECRET = "typed-into-the-form-secret"
@@ -157,6 +157,30 @@ async def test_the_status_tool_exists_with_no_credentials(accepted):
 
 
 # --- bringing the surface up ---------------------------------------------------------
+
+
+async def test_the_status_tool_reports_the_client_that_asked(accepted):
+    """A "the form did not render" report is only actionable with the build behind it."""
+    async with connected(client_name="claude-desktop") as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "claude-desktop"
+        assert status["client_version"] == "1"
+
+
+async def test_a_client_that_names_itself_nothing_still_arrives_named(accepted):
+    """The empty-name guard never fires over a real connection, and that is worth pinning.
+
+    The SDK substitutes `DEFAULT_CLIENT_INFO` — `mcp/0.1.0` — for a client that sends no
+    identity of its own. So every such client scopes its trading mode under the one name
+    `mcp` and shares that entitlement with the others, which is within the documented
+    "convenience scope, not authentication" model but does not read that way from the
+    guard alone. Only a call with no session at all yields an empty name.
+    """
+    assert request.client(None) == request.UNKNOWN
+    async with connected() as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "mcp"
+        assert status["client_version"] == "0.1.0"
 
 
 async def test_a_saved_key_makes_the_account_tools_reachable_without_a_restart(accepted):
