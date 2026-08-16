@@ -13,6 +13,7 @@ import respx
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
 from mcp.server.fastmcp import FastMCP
@@ -664,3 +665,69 @@ async def test_tick_rounding_skipped_when_unresolved():
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
     assert "price_adjustments" not in out[1]
+
+
+# ------------------------------------------------------- transport-failure safety
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_is_never_resent_after_a_transport_failure():
+    """POST accepted, response lost, automatic re-POST — the duplicate-order path.
+
+    The status-code retry paths were always GET-only; the transport-error path was
+    not, and would resend a mutation whose outcome is unknown.
+    """
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.ReadTimeout("response never arrived"),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_connect_failure_says_nothing_was_sent():
+    """A connect failure provably sent nothing, so its error says a retry is safe."""
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "upstream_unreachable"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audit_records_an_unknown_outcome(tmp_path, monkeypatch):
+    """An ambiguous transport failure must reach the audit log.
+
+    The raw httpx error bypassed _finish's DeltaApiError catch entirely, so the one
+    mutation whose exchange outcome is uncertain was also the one that left no
+    audit trace.
+    """
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+    cfg = Config(
+        env="india_testnet", base_url=INDIA_TESTNET_REST,
+        api_key="k1", api_secret="s1", mode="trade",
+    )
+    audit = audit_log.configure(cfg)
+    assert audit is not None
+
+    respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=httpx.ReadTimeout("response never arrived")
+    )
+    with pytest.raises(Exception, match="execution_outcome_unknown"):
+        await _call(_client(), "place_order", audit=audit,
+                    product_id=27, size=1, side="buy", order_type="market_order")
+
+    lines = (tmp_path / "audit.log").read_text().splitlines()
+    assert len(lines) == 1
+    assert "execution_outcome_unknown" in json.loads(lines[0])["error"]

@@ -266,6 +266,30 @@ class DeltaClient:
                 )
             except httpx.HTTPError as e:
                 last_error = e
+                # Transport failures retry only for GETs. A mutation may have reached
+                # Delta before the response was lost, so resending it can place a
+                # duplicate order. A connect failure provably sent nothing, which is
+                # why the two cases carry different codes: one is safe to retry, the
+                # other must be reconciled against open orders first. Wrapped as
+                # DeltaApiError so the trading audit log records the failure — a raw
+                # httpx error bypasses that catch.
+                if method != "GET":
+                    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        raise DeltaApiError(
+                            "upstream_unreachable",
+                            context=(
+                                f"could not connect for {method} {path}: {e!r} — "
+                                "nothing was sent, safe to retry"
+                            ),
+                        ) from e
+                    raise DeltaApiError(
+                        "execution_outcome_unknown",
+                        context=(
+                            f"transport failure during {method} {path}: {e!r} — the "
+                            "request may have reached Delta. Do not resubmit; check "
+                            "open orders / order history first."
+                        ),
+                    ) from e
                 if attempt == 2:
                     raise
                 continue
