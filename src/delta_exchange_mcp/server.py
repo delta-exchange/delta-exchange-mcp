@@ -17,6 +17,7 @@ from delta_exchange_mcp import audit_log
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials, debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import identity
 from delta_exchange_mcp import request
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
@@ -79,6 +80,12 @@ class DeltaMCP(MCPServer):
         self.live_client: DeltaClient | None = None
         super().__init__(
             "delta-exchange",
+            # What a client shows a person, as against `name`, which is what it keys on.
+            # These are the same strings the bundle's install dialog uses, read from the
+            # one place that holds them.
+            title=identity.DISPLAY_NAME,
+            description=identity.SHORT_DESCRIPTION,
+            website_url=identity.HOMEPAGE,
             version=PACKAGE_VERSION,
             instructions=INSTRUCTIONS,
             middleware=[self._serve],

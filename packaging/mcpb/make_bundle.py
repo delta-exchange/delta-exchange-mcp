@@ -18,12 +18,14 @@ import tomllib
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 
-DISPLAY_NAME = "Delta Exchange"
 PUBLISHER = "Delta Exchange"
 KEYWORDS = ["trading", "crypto", "options", "futures", "market-data"]
 
-
-SHORT_DESCRIPTION = "Live market data and your Delta Exchange India account."
+# The display name and the short description are not here: the server declares both in its
+# own handshake, so they live in `delta_exchange_mcp.identity` and this reads them from
+# there. Importing that is deferred to where it is used, for the reason `tool_entries`
+# gives — importing the package runs `__init__`, and that must not happen before the
+# DELTA_ environment is scrubbed.
 
 LONG_DESCRIPTION = (
     "Ask about Delta Exchange India in plain English: live prices, option chains, "
@@ -200,6 +202,10 @@ async def tool_entries() -> list[dict[str, str]]:
 
 
 def render_manifest(proj: dict, tools: list[dict[str, str]]) -> dict:
+    # Safe here and not at module scope: `main` runs `tool_entries` first, which scrubs the
+    # DELTA_ environment before anything imports the package.
+    from delta_exchange_mcp.identity import DISPLAY_NAME, SHORT_DESCRIPTION
+
     urls = proj.get("urls", {})
     return {
         "manifest_version": "0.4",

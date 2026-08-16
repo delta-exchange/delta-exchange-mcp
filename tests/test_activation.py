@@ -159,6 +159,22 @@ async def test_the_status_tool_exists_with_no_credentials(accepted):
 # --- bringing the surface up ---------------------------------------------------------
 
 
+async def test_the_server_introduces_itself_with_the_names_a_person_reads(accepted):
+    """`name` is what a client keys on; these are what it shows someone.
+
+    They are the same strings the bundle's install dialog uses, and the point of reading
+    them from `identity` is that the two cannot drift apart. Asserting the values here
+    rather than comparing against the constants is deliberate: a test that reads the same
+    constant as the code passes even when both are wrong.
+    """
+    async with connected() as session:
+        info = session.initialized.server_info
+        assert info.name == "delta-exchange"
+        assert info.title == "Delta Exchange"
+        assert info.description == "Live market data and your Delta Exchange India account."
+        assert info.website_url == "https://www.delta.exchange"
+
+
 async def test_the_status_tool_reports_the_client_that_asked(accepted):
     """A "the form did not render" report is only actionable with the build behind it."""
     async with connected(client_name="claude-desktop") as session:
