@@ -160,7 +160,7 @@ def test_the_page_reports_which_settings_a_client_is_overriding(page, monkeypatc
         body={"method": "tools/call", "params": {"name": "get_connection_status", "arguments": {}}},
     )
     reported = json.loads(body)["result"]["structuredContent"]
-    assert "DELTA_API_KEY" in reported["overridden"]
+    assert "DELTA_API_KEY" in reported["overridden_by_client"]
 
 
 def test_an_unknown_request_is_refused_rather_than_guessed(page):

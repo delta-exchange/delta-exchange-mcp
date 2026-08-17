@@ -190,7 +190,22 @@ Cursor, Claude Code and everything else at the same time. The server creates the
 first time it runs, with instructions inside it, and prints the path in its startup line.
 It is created owner-only (`0600`).
 
-Three ways to fill it in. Pick one — they all write the same file.
+Four ways to fill it in. Pick one — they all write the same file.
+
+**In your browser**, which works everywhere. This one needs no MCP client running at all,
+so you can use it the moment the server is installed rather than waiting for a restart:
+
+```bash
+uvx delta-exchange-mcp setup
+```
+
+It prints an address and opens it. The page runs on your own machine and nothing else can
+reach it: it listens on the loopback address only, the address carries a one-time token,
+and it closes itself once you save or after ten minutes. What you type goes straight to the
+settings file — it never passes through a chat, so it is not stored in a conversation.
+
+Your assistant can do this for you. Ask it to connect your Delta account and it will hand
+you the same link if it cannot draw the form below.
 
 **In the conversation**, without leaving it. Ask your assistant to *connect my Delta
 account* and a small form appears inline:
@@ -288,35 +303,76 @@ for testnet.
 
 ### Let your coding agent set it up
 
-Copy this into Claude Code, Codex, Cursor, or any agent that can edit files on your
-machine. Claude Desktop's chat is not one of those — it has no access to your filesystem,
-so use the **Download for Claude Desktop** bundle at the top of this page instead.
+Copy this into Claude Code, Codex, Cursor, or any agent that can run commands on your
+machine. Paste it and leave it alone — it works out what it can do and takes the right
+route, and it never asks you what appeared on screen.
 
 ```text
-Install the Delta Exchange MCP server into my MCP client: uvx delta-exchange-mcp, local
-stdio, entry name delta-exchange-mcp, no env block. Leave my other servers alone, and
-never ask me for my API key. Verify with `uvx delta-exchange-mcp --version` — never run
-it bare, it serves stdio and won't exit. Then tell me to restart the app and stop there —
-don't authenticate me first, don't send me to a terminal, and don't start a new chat. We
-carry on in this one after the restart.
+Install the Delta Exchange MCP server for me. Work out which case below you are in and do
+that one. Do not ask me to choose, and do not ask me what I can see on screen.
 
-If you can't edit files on this machine, say so and read the README below for the
-simplest path for my client — don't improvise a config for me to paste.
+STEP 0 — Check whether you can run commands and write files on this machine.
 
-If you don't know where my client keeps its MCP config, read
-https://raw.githubusercontent.com/delta-exchange/delta-exchange-mcp/main/README.md
+If you cannot, stop and tell me which of these applies:
+* If I am in Claude Desktop, tell me to download and double-click this bundle. It needs no
+  Python and no other tool — the app fetches everything:
+  https://github.com/delta-exchange/delta-exchange-mcp/releases/latest/download/delta-exchange-mcp.mcpb
+* Otherwise, tell me this server runs locally on my own machine, so it cannot be installed
+  from this chat, and name what does work: Claude Desktop, or any coding agent that can
+  edit files, such as Claude Code, Codex, Cursor or VS Code.
+Do not improvise a config block for me to paste, and do not send me to a terminal.
+
+STEP 1 — Make sure `uv` is available. Check with `uv --version`.
+
+If it is missing, install it with my platform's package manager first — `brew install uv`,
+`winget install astral-sh.uv`, or `pipx install uv`. Use the official installer at
+https://astral.sh/uv/install.sh only if none of those exist, and tell me before you do.
+
+STEP 2 — Add the server to my client's config.
+
+Command `uvx`, one argument `delta-exchange-mcp`, local stdio, entry name
+`delta-exchange-mcp`, no environment block. Leave my other servers untouched.
+
+* If you are Claude Code and Claude Desktop is installed here, write Desktop's config file
+  rather than using `claude mcp add`:
+    macOS    ~/Library/Application Support/Claude/claude_desktop_config.json
+    Windows  %APPDATA%\Claude\claude_desktop_config.json
+    Linux    ~/.config/Claude/claude_desktop_config.json
+  Both work, but Desktop's file is served by a client that can also draw the settings form
+  in the chat, which the other one cannot.
+* Any other client — Cursor, VS Code, Windsurf, Zed, Codex — write your own config file.
+* If you do not know where my client keeps it, read this first:
+  https://raw.githubusercontent.com/delta-exchange/delta-exchange-mcp/main/README.md
+
+Check it resolves with `uvx delta-exchange-mcp --version`. Never run
+`uvx delta-exchange-mcp` with no arguments — it serves stdio and will not exit.
+
+STEP 3 — Set up my account now, without waiting for a restart.
+
+Run `uvx delta-exchange-mcp setup` in the background. It prints a http://127.0.0.1 address
+on its first line and opens it in my browser. Show me that address in case it did not open.
+
+I fill in the page myself. Never ask me for my API key, and never accept one sent as a chat
+message.
+
+STEP 4 — Tell me to quit and reopen the app, and stop there.
+
+Do not start a new chat. We carry on in this one.
 ```
 
-The entry it writes holds no credentials and needs none — the server comes up on market
-data and works the moment you restart. Your key goes in
-[the shared file](#add-your-api-key) instead, which is why the agent never has to touch it.
-To set it up by hand, follow the steps for your client below.
+Why it is shaped like that:
 
-Restart the app, then carry on in the same conversation: ask it to connect your Delta
-account and the form opens there. The restart is needed because a client builds its list
-of tools when it starts, so a server added after that isn't connected yet — which is also
-why an assistant asked to authenticate you before restarting will reach for a terminal
-instead. It has nothing else to offer at that point.
+- **Step 0 tests itself rather than asking you.** An agent with no filesystem access cannot
+  install anything, and the useful answer there is a download link, not an apology.
+- **Step 2 says which file, and why.** Left to itself an agent that is Claude Code will
+  reach for `claude mcp add`, its own registry. That works, but a server registered that
+  way is served by a client that cannot draw the in-chat form.
+- **Step 3 needs no restart.** `setup` starts the settings page on its own, so the whole
+  install and the key both happen in one turn. The page runs on your machine only, and what
+  you type in it goes straight to the settings file — never through the chat.
+
+The config entry holds no credentials and needs none: the server comes up on market data
+and works the moment you restart.
 
 ### Cursor
 

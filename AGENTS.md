@@ -192,6 +192,8 @@ uvx delta-exchange-mcp
 
 There is intentionally **no HTTP transport, no Docker image, and no shared hosted endpoint**. Per-user API keys can't safely route through a shared HTTP server, and the financial-tool nature of this MCP means users should be able to read the code that runs against their account. If you find yourself adding `streamable-http`, `transport=` flags, or a `Dockerfile`, stop and discuss first.
 
+**What that rule is about, and what it is not.** It targets a *shared* server holding *other people's* keys. `setup.py` serves the settings page over HTTP and does not break it: the listener binds the loopback address, exists for one person on their own machine, and closes on the first save or after ten minutes. Nothing is shared, nothing is reachable from the network, and the key still goes only into the file it always went into. The MCP protocol itself is still stdio only — the page is a way to *fill in* settings, not a way to serve tools. Judge a future proposal the same way: ask who else could reach it and whose credentials it would hold, not whether the word HTTP appears.
+
 ## Tests
 
 `respx` mocks httpx for unit tests (no live network). Live verification happens through `scripts/smoke.py` (Python-level) and `scripts/inspect.sh --cli` (MCP-protocol-level) — both hit real testnet/prod and are run manually, not in CI. When fixing a bug surfaced by live use, add a `respx` regression test (see `test_none_params_are_stripped_before_send` and `test_signing_payload_includes_v2_prefix` for the pattern).

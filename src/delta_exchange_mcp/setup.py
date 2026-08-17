@@ -37,7 +37,7 @@ import json
 import secrets
 import threading
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -59,8 +59,13 @@ class Page:
     url: str
     server: ThreadingHTTPServer
     saved: threading.Event
+    _stopped: threading.Event = field(default_factory=threading.Event)
 
     def stop(self) -> None:
+        """Safe to call more than once: the page closes itself, and callers close it too."""
+        if self._stopped.is_set():
+            return
+        self._stopped.set()
         self.server.shutdown()
         self.server.server_close()
 
@@ -83,7 +88,7 @@ def _status(client: str) -> dict[str, Any]:
         "environment": live.env,
         "credentials_configured": live.has_credentials,
         "mode": config_mod.mode_for_client(client, shared) if client else "read",
-        "overridden": credentials.overridden_by_client(client, shared),
+        "overridden_by_client": credentials.overridden_by_client(client, shared),
         "path": str(store.path()),
         "client_name": client,
         # No live client means no handshake name, so there is nothing to scope a mode to.
@@ -212,7 +217,7 @@ class _Handler(BaseHTTPRequestHandler):
             "account": checked.detail,
             "path": str(store.path()),
             "next_step": "Restart your MCP client so it picks up the new settings.",
-            "overridden": credentials.overridden_by_client(self.client, store.read()),
+            "overridden_by_client": credentials.overridden_by_client(self.client, store.read()),
         }
 
 
@@ -245,7 +250,20 @@ def serve(client: str = "", open_browser: bool = True) -> Page:
     )
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://{origin}/{token}"
+
+    # Closes itself, so the docstring's "stops on the first save or after ten minutes" is
+    # true even when nobody is waiting on it. The tool path opens a page per call and then
+    # returns, so without this a long-running server would accumulate one listener for
+    # every time someone asked to connect their account.
+    page = Page(url=f"http://{origin}/{token}", server=server, saved=saved)
+
+    def close_when_done() -> None:
+        saved.wait(LIFETIME_SECONDS)
+        page.stop()
+
+    threading.Thread(target=close_when_done, daemon=True).start()
+
+    url = page.url
     if open_browser:
         # Best effort. A machine with no browser, or one reached over SSH, still has the
         # printed address, which is why the caller is given the URL rather than a promise.
@@ -253,4 +271,4 @@ def serve(client: str = "", open_browser: bool = True) -> Page:
             webbrowser.open(url)
         except OSError:
             pass
-    return Page(url=url, server=server, saved=saved)
+    return page
