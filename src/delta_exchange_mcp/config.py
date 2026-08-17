@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -116,19 +117,47 @@ def _credentials(shared: dict[str, str]) -> tuple[str | None, str | None]:
     )
 
 
+# A proxy may append itself and its own version to the client's name — `mcp-remote` sends
+# `claude-ai (via mcp-remote 0.1.37)` rather than `claude-ai`. Left in, the version becomes
+# part of the key, so upgrading an unrelated tool silently moves someone's trading
+# entitlement to a name nothing reads. Only a trailing `(via ...)` is removed, not any
+# parenthesis, because two clients that genuinely differ must keep differing.
+_VIA_PROXY = re.compile(r"\s*\(via\s[^)]*\)\s*$", re.IGNORECASE)
+
+
+def stable_name(client: str) -> str:
+    """The part of a client's self-reported name that survives its plumbing changing.
+
+    Only the proxy suffix goes. Surrounding whitespace is deliberately left alone: the
+    digest is taken from the name as sent, and `test_scoped_mode_keys_bind_the_exact_
+    reported_client_name` pins that two names differing only in whitespace stay two
+    clients. The pattern absorbs the space before `(via` on its own, so nothing here
+    needs to strip.
+
+    Only for keying a stored setting. Analytics wants the name exactly as sent, because
+    which proxy a request came through is the sort of thing worth counting.
+    """
+    return _VIA_PROXY.sub("", client)
+
+
 def mode_key(client: str) -> str:
     """The settings-file name carrying the trading mode for one named client.
 
     The name comes from the MCP handshake, where a client identifies itself as anything
     it likes — "Claude Desktop", "claude-ai", "Visual Studio Code". The readable part is
-    only a label; the digest of the exact, self-reported name is the binding. Without it,
+    only a label; the digest of the self-reported name is the binding. Without it,
     punctuation variants such as ``foo-bar`` and ``foo bar`` collapse to one dotenv key
     and one client can inherit another one's trading choice.
+
+    The name is first put through `stable_name`, so reaching the same server through a
+    proxy lands on the same key as reaching it directly. Someone who turned trading on
+    once should not find it off because a bridge they may not know about was upgraded.
 
     This is collision-resistant convenience scoping, not authenticated client identity.
     A client can still claim another client's exact name; a future protocol-level host id
     is needed to make that an authorization boundary.
     """
+    client = stable_name(client)
     display = client.strip()
     if not display:
         return ""

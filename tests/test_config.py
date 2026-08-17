@@ -135,6 +135,37 @@ def test_scoped_mode_keys_bind_the_exact_reported_client_name():
     assert all(key.startswith("DELTA_MCP_MODE_") for key in keys)
 
 
+def test_reaching_the_server_through_a_proxy_keeps_one_trading_key():
+    """`mcp-remote` puts itself *and its own version* inside the client's name.
+
+    It reports `claude-ai (via mcp-remote 0.1.37)` rather than `claude-ai`. With that in
+    the key, the same person on the same machine gets one entitlement natively and another
+    through the bridge — and upgrading the bridge, which has nothing to do with trading,
+    moves the key again and silently switches trading off. Someone who turned it on once
+    should not lose it to an unrelated tool upgrade.
+    """
+    native = config_mod.mode_key("claude-ai")
+    old_bridge = config_mod.mode_key("claude-ai (via mcp-remote 0.1.37)")
+    new_bridge = config_mod.mode_key("claude-ai (via mcp-remote 0.2.0)")
+    assert native == old_bridge == new_bridge
+
+    # Only a trailing proxy marker is removed. A parenthesis a client chose for itself is
+    # part of who it says it is, and two clients that genuinely differ must keep differing.
+    assert config_mod.mode_key("Some Client (beta)") != config_mod.mode_key("Some Client")
+    assert config_mod.mode_key("claude-ai") != config_mod.mode_key("claude-code")
+
+
+def test_the_name_a_proxy_rewrote_is_still_reported_in_full():
+    """Analytics wants the bridge visible; only the stored key is normalised.
+
+    Which proxy a request came through, and which version of it, is exactly the sort of
+    thing worth counting — so the normalisation must not reach the name itself.
+    """
+    reported = "claude-ai (via mcp-remote 0.1.37)"
+    assert config_mod.stable_name(reported) == "claude-ai"
+    assert reported == "claude-ai (via mcp-remote 0.1.37)"
+
+
 def test_punctuation_only_client_names_still_make_legal_distinct_keys():
     first = config_mod.mode_key("!!!")
     second = config_mod.mode_key("???")
