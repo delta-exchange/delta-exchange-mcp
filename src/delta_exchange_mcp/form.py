@@ -923,13 +923,15 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             )
         return f"{reads} Trading stays off for {scope}."
 
-    # Not read-only: opening mints a one-use grant, which is process state. Harmless and
-    # repeatable though, so nothing here asks a client to hesitate.
+    # Not read-only: opening mints a one-use grant, which is process state. Not idempotent
+    # either, and that one matters — a second call replaces the connection's outstanding
+    # grant, so a form already open on screen can no longer save. Telling a client this is
+    # safe to retry would invite exactly that.
     @mcp.tool(
         annotations=hints.mutates(
             "Connect your Delta account",
             destructive=False,
-            idempotent=True,
+            idempotent=False,
             external=False,
         ),
         meta=_OPENS_VIEW,
