@@ -337,8 +337,13 @@ _TEMPLATE = """<!DOCTYPE html>
      their native look and keyboard behaviour. A label is already the hit area for the
      control it wraps, so growing the label grows the target without touching the control. */
   @media (pointer: coarse) {
-    input[type=text], input[type=password], select { padding: .7em .6em; }
-    button:not(.link) { min-height: 44px; padding: .7em 1.15em; }
+    /* Growing the controls costs height, and the ceiling does not move for a phone. The
+       room comes back out of the gaps: .72em still separates one question from the next
+       clearly at this size, and it buys more than the controls spend. Measured with the
+       harness's touch control: 517px before this line, 495px after. */
+    :root { --gap: .72em; }
+    input[type=text], input[type=password], select { padding: .65em .6em; }
+    button:not(.link) { min-height: 44px; padding: .65em 1.15em; }
     .choice, .reveal { min-height: 24px; }
     button.link { min-height: 24px; display: inline-flex; align-items: center; }
   }

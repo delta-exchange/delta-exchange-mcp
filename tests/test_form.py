@@ -395,3 +395,21 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     # The one instruction that matters: a model asked for help with a key will otherwise
     # offer to take it in the chat, and people accept.
     assert "never ask them to send a key" in text
+
+
+def test_the_harness_can_still_find_the_touch_rules_it_injects():
+    """`(pointer: coarse)` answers to the device, so no page can ask to be measured as one.
+
+    `scripts/host.py` therefore lifts these declarations out of the view and injects them
+    unwrapped, which is the only way to see the touch layout's height — and the touch
+    layout is the one at risk, because larger targets are what make it taller. It was 517px
+    against a 500px ceiling before anything could measure it. If this block is renamed or
+    reformatted past the harness's pattern, the harness reports the mouse height under a
+    control that says touch, which is worse than not having the control at all.
+    """
+    import re as _re
+
+    pattern = _re.compile(r"@media \(pointer: coarse\) \{\n(.*?)\n  \}", _re.S)
+    found = pattern.search(form.VIEW_HTML)
+    assert found is not None, "scripts/host.py could no longer find the touch rules"
+    assert "min-height: 44px" in found.group(1)
