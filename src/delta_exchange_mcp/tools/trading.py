@@ -19,7 +19,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
-from delta_exchange_mcp import request
+from delta_exchange_mcp import hints, request
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -200,21 +200,37 @@ def register(
     _tick_list_loaded = {"done": False}
 
     def mutation_tool(
-        function: Callable[..., Awaitable[Any]],
-    ) -> Callable[..., Awaitable[Any]]:
-        """Pin every request in one dispatched mutation to the same client state."""
+        title: str, *, destructive: bool, idempotent: bool
+    ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+        """Pin every request in one dispatched mutation to the same client state.
 
-        @wraps(function)
-        async def pinned(*args: Any, **kwargs: Any) -> Any:
-            lease = gate.lease(request.peer(request.session.get()))
-            token = active_lease.set(lease)
-            try:
-                async with client.pin():
-                    return await function(*args, **kwargs)
-            finally:
-                active_lease.reset(token)
+        It also carries the annotations, which is why it takes arguments rather than
+        wrapping bare. Putting them here rather than on thirteen registrations keeps the
+        `_meta` mutating flag and the client-facing hints in one place, so a new mutation
+        cannot acquire one and miss the other.
+        """
 
-        return mcp.tool(meta=_MUTATING_TOOL_META)(pinned)
+        def decorate(
+            function: Callable[..., Awaitable[Any]],
+        ) -> Callable[..., Awaitable[Any]]:
+            @wraps(function)
+            async def pinned(*args: Any, **kwargs: Any) -> Any:
+                lease = gate.lease(request.peer(request.session.get()))
+                token = active_lease.set(lease)
+                try:
+                    async with client.pin():
+                        return await function(*args, **kwargs)
+                finally:
+                    active_lease.reset(token)
+
+            return mcp.tool(
+                annotations=hints.mutates(
+                    title, destructive=destructive, idempotent=idempotent
+                ),
+                meta=_MUTATING_TOOL_META,
+            )(pinned)
+
+        return decorate
 
     def _store_product(prod: dict[str, Any]) -> None:
         tick = prod.get("tick_size")
@@ -322,7 +338,7 @@ def register(
 
     # ---------------------------------------------------------------- single order
 
-    @mutation_tool
+    @mutation_tool("Place order", destructive=False, idempotent=False)
     async def place_order(
         size: int = Field(description="Order size in contracts."),
         side: str = Field(description="buy or sell."),
@@ -394,7 +410,7 @@ def register(
         result = await _finish("place_order", "POST", "/orders", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Edit order", destructive=True, idempotent=True)
     async def edit_order(
         id: int = Field(description="Order id to edit."),
         size: int = Field(description="Total size after the edit."),
@@ -427,7 +443,7 @@ def register(
         result = await _finish("edit_order", "PUT", "/orders", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Cancel order", destructive=True, idempotent=True)
     async def cancel_order(
         product_id: int = Field(description="Product id the order belongs to."),
         id: int | None = Field(default=None, description="Order id to cancel."),
@@ -440,7 +456,7 @@ def register(
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("cancel_order", "DELETE", "/orders", payload, dry_run=dry_run)
 
-    @mutation_tool
+    @mutation_tool("Cancel all orders", destructive=True, idempotent=True)
     async def cancel_all_orders(
         product_id: int | None = Field(default=None, description="Limit to one product."),
         contract_types: list[str] | None = Field(
@@ -483,7 +499,7 @@ def register(
             raise ValueError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
         return [_clean(o) for o in orders]
 
-    @mutation_tool
+    @mutation_tool("Place orders in batch", destructive=False, idempotent=False)
     async def place_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 orders, each {size, side, order_type, limit_price?, "
@@ -516,7 +532,7 @@ def register(
         result = await _finish("place_batch_orders", "POST", "/orders/batch", payload, dry_run=dry_run)
         return _flag_partial(result, cleaned)
 
-    @mutation_tool
+    @mutation_tool("Edit orders in batch", destructive=True, idempotent=True)
     async def edit_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 edits, each {id, size, order_type, limit_price?, post_only?}."
@@ -538,7 +554,7 @@ def register(
         result = await _finish("edit_batch_orders", "PUT", "/orders/batch", payload, dry_run=dry_run)
         return _flag_partial(result, cleaned)
 
-    @mutation_tool
+    @mutation_tool("Cancel orders in batch", destructive=True, idempotent=True)
     async def cancel_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 orders to cancel, each {id} or {client_order_id}."
@@ -560,7 +576,7 @@ def register(
 
     # ---------------------------------------------------------------- bracket orders
 
-    @mutation_tool
+    @mutation_tool("Place bracket order", destructive=False, idempotent=False)
     async def place_bracket_order(
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
@@ -604,7 +620,7 @@ def register(
         result = await _finish("place_bracket_order", "POST", "/orders/bracket", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Edit bracket order", destructive=True, idempotent=True)
     async def edit_bracket_order(
         id: int = Field(description="Order id whose bracket params to update."),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
@@ -649,7 +665,7 @@ def register(
 
     # ---------------------------------------------------------------- positions & leverage
 
-    @mutation_tool
+    @mutation_tool("Set leverage", destructive=True, idempotent=True)
     async def set_product_leverage(
         product_id: int = Field(description="Product id to set order leverage for."),
         leverage: str = Field(description="Leverage multiplier, e.g. '10'."),
@@ -661,7 +677,7 @@ def register(
             f"/products/{product_id}/orders/leverage", {"leverage": leverage}, dry_run=dry_run,
         )
 
-    @mutation_tool
+    @mutation_tool("Adjust position margin", destructive=True, idempotent=False)
     async def adjust_position_margin(
         product_id: int = Field(description="Product id of the position."),
         delta_margin: str = Field(description="Margin to add (positive) or remove (negative), e.g. '5.0'."),
@@ -673,7 +689,7 @@ def register(
             "adjust_position_margin", "POST", "/positions/change_margin", payload, dry_run=dry_run
         )
 
-    @mutation_tool
+    @mutation_tool("Close all positions", destructive=True, idempotent=True)
     async def close_all_positions(
         close_all_portfolio: bool = Field(default=False, description="Close cross/portfolio-margined positions."),
         close_all_isolated: bool = Field(default=False, description="Close isolated-margin positions."),
@@ -694,7 +710,7 @@ def register(
         }
         return await _finish("close_all_positions", "POST", "/positions/close_all", payload, dry_run=dry_run)
 
-    @mutation_tool
+    @mutation_tool("Configure auto top-up", destructive=True, idempotent=True)
     async def configure_auto_topup(
         product_id: int = Field(description="Product id of the position."),
         auto_topup: bool = Field(description="Enable or disable auto top-up for this position."),
