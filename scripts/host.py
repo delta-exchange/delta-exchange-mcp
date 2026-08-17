@@ -1,6 +1,6 @@
 """Render the credential view inside a stand-in host, to see and measure it.
 
-`CLAUDE.md` has described this harness for a while; this is the file it meant. It exists
+`AGENTS.md` has described this harness for a while; this is the file it meant. It exists
 because two things about the view can only be judged against a host, and neither shows up
 in a unit test: the height it asks the host to draw, which the directory caps at 500px, and
 how it looks once the host's own palette and typeface are applied over Delta's fallbacks.
