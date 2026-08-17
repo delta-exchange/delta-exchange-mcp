@@ -115,6 +115,7 @@ from mcp.types import CallToolResult, TextContent
 from delta_exchange_mcp import credentials, hints, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
+    CREDENTIAL_NAMES,
     DASHBOARDS,
     DEFAULT_ENV,
     DEFAULT_MODE,
@@ -911,7 +912,7 @@ def _override_message(overridden: list[str]) -> str:
     key, against the site it was not created on, where Delta rejects it as unknown.
     """
     names = set(overridden)
-    if {"DELTA_API_KEY", "DELTA_API_SECRET"} & names:
+    if set(CREDENTIAL_NAMES) & names:
         consequence = "so this key will not be used at all"
     elif "DELTA_MCP_ENV" in names:
         consequence = (

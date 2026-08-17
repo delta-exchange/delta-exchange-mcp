@@ -14,7 +14,13 @@ import httpx
 
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.config import BASE_URLS, DEFAULT_MODE, Config, load, mode_key
+from delta_exchange_mcp.config import (
+    BASE_URLS,
+    CREDENTIAL_NAMES,
+    DEFAULT_MODE,
+    Config,
+    mode_key,
+)
 from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure
 
 
@@ -48,25 +54,40 @@ def overridden_by_client(
     verifies one account against Delta, reports it by name, and the server goes on signing
     with a different one.
 
-    Compares what `config` actually resolves against what the file holds, rather than
-    restating the precedence rules, so this cannot drift from them. Presence alone is the
-    wrong test twice over. A client pinning the environment to the value the user chose
-    overrides nothing that matters, and the Cursor install link sets DELTA_MCP_ENV for
-    everyone — so that test would tell every Cursor user their working key was ignored.
-    A file with nothing in it is not being overridden either.
+    The question is which fields this page cannot change, so the test is whether the
+    process environment supplies the value — that is the layer `config.setting` puts first,
+    and nothing written to the file can outrank it. Presence alone is still the wrong test:
+    a client pinning a setting to the value the file already holds changes no outcome, and
+    the Cursor install link sets DELTA_MCP_ENV for everyone, so presence alone would tell
+    every Cursor user their working key was ignored.
+
+    An empty file is not an exemption, and that is the case worth stating. A client that
+    supplies a key while the file holds none leaves a field that looks editable, accepts
+    what someone types, verifies it against Delta, names the account back to them, and then
+    signs every request with the client's key instead.
     """
     stored = store.read() if shared is None else shared
-    live = load(stored)
-    effective = {
-        "DELTA_MCP_ENV": live.env,
-        "DELTA_API_KEY": live.api_key,
-        "DELTA_API_SECRET": live.api_secret,
-    }
-    overridden = [
-        name
-        for name, in_use in effective.items()
-        if (saved := (stored.get(name) or "").strip()) and saved != in_use
-    ]
+
+    def supplied(name: str) -> str:
+        return (os.environ.get(name) or "").strip()
+
+    def held(name: str) -> str:
+        return (stored.get(name) or "").strip()
+
+    overridden: list[str] = []
+    # Compared in lower case because `config` lower-cases this one before using it, so
+    # INDIA_PROD and india_prod are one answer and neither overrides the other.
+    if (chosen := supplied("DELTA_MCP_ENV").lower()) and chosen != held("DELTA_MCP_ENV").lower():
+        overridden.append("DELTA_MCP_ENV")
+
+    # Both names or neither. `config` reads the key and the secret from whichever source
+    # holds either one, so a client supplying just the key also decides the secret — and
+    # the secret it decides is nothing at all. Locking only the field the client named
+    # would leave the other one editable and still unusable.
+    if any(supplied(name) for name in CREDENTIAL_NAMES) and any(
+        supplied(name) != held(name) for name in CREDENTIAL_NAMES
+    ):
+        overridden.extend(CREDENTIAL_NAMES)
     if client and (scoped := mode_key(client)):
         saved_mode = (stored.get(scoped) or "").strip().lower() or DEFAULT_MODE
         process_mode = (os.environ.get("DELTA_MCP_MODE") or "").strip().lower()
