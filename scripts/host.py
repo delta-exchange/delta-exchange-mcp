@@ -18,7 +18,11 @@ hosts never do.
     uv run python scripts/host.py            # write it and print the path
     uv run python scripts/host.py --open     # and open it in the default browser
 
-Append `?chrome=tight` or `?theme=dark` to the URL, or use the controls at the top.
+Append `?chrome=tight`, `?theme=dark` or `?pointer=coarse` to the URL, or use the controls
+at the top. **Touch sizing has to be asked for.** The view's larger targets sit behind
+`@media (pointer: coarse)`, which answers to the device rather than to the page, so without
+that control the height report describes the mouse layout only — and the touch layout is
+the one at risk of passing the ceiling, because larger targets are what make it taller.
 """
 
 from __future__ import annotations
@@ -26,11 +30,20 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import tempfile
 import webbrowser
 from pathlib import Path
 
 from delta_exchange_mcp import form
+
+# The view asks for larger targets only behind `@media (pointer: coarse)`, and a page cannot
+# tell the browser it has a finger — pointer type is a device fact, not a CSS one. So the
+# harness lifts those rules straight out of the view and injects them unwrapped, which
+# exercises the real declarations rather than a copy that can drift from them. Without this
+# the height report only ever describes the mouse layout, and a touch-only regression could
+# push past the ceiling unseen.
+_COARSE = re.compile(r"@media \(pointer: coarse\) \{\n(.*?)\n  \}", re.S)
 
 # Representative of what a host actually sends. The names are the ones the view reads; the
 # values only have to be plausible, because what is being checked is that the view follows
@@ -118,12 +131,14 @@ TEMPLATE = """<!DOCTYPE html>
     </select>
   </label>
   <label><input type="checkbox" id="palette" checked> send the host palette</label>
+  <label><input type="checkbox" id="coarse"> touch sizing</label>
   <span id="readout">height: waiting…</span>
 </header>
 <main><div id="column"><div id="box"><iframe id="frame" title="credential view" srcdoc="__VIEW__"></iframe></div></div></main>
 <script>
   var PALETTES = __PALETTES__;
   var STATUS = __STATUS__;
+  var COARSE_RULES = __COARSE__;
   var CEILING = 500;
 
   var params = new URLSearchParams(location.search);
@@ -133,9 +148,11 @@ TEMPLATE = """<!DOCTYPE html>
   var chromeEl = document.getElementById("chrome");
   var themeEl = document.getElementById("theme");
   var paletteEl = document.getElementById("palette");
+  var coarseEl = document.getElementById("coarse");
 
   chromeEl.value = params.get("chrome") || "host";
   themeEl.value = params.get("theme") || "light";
+  coarseEl.checked = params.get("pointer") === "coarse";
 
   function hostContext() {
     return {
@@ -182,7 +199,8 @@ TEMPLATE = """<!DOCTYPE html>
     if (msg.method === "ui/notifications/size-changed") {
       var h = msg.params.height;
       frame.style.height = h + "px";
-      readout.textContent = "height: " + h + "px  (ceiling " + CEILING + ")";
+      readout.textContent = "height: " + h + "px  (" +
+        (coarseEl.checked ? "touch" : "mouse") + ", ceiling " + CEILING + ")";
       readout.className = h > CEILING ? "over" : "";
       return;
     }
@@ -207,10 +225,46 @@ TEMPLATE = """<!DOCTYPE html>
   // place and report a "no palette" height that still had the palette in it.
   paletteEl.addEventListener("change", function () { frame.contentWindow.location.reload(); });
   chromeEl.addEventListener("change", applyChrome);
+
+  // The frame is srcdoc, so it inherits this origin and its document is reachable from
+  // here. Injecting the view's own coarse rules unwrapped is the only way to see the touch
+  // layout: `(pointer: coarse)` answers to the device, and no page can claim to be one.
+  function applyPointer() {
+    var d = frame.contentDocument;
+    if (!d || !d.head) return;
+    var existing = d.getElementById("harness-coarse");
+    if (coarseEl.checked && !existing) {
+      var style = d.createElement("style");
+      style.id = "harness-coarse";
+      style.textContent = COARSE_RULES;
+      d.head.appendChild(style);
+    } else if (!coarseEl.checked && existing) {
+      existing.remove();
+    }
+    frame.contentWindow.dispatchEvent(new Event("resize"));
+  }
+  coarseEl.addEventListener("change", applyPointer);
+  frame.addEventListener("load", function () { if (coarseEl.checked) applyPointer(); });
+  if (coarseEl.checked) setTimeout(applyPointer, 300);
 </script>
 </body>
 </html>
 """
+
+
+def coarse_rules() -> str:
+    """The view's own coarse-pointer declarations, unwrapped so they can be injected.
+
+    Fails loudly rather than returning nothing: a harness that silently measures only the
+    mouse layout while its control says otherwise is worse than one that refuses to build.
+    """
+    found = _COARSE.search(form.VIEW_HTML)
+    if found is None:
+        raise SystemExit(
+            "no '@media (pointer: coarse)' block found in the view — the touch-sizing "
+            "control would measure nothing. Update the pattern in this file."
+        )
+    return found.group(1)
 
 
 def render() -> str:
@@ -219,6 +273,7 @@ def render() -> str:
         TEMPLATE.replace("__VIEW__", html.escape(form.VIEW_HTML, quote=True))
         .replace("__PALETTES__", json.dumps(PALETTES))
         .replace("__STATUS__", json.dumps(STATUS))
+        .replace("__COARSE__", json.dumps(coarse_rules()))
     )
 
 
@@ -228,7 +283,10 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="open it in the default browser")
     args = parser.parse_args()
 
-    target = args.out or Path(tempfile.gettempdir()) / "delta-host-harness.html"
+    # Resolved, not as given: `as_uri()` rejects a relative path outright, so `--out
+    # page.html --open` would build the file and then die instead of opening it. The
+    # printed path is what someone pastes into a browser, so it wants to be absolute too.
+    target = (args.out or Path(tempfile.gettempdir()) / "delta-host-harness.html").resolve()
     target.write_text(render())
     print(f"{target}  (view build {form.build_id()})")
     if args.open:
