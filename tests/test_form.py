@@ -174,13 +174,46 @@ def test_the_view_names_no_type_size_of_its_own():
     assert offenders == [], f"these name a size instead of asking for one: {offenders}"
 
 
+def _contrast(one: str, two: str) -> float:
+    """WCAG relative-luminance ratio between two `#rrggbb` colours."""
+
+    def luminance(colour: str) -> float:
+        raw = [int(colour.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in raw]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    high, low = sorted((luminance(one), luminance(two)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
 def test_the_view_carries_delta_s_own_brand_colours():
     """Surfaces follow the host, but the accent has to be Delta's or it is a generic form."""
-    # --brand-india-bg-primary and its hover, from delta.exchange's own token set.
+    # --brand-india-bg-primary from delta.exchange's own token set, used for the mark.
     assert "#fe6c02" in form.VIEW_HTML
-    assert "#e76202" in form.VIEW_HTML
     # The official mark, inlined because nothing may be fetched.
     assert 'viewBox="0 0 53 52"' in form.VIEW_HTML
+
+
+def test_every_colour_that_carries_text_is_readable_in_light_mode():
+    """Delta's orange is the mark's colour, and it is too light to put white text on.
+
+    Measured against white it is 2.85:1, short of the 4.5:1 that text needs and even of the
+    3:1 a control's edge needs. A logo is exempt from both, so the mark keeps it and every
+    interactive fill takes a darkened stop instead. Reading the values out of the stylesheet
+    rather than restating them here is what makes this catch a change to either one.
+    """
+    tokens = dict(re.findall(r"(--(?:brand-strong|brand-strong-hover)):\s*(#[0-9a-f]{6})", form.VIEW_HTML))
+    assert set(tokens) == {"--brand-strong", "--brand-strong-hover"}, tokens
+    for name, colour in tokens.items():
+        ratio = _contrast(colour, "#ffffff")
+        assert ratio >= 4.5, f"{name} is {colour}, only {ratio:.2f}:1 against white text"
+
+    # The light stop of each semantic pair, which is prose on the form's own background.
+    for name in ("positive", "negative"):
+        light = re.search(rf"--{name}:[^;]*light-dark\((#[0-9a-f]{{6}}),", form.VIEW_HTML)
+        assert light, f"--{name} no longer names a light stop"
+        ratio = _contrast(light.group(1), "#ffffff")
+        assert ratio >= 4.5, f"--{name} light is {light.group(1)}, only {ratio:.2f}:1 on white"
 
 
 def test_the_view_carries_the_dashboards_the_rest_of_the_package_uses():
