@@ -5,7 +5,9 @@ a client's handshake to an outbound HTTP header. Asserting on `analytics.headers
 would pass while the contextvars that carry the session and the tool name were never set.
 """
 
+import json
 import re
+from urllib.parse import unquote
 
 import httpx
 import mcp.types as types
@@ -153,6 +155,27 @@ async def test_a_client_that_describes_itself_at_length_cannot_break_the_request
     # The fields that get filtered on survive the trim; only the long tail gives way.
     assert sent[f"{analytics.PREFIX}Client"] == "verbose"
     assert sent[f"{analytics.PREFIX}Tool"] == "get_ticker"
+
+
+@respx.mock
+async def test_the_context_header_is_always_readable_json():
+    """Staying inside the budget is not enough; the header has to be parseable.
+
+    Bounding it by cutting the string to a length lands mid-token and produces JSON no
+    consumer can read — a header that is present, within budget, and useless. It is bounded
+    by dropping whole fields instead, so it is always either complete or one field shorter.
+    Sizes here straddle the point where a per-field limit used to cut it.
+    """
+    for length in (10, 150, 400, 5000):
+        sent = await call_ticker(
+            types.Implementation(name="c", version="1", title="T" * length)
+        )
+        raw = sent.get(f"{analytics.PREFIX}Context")
+        if raw is None:
+            continue
+        decoded = unquote(raw)
+        parsed = json.loads(decoded)  # raises if it was cut mid-token
+        assert isinstance(parsed, dict), decoded
 
 
 @respx.mock

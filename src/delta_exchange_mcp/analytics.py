@@ -59,9 +59,20 @@ _FIELD_LIMIT = 200
 _SAFE = " !\"#$&'()*+,-./:;<=>?@[]^_`{|}~"
 
 
+def encode(value: str) -> str:
+    """Make a string safe to be a header value, changing nothing else about it.
+
+    Kept separate from `clean` because the JSON header must not be shortened here. Cutting
+    a string to a length is right for a name and wrong for a serialized object: it lands
+    mid-token and produces a header that no consumer can read at all. The JSON header is
+    bounded by dropping whole fields instead, in `headers`.
+    """
+    return quote(value, safe=_SAFE)
+
+
 def clean(value: str) -> str:
-    """A header-safe rendering of a string the client chose."""
-    return quote(value.strip()[:_FIELD_LIMIT], safe=_SAFE)
+    """A header-safe rendering of one bounded field the client chose."""
+    return encode(value.strip()[:_FIELD_LIMIT])
 
 
 class Sessions:
@@ -163,7 +174,7 @@ def headers(
     # the last one, so the smallest useful payload still gets its chance.
     droppable = ["capabilities", "description", "icons", "title", "website_url"]
     while extra:
-        encoded = clean(json.dumps(extra, separators=(",", ":"), sort_keys=True))
+        encoded = encode(json.dumps(extra, separators=(",", ":"), sort_keys=True))
         if spent + len(CONTEXT_HEADER) + len(encoded) + 4 <= BUDGET_BYTES:
             out[CONTEXT_HEADER] = encoded
             break
