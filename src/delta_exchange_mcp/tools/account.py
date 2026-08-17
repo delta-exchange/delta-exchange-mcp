@@ -372,7 +372,13 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         """User profile."""
         return await client.get("/profile", auth=True)
 
-    @mcp.tool(annotations=hints.reads("Export fills"))
+    # The one tool here that is not read-only: it writes a CSV, and `write_bytes` replaces
+    # an existing file rather than refusing. Annotating it read-only would let a client
+    # present overwriting someone's file as a harmless lookup. Idempotent because a repeat
+    # rewrites the same path rather than accumulating anything.
+    @mcp.tool(
+        annotations=hints.mutates("Export fills", destructive=True, idempotent=True)
+    )
     async def bulk_fills_export(
         output_path: str = Field(
             description=(

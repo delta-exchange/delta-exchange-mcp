@@ -720,3 +720,78 @@ async def test_a_key_delta_rejects_changes_nothing(monkeypatch):
         assert (await save(session))["status"] == "rejected"
         assert not session.saw_tool_list_changed()
         assert "get_positions" not in await session.tool_names()
+
+
+# --- what the annotations promise ------------------------------------------------------
+
+
+def _isolate(tmp_path, monkeypatch):
+    """Keep a full-surface build off the real settings file and audit log."""
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    monkeypatch.setattr(store, "path", lambda: tmp_path / "config.env")
+
+
+def _full_surface_config():
+    """Every tool that can carry a risk, registered at once: credentials and trade mode.
+
+    Debug logging stays off deliberately. It would add `get_debug_status`, which only
+    reports a path, and turning it on attaches a file handler to a module-level logger
+    that outlives the test and then breaks the debug-log test that runs after it.
+    """
+    return config_mod.Config(
+        env="india_testnet",
+        base_url=config_mod.BASE_URLS["india_testnet"],
+        api_key="k" * 20,
+        api_secret="s" * 20,
+        mode="trade",
+    )
+
+
+# Everything that changes something a person would notice: the trading mutations, the two
+# form saves, opening the form (which mints a grant), and the fills export, which writes a
+# CSV over whatever is already at that path. Everything not named here only reports.
+WRITES = frozenset(
+    {"bulk_fills_export", "setup_credentials", "save_credentials", "save_mode"}
+)
+
+
+async def test_every_tool_that_changes_something_says_so(tmp_path, monkeypatch):
+    """A read-only annotation is a client's licence to call without asking first.
+
+    `bulk_fills_export` carried one while calling `write_bytes`, which replaces an existing
+    file rather than refusing — so a client could have presented overwriting someone's CSV
+    as a harmless lookup. Naming the writers here rather than the readers is deliberate: a
+    new tool is read-only by omission only if someone decides it is, and a new mutation
+    added without an annotation fails this instead of passing quietly.
+    """
+    _isolate(tmp_path, monkeypatch)
+    from delta_exchange_mcp.tools import trading
+
+    tools = await server.build_server(_full_surface_config()).list_tools()
+    expected = WRITES | trading.TOOL_NAMES
+
+    changes = {t.name for t in tools if not t.annotations.read_only_hint}
+    assert changes == expected, (
+        f"claiming to write but should not: {sorted(changes - expected)}; "
+        f"claiming read-only but writes: {sorted(expected - changes)}"
+    )
+
+
+async def test_no_tool_claims_a_repeat_is_free_when_it_is_not(tmp_path, monkeypatch):
+    """`idempotent` tells a client a retry costs nothing, so a wrong one invites a retry.
+
+    Opening the form replaces the connection's outstanding one-use grant, which leaves a
+    form already on screen unable to save. Placing an order twice leaves two orders, and
+    adding margin twice adds it twice. None of those may be marked repeatable.
+    """
+    _isolate(tmp_path, monkeypatch)
+
+    tools = {t.name: t for t in await server.build_server(_full_surface_config()).list_tools()}
+    for name in (
+        "setup_credentials",
+        "place_order",
+        "place_batch_orders",
+        "place_bracket_order",
+        "adjust_position_margin",
+    ):
+        assert tools[name].annotations.idempotent_hint is False, name
