@@ -6,6 +6,7 @@ header it accepts, and whether a wrong path is distinguishable from a right one.
 """
 
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -166,3 +167,51 @@ def test_the_page_reports_which_settings_a_client_is_overriding(page, monkeypatc
 def test_an_unknown_request_is_refused_rather_than_guessed(page):
     assert fetch(f"{page.url}/rpc", body={"method": "tools/call", "params": {"name": "rm"}})[0] == 400
     assert fetch(f"{page.url}/rpc", body={"method": "something/else"})[0] == 400
+
+
+def test_a_page_that_expired_unsaved_knows_it_is_closed(monkeypatch, tmp_path):
+    """A page nobody used closes on its own, and must not be handed out again.
+
+    Nothing sets the saved flag in that case, so asking "was it saved?" calls the dead
+    listener alive and offers an address that refuses to connect. Driven with a real
+    expiry rather than by calling `stop`, because the bug was in the expiry path.
+    """
+    monkeypatch.setattr(store, "path", lambda: tmp_path / "config.env")
+    monkeypatch.setattr(setup, "LIFETIME_SECONDS", 0.3)
+
+    expiring = setup.serve(client="", open_browser=False)
+    assert expiring.running
+    assert fetch(expiring.url)[0] == 200
+
+    time.sleep(1.0)
+    assert not expiring.saved.is_set(), "nothing was saved, which is the point"
+    assert not expiring.running, "an expired page must report itself closed"
+    with pytest.raises(urllib.error.URLError):
+        fetch(expiring.url)
+
+
+def test_a_saved_page_also_reports_itself_closed(page, monkeypatch):
+    """The other way it ends. One question has to answer for every way of closing."""
+
+    async def accepted(env, key, secret):
+        return credentials.Check(ok=True, reachable=True, detail="someone@delta.exchange")
+
+    monkeypatch.setattr(credentials, "check", accepted)
+    fetch(
+        f"{page.url}/rpc",
+        body={
+            "method": "tools/call",
+            "params": {
+                "name": "save_credentials",
+                "arguments": {
+                    "environment": "india_testnet",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+        },
+    )
+    deadline = time.time() + 5
+    while page.running and time.time() < deadline:
+        time.sleep(0.05)
+    assert not page.running

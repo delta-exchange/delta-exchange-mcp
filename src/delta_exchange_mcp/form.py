@@ -1096,7 +1096,7 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
         from delta_exchange_mcp import setup as setup_page
 
         live = opened_page["page"]
-        if live is not None and not live.saved.is_set():
+        if live is not None and live.running:
             return live
         try:
             page = setup_page.serve(client=client, open_browser=False)

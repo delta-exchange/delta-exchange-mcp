@@ -61,6 +61,17 @@ class Page:
     saved: threading.Event
     _stopped: threading.Event = field(default_factory=threading.Event)
 
+    @property
+    def running(self) -> bool:
+        """Whether the address still answers.
+
+        Ask this before handing the address out again. "Was it saved?" is the wrong
+        question and looks like the right one: a page that simply expired was never saved,
+        so that test calls a dead listener alive and offers a URL that refuses to connect.
+        There are three ways to close, and this covers all three rather than naming them.
+        """
+        return not self._stopped.is_set()
+
     def stop(self) -> None:
         """Safe to call more than once: the page closes itself, and callers close it too."""
         if self._stopped.is_set():
