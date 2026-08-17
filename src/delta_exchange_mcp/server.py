@@ -430,6 +430,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip the check against Delta and save whatever is entered",
     )
+    setup_parser = sub.add_parser(
+        "setup",
+        help="open a settings page in your browser to enter your API key",
+    )
+    setup_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the address instead of opening it",
+    )
     return parser
 
 
@@ -440,6 +449,34 @@ def main(argv: list[str] | None = None) -> None:
         from delta_exchange_mcp import login
 
         raise SystemExit(login.run(verify=not args.no_verify))
+
+    if args.command == "setup":
+        from delta_exchange_mcp import setup as setup_page
+
+        # Needs no MCP client running, which is the point of it: an agent can install this
+        # server and configure the account in one turn, with no restart in between.
+        page = setup_page.serve(open_browser=not args.no_browser)
+        # First line, and always printed. Whoever called this may be an agent capturing
+        # stdout, and the browser may not have opened — over SSH, or on a machine with
+        # none. The address is the answer either way.
+        print(page.url, flush=True)
+        print(
+            "Waiting for you to finish. This page closes itself once saved, "
+            f"or after {setup_page.LIFETIME_SECONDS // 60} minutes.",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            saved = page.wait()
+        except KeyboardInterrupt:
+            saved = False
+        finally:
+            page.stop()
+        if saved:
+            print("Saved. Restart your MCP client so it reads the new settings.", file=sys.stderr)
+        else:
+            print("Nothing was saved.", file=sys.stderr)
+        raise SystemExit(0 if saved else 1)
 
     cfg = config_mod.load()
     mcp = build_server(cfg)

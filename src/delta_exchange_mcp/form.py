@@ -484,9 +484,16 @@ _TEMPLATE = """<!DOCTYPE html>
     resize();
   }
 
+  // The one seam between the two surfaces this document serves. Inside a host it is an
+  // MCP App and everything travels by postMessage to the frame's parent; opened in a
+  // browser from `delta-exchange-mcp setup` there is no parent, and the same calls go to
+  // the loopback server over HTTP. Every caller below is written once and works either way.
+  var IN_APP = CONFIG.transport !== "page";
+
   function post(msg) { window.parent.postMessage(msg, "*"); }
 
   function request(method, params, timeoutMs) {
+    if (!IN_APP) return httpRequest(method, params || {});
     var id = nextId++;
     post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
     return new Promise(function (resolve, reject) {
@@ -494,6 +501,29 @@ _TEMPLATE = """<!DOCTYPE html>
       setTimeout(function () {
         if (pending[id]) { delete pending[id]; reject(new Error(method + " timed out")); }
       }, timeoutMs || 30000);
+    });
+  }
+
+  // The page half. `ui/initialize` has no host to answer it, so it resolves with no
+  // context and the view keeps the fallback palette it already draws against — the same
+  // path a host that sends nothing takes. Opening a link is the browser's own job here.
+  function httpRequest(method, params) {
+    if (method === "ui/initialize") return Promise.resolve({});
+    if (method === "ui/open-link") {
+      window.open(params.url, "_blank", "noopener");
+      return Promise.resolve({});
+    }
+    return fetch(CONFIG.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method: method, params: params })
+    }).then(function (response) {
+      return response.json().then(function (body) {
+        if (!response.ok || body.error) {
+          throw new Error((body.error && body.error.message) || "request failed");
+        }
+        return body.result;
+      });
     });
   }
 
@@ -527,6 +557,9 @@ _TEMPLATE = """<!DOCTYPE html>
   }
 
   window.addEventListener("message", function (event) {
+    // Unframed, `window.parent` is this window, so without this a page could be driven by
+    // a message it posted to itself.
+    if (!IN_APP) return;
     if (event.source !== window.parent) return;
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
@@ -557,6 +590,8 @@ _TEMPLATE = """<!DOCTYPE html>
   // only grow the frame: one long error message would leave it tall for the rest of the
   // conversation. Forcing intrinsic sizing for the measurement reports the content itself.
   function resize() {
+    // A browser window sizes itself. Only a host drawing this in a frame needs telling.
+    if (!IN_APP) return;
     var previous = root.style.height;
     root.style.height = "max-content";
     var height = Math.ceil(root.getBoundingClientRect().height);
@@ -746,16 +781,30 @@ _TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
-VIEW_HTML = _TEMPLATE.replace(
-    "__CONFIG__",
-    json.dumps(
-        {
-            "environments": ENVIRONMENTS,
-            "dashboards": DASHBOARDS,
-            "default_environment": DEFAULT_ENV,
-        }
-    ),
-)
+def _rendered(**extra: object) -> str:
+    """The one document, configured for the surface it will be shown on.
+
+    Both surfaces ask the same four questions and must not drift into two answers, so there
+    is one template. What differs is only how the answers travel: inside a host, by
+    postMessage to the frame's parent; in a browser, by HTTP to the loopback server that
+    served the page. That difference is a single branch in the script, on `transport`.
+    """
+    settings = {
+        "environments": ENVIRONMENTS,
+        "dashboards": DASHBOARDS,
+        "default_environment": DEFAULT_ENV,
+    }
+    settings.update(extra)
+    return _TEMPLATE.replace("__CONFIG__", json.dumps(settings))
+
+
+# Shown by a host inside a frame, as an MCP App.
+VIEW_HTML = _rendered(transport="app")
+
+
+def page_html(endpoint: str) -> str:
+    """The same document for a browser, posting back to the address that served it."""
+    return _rendered(transport="page", endpoint=endpoint)
 
 
 def build_id() -> str:
@@ -777,7 +826,7 @@ _NO_PERMISSION = {"UnauthorizedApiAccess", "unauthorized_api_access"}
 _IP_BLOCKED = {"ip_not_whitelisted_for_api_key"}
 
 
-def _rejection(env: str, result: credentials.Check) -> str:
+def rejection(env: str, result: credentials.Check) -> str:
     """What the form says when Delta turns the key down.
 
     Deliberately replaces the message from `errors.py` rather than adding to it. That one
@@ -1090,7 +1139,7 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             raise
         if result.reachable and not result.ok:
             finish_grant(grant_key, pending, used=False)
-            return {"status": "rejected", "message": _rejection(env, result)}
+            return {"status": "rejected", "message": rejection(env, result)}
 
         problem = credentials.save(env, key, secret, client, wanted)
         if problem is not None:
