@@ -60,12 +60,10 @@ _SAFE = " !\"#$&'()*+,-./:;<=>?@[]^_`{|}~"
 
 
 def encode(value: str) -> str:
-    """Make a string safe to be a header value, changing nothing else about it.
+    """Make one raw string safe to be a header value, changing nothing else about it.
 
-    Kept separate from `clean` because the JSON header must not be shortened here. Cutting
-    a string to a length is right for a name and wrong for a serialized object: it lands
-    mid-token and produces a header that no consumer can read at all. The JSON header is
-    bounded by dropping whole fields instead, in `headers`.
+    For the discrete fields only. The JSON header must not come through here — see
+    `as_header`.
     """
     return quote(value, safe=_SAFE)
 
@@ -73,6 +71,31 @@ def encode(value: str) -> str:
 def clean(value: str) -> str:
     """A header-safe rendering of one bounded field the client chose."""
     return encode(value.strip()[:_FIELD_LIMIT])
+
+
+def as_header(payload: dict[str, object]) -> str:
+    """Serialise the context object for a header value, without breaking the JSON.
+
+    `json.dumps` already produces something safe to put in a header, and this is easy to
+    miss: `ensure_ascii` is on by default, so every non-ASCII character becomes `\\uXXXX`
+    and every control character becomes `\\n` or similar. The result is printable ASCII
+    containing no newline that could end the header early.
+
+    It must therefore **not** be percent-encoded afterwards. Doing that escapes the
+    backslashes JSON uses while leaving the quotes those backslashes escape, so a title of
+    `he said "hi"` goes out as `{"title":"he said %5C"hi%5C""}` — malformed to anything
+    reading the header as JSON, which is the one thing this header is for. It survived a
+    round trip in testing only because decoding first happens to put it back together, and
+    the whole reason quotes are left unescaped is so no consumer has to decode first.
+
+    The check is a security seam rather than a formatting nicety: a literal newline in a
+    header value ends it, and everything after is read as another header. `ensure_ascii`
+    already rules that out, and this refuses to send anything if it ever stops being true.
+    """
+    text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    if not text.isascii() or any(ord(character) < 32 for character in text):
+        return ""
+    return text
 
 
 class Sessions:
@@ -174,8 +197,8 @@ def headers(
     # the last one, so the smallest useful payload still gets its chance.
     droppable = ["capabilities", "description", "icons", "title", "website_url"]
     while extra:
-        encoded = encode(json.dumps(extra, separators=(",", ":"), sort_keys=True))
-        if spent + len(CONTEXT_HEADER) + len(encoded) + 4 <= BUDGET_BYTES:
+        encoded = as_header(extra)
+        if encoded and spent + len(CONTEXT_HEADER) + len(encoded) + 4 <= BUDGET_BYTES:
             out[CONTEXT_HEADER] = encoded
             break
         if not droppable:

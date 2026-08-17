@@ -7,7 +7,6 @@ would pass while the contextvars that carry the session and the tool name were n
 
 import json
 import re
-from urllib.parse import unquote
 
 import httpx
 import mcp.types as types
@@ -173,9 +172,8 @@ async def test_the_context_header_is_always_readable_json():
         raw = sent.get(f"{analytics.PREFIX}Context")
         if raw is None:
             continue
-        decoded = unquote(raw)
-        parsed = json.loads(decoded)  # raises if it was cut mid-token
-        assert isinstance(parsed, dict), decoded
+        parsed = json.loads(raw)  # parsed as sent, with no decoding step first
+        assert isinstance(parsed, dict), raw
 
 
 @respx.mock
@@ -200,3 +198,26 @@ async def test_the_readme_lists_exactly_what_gets_forwarded():
     lowered = {name.lower() for name in documented}
     missing = sorted(n for n in forwarded if n.lower() not in lowered)
     assert not missing, f"forwarded but undocumented: {missing}"
+
+
+@respx.mock
+async def test_a_title_full_of_punctuation_still_parses_as_sent():
+    """The header is for a log pipeline to read directly, with no decoding step.
+
+    `json.dumps` already escapes quotes with backslashes. Percent-encoding the result
+    afterwards escapes those backslashes and leaves the quotes, so `he said "hi"` went out
+    as `{"title":"he said %5C"hi%5C""}` — malformed to anything parsing the header, which
+    is the one thing it exists for. It round-tripped in an earlier test only because
+    decoding first happened to reassemble it.
+    """
+    sent = await call_ticker(
+        types.Implementation(
+            name="punct", version="1", title='he said "hi" \\ and left\nthen returned'
+        )
+    )
+    raw = sent[f"{analytics.PREFIX}Context"]
+    assert "%5C" not in raw, raw
+    parsed = json.loads(raw)
+    assert parsed["title"].startswith('he said "hi"')
+    # Nothing that could end a header early survived serialisation.
+    assert raw.isascii() and not any(ord(c) < 32 for c in raw)
