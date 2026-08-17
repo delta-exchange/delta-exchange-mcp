@@ -421,24 +421,33 @@ def build_parser() -> argparse.ArgumentParser:
     # Optional, so a bare invocation still means "serve" — that is how every MCP client
     # launches this, and it must never become a subcommand.
     sub = parser.add_subparsers(dest="command")
-    login_parser = sub.add_parser(
-        "login",
-        help="store your API key in the shared settings file, once for every client",
-    )
-    login_parser.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="skip the check against Delta and save whatever is entered",
-    )
     setup_parser = sub.add_parser(
         "setup",
-        help="open a settings page in your browser to enter your API key",
+        help="set up your API key, once for every client on this machine",
+        description=(
+            "Opens a settings page in your browser. The page runs on this machine only "
+            "and what you type goes straight to the settings file."
+        ),
+    )
+    setup_parser.add_argument(
+        "--terminal",
+        action="store_true",
+        help="type the key here instead, for a machine with no browser",
     )
     setup_parser.add_argument(
         "--no-browser",
         action="store_true",
         help="print the address instead of opening it",
     )
+    setup_parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="with --terminal, skip the check against Delta and save whatever is entered",
+    )
+    # The old name for the terminal route, kept working because it is published and people
+    # have it in their own notes and scripts. Out of the help so nobody learns it now.
+    login_parser = sub.add_parser("login", add_help=False)
+    login_parser.add_argument("--no-verify", action="store_true")
     return parser
 
 
@@ -446,11 +455,21 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
 
     if args.command == "login":
-        from delta_exchange_mcp import login
+        print(
+            "`login` is now `setup --terminal`, and plain `setup` opens a page in your "
+            "browser instead. This still works.",
+            file=sys.stderr,
+        )
 
-        raise SystemExit(login.run(verify=not args.no_verify))
+    if args.command in ("login", "setup"):
+        # One command with two ways in, rather than two commands doing the same thing. The
+        # browser is the default because the person this is for has a browser and may have
+        # no terminal at all; the flag is for a machine that has it the other way round.
+        if args.command == "login" or args.terminal:
+            from delta_exchange_mcp import login
 
-    if args.command == "setup":
+            raise SystemExit(login.run(verify=not args.no_verify))
+
         from delta_exchange_mcp import setup as setup_page
 
         # Needs no MCP client running, which is the point of it: an agent can install this

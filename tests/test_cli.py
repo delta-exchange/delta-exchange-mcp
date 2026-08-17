@@ -65,3 +65,31 @@ def test_handshake_reports_our_version_not_the_sdk_version():
     server_version = build_server(_cfg()).version
     assert server_version == PACKAGE_VERSION
     assert server_version != version("mcp")
+
+
+def test_setting_up_is_one_command_with_two_ways_in():
+    """Two commands writing the same settings left people guessing which to run.
+
+    The browser is the default because the person this is for may have no terminal at all;
+    `--terminal` is for the machine that has it the other way round.
+    """
+    parsed = build_parser().parse_args(["setup"])
+    assert parsed.command == "setup"
+    assert parsed.terminal is False
+
+    assert build_parser().parse_args(["setup", "--terminal"]).terminal is True
+
+
+def test_the_old_login_command_still_works():
+    """It is published and people have it in their own notes; breaking it costs them.
+
+    Kept out of `--help` so nobody learns it now, and it announces its replacement when
+    run. Parsing it is the contract — that it still resolves to a command rather than
+    exiting with "invalid choice".
+    """
+    parsed = build_parser().parse_args(["login"])
+    assert parsed.command == "login"
+
+    help_text = build_parser().format_help()
+    assert "setup" in help_text
+    assert "store your API key in the shared settings file" not in help_text

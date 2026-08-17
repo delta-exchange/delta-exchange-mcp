@@ -29,7 +29,7 @@ Three constraints came out of that probe and are load-bearing here:
   costs a collapsed frame; a view that is never asked for costs the whole feature.
 
 Not every client renders MCP Apps. `setup_credentials` therefore returns text that names
-the file and the `login` command as well, so on a client that shows nothing the model
+the file and the `setup` command as well, so on a client that shows nothing the model
 still has something correct to say.
 
 Two later facts come from the spec itself (`src/spec.types.ts` in
@@ -970,7 +970,8 @@ def _opened_message(url: str = "") -> str:
     fallback = (
         f"If no form appeared, this client cannot display one. {reached_another_way} "
         f"They can also edit {store.path()} by hand, or run "
-        "`uvx delta-exchange-mcp login` in a terminal, but the link needs neither."
+        "`uvx delta-exchange-mcp setup --terminal` on a machine with no browser, but the "
+        "link needs neither."
     )
     return (
         "A form is now open in this conversation. Tell the user to type their API key "

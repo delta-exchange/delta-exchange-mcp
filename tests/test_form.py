@@ -400,7 +400,7 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     assert "http://127.0.0.1:" in text
     assert result.structured_content["settings_url"].startswith("http://127.0.0.1:")
     assert str(store.path()) in text
-    assert "delta-exchange-mcp login" in text
+    assert "delta-exchange-mcp setup --terminal" in text
     # The one instruction that matters: a model asked for help with a key will otherwise
     # offer to take it in the chat, and people accept.
     assert "never ask them to send a key" in text

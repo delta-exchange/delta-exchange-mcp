@@ -234,7 +234,7 @@ so and point you at one of the other two ways.
 saving anything:
 
 ```bash
-uvx delta-exchange-mcp login
+uvx delta-exchange-mcp setup --terminal
 ```
 
 **By hand**, if you'd rather. Open the file and fill in the three lines already waiting
@@ -621,7 +621,7 @@ do — Claude Desktop, for instance, renders these forms without announcing that
 the server always returns working instructions alongside the form, and on a client that
 shows nothing you see only the instructions.
 
-Use [one of the other two ways](#add-your-api-key): `uvx delta-exchange-mcp login`, or open
+Use [one of the other ways](#add-your-api-key): `uvx delta-exchange-mcp setup`, or open
 `~/.delta-exchange-mcp/config.env` and fill in the three lines. Both write the same file
 the form would have.
 
@@ -636,7 +636,7 @@ signing with whatever your client passes instead. Restarting does not help, beca
 client passes its own value again every time it starts.
 
 Clear those fields from that client's entry, then restart it. Which setting is at fault is
-named in the message the form shows. `uvx delta-exchange-mcp login` runs the same check and
+named in the message the form shows. `uvx delta-exchange-mcp setup` runs the same check and
 warns on stderr, though there it reports what your *shell* is setting, since that is the
 environment it can see.
 
