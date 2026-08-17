@@ -57,7 +57,7 @@ class Session:
 
 
 @asynccontextmanager
-async def connected(cfg=None, client_name=None, mcp=None):
+async def connected(cfg=None, client_name=None, mcp=None, client_info=None):
     """A client talking to a server started the way `main` starts it.
 
     The SDK's own `create_connected_server_and_client_session` builds initialization
@@ -84,7 +84,9 @@ async def connected(cfg=None, client_name=None, mcp=None):
                     if isinstance(message, types.ServerNotification):
                         box["session"].notifications.append(message)
 
-                info = (
+                # `client_name` covers the common case; `client_info` is for tests that
+                # need the rest of the handshake identity, such as a title or a URL.
+                info = client_info or (
                     types.Implementation(name=client_name, version="1")
                     if client_name
                     else None

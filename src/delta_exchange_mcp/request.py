@@ -17,6 +17,12 @@ session: ContextVar[ServerSession | None] = ContextVar(
     "delta_request_session", default=None
 )
 
+# The tool being served, for the analytics header on whatever calls Delta. Published the
+# same way and for the same reason as the session: the outbound request is made deep inside
+# the shared HTTP client, which has no argument for it and should not grow one on every one
+# of the forty-six tools.
+tool: ContextVar[str] = ContextVar("delta_request_tool", default="")
+
 
 @dataclass(frozen=True)
 class Client:
@@ -26,8 +32,15 @@ class Client:
     settings and labels analytics. It must never gate anything that carries a safety
     consequence.
 
-    `title` is the host's display name and may be set by the person using it, so it is
-    read for completeness but never sent anywhere or used as a key.
+    `title` is the host's display name and **may be set by the person using it**, so it is
+    never used as a key — two people running the same client would otherwise land in
+    different places, and one who renamed theirs would lose whatever was stored under the
+    old name. It is forwarded to Delta with the rest of the handshake, which is why the
+    "never sent anywhere" that used to be written here no longer holds.
+
+    `name` is reported exactly as sent, proxy suffix and all, because which bridge a
+    request came through is worth counting. `config.stable_name` strips that suffix, and
+    only for keying a stored setting.
     """
 
     name: str = ""

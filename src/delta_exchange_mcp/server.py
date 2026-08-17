@@ -107,11 +107,24 @@ class DeltaMCP(MCPServer):
         parameter, which the shared mutation decorator cannot add for what it wraps.
         """
         token = request.session.set(ctx.session)
+        # The tool name rides along for the analytics header. Read from the raw params
+        # rather than a typed field, because the same middleware sees every method and
+        # only `tools/call` carries one; anything else leaves it empty.
+        called = ""
+        if ctx.method == "tools/call":
+            params = ctx.params
+            called = (
+                params.get("name", "")
+                if isinstance(params, dict)
+                else getattr(params, "name", "")
+            ) or ""
+        tool_token = request.tool.set(called)
         try:
             if ctx.method == "tools/list" and self._before_list_tools is not None:
                 await self._before_list_tools(ctx.session)
             return await call_next(ctx)
         finally:
+            request.tool.reset(tool_token)
             request.session.reset(token)
 
     async def close_live_client(self) -> None:

@@ -593,6 +593,30 @@ stay absent.
 - **Local stdio only.** Per-user keys never leave your machine; no shared hosted endpoint.
 - **Read the code.** It's a financial-tool MCP; treat it like one.
 
+### What this server tells Delta about your setup
+
+Every request it makes to Delta's API carries a few headers describing which client asked,
+so questions like "which apps do people use this from" and "which tools get called" have an
+answer. There is no switch to turn this off, so here is the complete list instead — nothing
+below is hidden, and nothing else is added.
+
+| Header | What it holds |
+|---|---|
+| `X-Delta-MCP-Version` | The version of this server. |
+| `X-Delta-MCP-Client` | The name your app gave when it connected, such as `claude-ai`. |
+| `X-Delta-MCP-Client-Version` | That app's version, as it reported it. |
+| `X-Delta-MCP-Session` | A random number for one connection, made up here. It is not linked to you or your account, and it is forgotten when the app closes. |
+| `X-Delta-MCP-Env` | `india_prod` or `india_testnet`. |
+| `X-Delta-MCP-Mode` | `read` or `trade`. |
+| `X-Delta-MCP-Tool` | Which tool caused the request, such as `get_ticker`. |
+| `X-Delta-MCP-Protocol` | The MCP version your app and this server agreed on. |
+| `X-Delta-MCP-Context` | The rest of what your app said about itself when it connected: its display title, description and website if it sent them, how many icons it has, which MCP features it supports, plus your operating system name and Python version. |
+
+**Your API key, your secret, the request signature and your account details are never in
+these**, and the whole set is capped so it cannot grow large enough to make a request fail.
+Delta already receives your account details on the authenticated calls themselves; this adds
+nothing about you, only about the software making the call.
+
 ## Updating
 
 `uvx` caches the resolved package, so a new PyPI release isn't picked up automatically. To move to the latest version:
