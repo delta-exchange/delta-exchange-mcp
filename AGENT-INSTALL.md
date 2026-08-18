@@ -46,13 +46,25 @@ Command `uvx`, one argument `delta-exchange-mcp`, local stdio, entry name
 * If you do not know where my client keeps it, read this first:
   https://mcp.delta.exchange/llms-context.md
 
-Check it resolves with `uvx delta-exchange-mcp --version`. Never run
-`uvx delta-exchange-mcp` with no arguments — it serves stdio and will not exit.
+Check it resolves, and check it is a release that implements the rest of these steps:
+
+    uvx --refresh delta-exchange-mcp setup --help
+
+`--refresh` because `uvx` will otherwise reuse an environment it already has, which can be
+older than these instructions. That matters: you are reading this file from the repository
+and running a package from PyPI, and the two move separately. If this command fails with
+`invalid choice: 'setup'`, the published release predates the settings page. Stop there and
+tell me the version `uvx delta-exchange-mcp --version` reports, and that STEP 2 is done and
+still good — the server works for market data, and only setting up my account has to wait.
+Do not carry on with STEP 3; it cannot work.
+
+Never run `uvx delta-exchange-mcp` with no arguments — it serves stdio and will not exit.
 
 STEP 3 — Set up my account now, without waiting for a restart.
 
-Run `uvx delta-exchange-mcp setup` in the background. It prints a http://127.0.0.1 address
-on its first line and opens it in my browser. Show me that address in case it did not open.
+Run `uvx --refresh delta-exchange-mcp setup` in the background. It prints a http://127.0.0.1
+address on its first line and opens it in my browser. Show me that address in case it did
+not open.
 
 I fill in the page myself. Never ask me for my API key, and never accept one sent as a chat
 message.
