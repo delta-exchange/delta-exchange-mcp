@@ -74,10 +74,11 @@ at, what this client may do now, what it may do after a restart, and whether one
 
 
 class DeltaMCP(MCPServer):
-    """MCPServer with a pre-list hook for session-scoped entitlements."""
+    """MCPServer with hooks before the tool list is built and before a mutation runs."""
 
     def __init__(self) -> None:
         self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = None
+        self._before_mutation: Callable[[ServerSession], Awaitable[None]] | None = None
         self.live_client: DeltaClient | None = None
         super().__init__(
             "delta-exchange",
@@ -96,6 +97,11 @@ class DeltaMCP(MCPServer):
         self, callback: Callable[[ServerSession], Awaitable[None]]
     ) -> None:
         self._before_list_tools = callback
+
+    def before_mutation(
+        self, callback: Callable[[ServerSession], Awaitable[None]]
+    ) -> None:
+        self._before_mutation = callback
 
     async def _serve(
         self, ctx: ServerRequestContext, call_next: CallNext
@@ -122,6 +128,15 @@ class DeltaMCP(MCPServer):
         try:
             if ctx.method == "tools/list" and self._before_list_tools is not None:
                 await self._before_list_tools(ctx.session)
+            elif called in trading.TOOL_NAMES and self._before_mutation is not None:
+                # Settings can change from outside this process between one call and the
+                # next: the browser page writes the file from its own thread, a second
+                # client writes its own scoped key, someone edits the file by hand. Only a
+                # status call used to notice, so an order could still be placed after
+                # trading was turned off. Checking here fails closed at the point of use,
+                # which is where a permission belongs, and covers every one of those ways
+                # in rather than the one that prompted it.
+                await self._before_mutation(ctx.session)
             return await call_next(ctx)
         finally:
             request.tool.reset(tool_token)
@@ -375,7 +390,26 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         await reconcile(session, allow_trade=True, notify=False)
         entitlement_checked.add(connection)
 
+    async def catch_up_before_mutating(session: ServerSession) -> None:
+        """Re-read the settings before the entitled client can place an order.
+
+        `reconcile` already removes trading when the file no longer allows it. It only ran
+        on a status call or at the start of a session, so turning trading off anywhere else
+        stayed invisible for the rest of that session. `allow_trade` stays false for the
+        same reason the form save keeps it false: catching up must never be the event that
+        arms mutations, only the one that stops them.
+
+        Scoped to the connection trading was armed for, because `reconcile` resolves the
+        mode of whichever client is asking. Running it for any other caller would let one
+        client's settings tear down another client's live entitlement, and that caller is
+        already refused by the gate, with a message that says why.
+        """
+        if trade_gate is None or trade_gate.peer is not request.peer(session):
+            return
+        await reconcile(session, allow_trade=False, notify=True)
+
     mcp.before_list_tools(apply_session_entitlement)
+    mcp.before_mutation(catch_up_before_mutating)
 
     if log_path is not None:
 

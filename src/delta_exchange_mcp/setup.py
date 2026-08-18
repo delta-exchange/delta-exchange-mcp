@@ -60,17 +60,20 @@ class Page:
     server: ThreadingHTTPServer
     saved: threading.Event
     _stopped: threading.Event = field(default_factory=threading.Event)
+    # Set by a save and by a close, so nothing waits on an answer that cannot arrive.
+    _done: threading.Event = field(default_factory=threading.Event)
 
     @property
     def running(self) -> bool:
-        """Whether the address still answers.
+        """Whether the address is still worth handing out.
 
-        Ask this before handing the address out again. "Was it saved?" is the wrong
-        question and looks like the right one: a page that simply expired was never saved,
-        so that test calls a dead listener alive and offers a URL that refuses to connect.
-        There are three ways to close, and this covers all three rather than naming them.
+        Two separate reasons say no, and each one alone is the wrong test. "Was it saved?"
+        misses a page that simply expired, which was never saved, so that test calls a dead
+        listener alive. "Has it stopped?" misses the moment after a save, because the
+        watchdog closes the listener on its own thread and has not necessarily run yet — so
+        that test hands out an address that is about to refuse every connection.
         """
-        return not self._stopped.is_set()
+        return not self._stopped.is_set() and not self.saved.is_set()
 
     def stop(self) -> None:
         """Safe to call more than once: the page closes itself, and callers close it too."""
@@ -79,10 +82,18 @@ class Page:
         self._stopped.set()
         self.server.shutdown()
         self.server.server_close()
+        # Whoever is waiting is waiting for an answer this page can no longer give.
+        self._done.set()
 
     def wait(self, timeout: float = LIFETIME_SECONDS) -> bool:
-        """Block until the settings are saved or the page expires. True if saved."""
-        return self.saved.wait(timeout)
+        """Block until the settings are saved or the page closes. True only if saved.
+
+        Waiting on the save alone leaves the caller waiting on a listener that has already
+        expired, because the expiry never sets it. Both events end the wait; only one of
+        them means the person finished.
+        """
+        self._done.wait(timeout)
+        return self.saved.is_set()
 
 
 def _status(client: str) -> dict[str, Any]:
@@ -171,6 +182,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()
+
+        # Only once the browser holds the answer. This event closes the page and can end
+        # the command that started it, and these request threads are daemon threads that
+        # nothing waits for — so setting it while the write was still pending would let a
+        # durable save reach the browser as a connection reset.
+        if (result.get("structuredContent") or {}).get("status") == "saved":
+            self.saved.set()
 
     def _dispatch(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         if payload.get("method") != "tools/call":
@@ -197,7 +216,6 @@ class _Handler(BaseHTTPRequestHandler):
         failure = credentials.save_mode(self.client, str(args.get("mode") or "read"))
         if failure:
             return {"status": "rejected", "message": failure}
-        self.saved.set()
         return {"status": "saved", "message": "Saved."}
 
     def _save(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -222,7 +240,6 @@ class _Handler(BaseHTTPRequestHandler):
         if failure:
             return {"status": "rejected", "message": failure}
 
-        self.saved.set()
         return {
             "status": "saved",
             "account": checked.detail,

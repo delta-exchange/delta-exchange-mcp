@@ -215,3 +215,68 @@ def test_a_saved_page_also_reports_itself_closed(page, monkeypatch):
     while page.running and time.time() < deadline:
         time.sleep(0.05)
     assert not page.running
+
+
+def test_a_page_that_has_saved_is_never_offered_again(page):
+    """Closing happens on a separate thread, so "has it stopped?" answers late.
+
+    Between the save landing and that thread being scheduled, the page has committed and
+    is about to close while still reporting itself usable. The next caller is then handed
+    an address that refuses every connection. Set here directly rather than through a real
+    save, because the window is too short to reach reliably over HTTP — and a test that
+    only passes when the scheduler cooperates proves nothing.
+    """
+    assert page.running
+    page.saved.set()
+    assert not page.running, "a committed page must not be handed out again"
+
+
+def test_a_successful_save_reaches_the_browser_whole(page, monkeypatch):
+    """The page closes on the save, so the save must be signalled after the response.
+
+    These request threads are daemon threads that nothing waits for. Signalling before the
+    write lets the listener close, and the ten-minute expiry and the terminal command both
+    end on that same signal — so a save that is already durable can reach the browser as a
+    connection reset, and the person retries something that already worked.
+    """
+
+    async def accepted(env, key, secret):
+        return credentials.Check(ok=True, reachable=True, detail="someone@delta.exchange")
+
+    monkeypatch.setattr(credentials, "check", accepted)
+    status, text = fetch(
+        f"{page.url}/rpc",
+        body={
+            "method": "tools/call",
+            "params": {
+                "name": "save_credentials",
+                "arguments": {
+                    "environment": "india_testnet",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+        },
+    )
+    assert status == 200
+    assert json.loads(text)["result"]["structuredContent"]["status"] == "saved"
+    assert page.saved.is_set()
+
+
+def test_waiting_on_a_page_ends_when_it_expires(monkeypatch, tmp_path):
+    """Whoever is waiting is waiting for an answer, and expiry means none is coming.
+
+    Waiting on the save alone never ends on this path, because nothing sets it when a page
+    simply runs out — so the caller keeps waiting on a listener that already closed.
+    """
+    monkeypatch.setattr(store, "path", lambda: tmp_path / "config.env")
+    monkeypatch.setattr(setup, "LIFETIME_SECONDS", 0.3)
+
+    expiring = setup.serve(client="", open_browser=False)
+    started = time.time()
+    finished = expiring.wait(timeout=10)
+    waited = time.time() - started
+
+    assert finished is False, "it expired, so nobody saved anything"
+    assert waited < 5, f"the wait should end with the page, took {waited:.1f}s"
+    assert not expiring.running
