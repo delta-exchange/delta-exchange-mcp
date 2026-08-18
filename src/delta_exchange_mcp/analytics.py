@@ -91,9 +91,15 @@ def as_header(payload: dict[str, object]) -> str:
     The check is a security seam rather than a formatting nicety: a literal newline in a
     header value ends it, and everything after is read as another header. `ensure_ascii`
     already rules that out, and this refuses to send anything if it ever stops being true.
+
+    It asks whether every character is printable ASCII rather than naming the characters
+    that are not. That is the whole of what a header value may hold, so the test cannot be
+    incomplete — an earlier version compared against 32 and let DEL through, which is the
+    kind of gap an enumeration leaves and an invariant does not. Space passes, which JSON
+    with these separators never emits anyway.
     """
     text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    if not text.isascii() or any(ord(character) < 32 for character in text):
+    if not (text.isascii() and text.isprintable()):
         return ""
     return text
 

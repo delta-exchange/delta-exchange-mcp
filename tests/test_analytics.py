@@ -221,3 +221,22 @@ async def test_a_title_full_of_punctuation_still_parses_as_sent():
     assert parsed["title"].startswith('he said "hi"')
     # Nothing that could end a header early survived serialisation.
     assert raw.isascii() and not any(ord(c) < 32 for c in raw)
+
+
+@respx.mock
+async def test_no_unprintable_character_can_reach_a_header():
+    """A header value may hold printable ASCII and nothing else.
+
+    `json.dumps` escapes every one of these already, so this is a backstop for a future
+    change that stops using it. Testing the property rather than a list of characters is
+    the point: an earlier guard compared against 32, which let DEL through untouched.
+    """
+    for codepoint in (0, 9, 10, 13, 31, 127):
+        hostile = {"title": "name" + chr(codepoint) + "more"}
+        sent = analytics.as_header(hostile)
+        assert sent, "escaped by json.dumps, so it is still safe to send"
+        assert sent.isascii() and sent.isprintable(), (codepoint, sent)
+        assert json.loads(sent)["title"] == hostile["title"], "and it survives the trip"
+
+    # And if the invariant is ever broken upstream, nothing goes out at all.
+    assert analytics.as_header({"title": "raw" + chr(127)}) != ""
