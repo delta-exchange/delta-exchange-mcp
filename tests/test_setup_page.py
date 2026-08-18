@@ -6,6 +6,7 @@ header it accepts, and whether a wrong path is distinguishable from a right one.
 """
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -215,3 +216,110 @@ def test_a_saved_page_also_reports_itself_closed(page, monkeypatch):
     while page.running and time.time() < deadline:
         time.sleep(0.05)
     assert not page.running
+
+
+def save_body(key, mode=""):
+    arguments = {
+        "environment": "india_testnet",
+        "api_key": key,
+        "api_secret": f"secret-{key}",
+    }
+    if mode:
+        arguments["mode"] = mode
+    return {"method": "tools/call", "params": {"name": "save_credentials", "arguments": arguments}}
+
+
+def test_only_one_save_can_win_however_many_tabs_are_open(page, tmp_path, monkeypatch):
+    """The token says who may ask, not how often, and one page has one save to give.
+
+    The token sits in the address bar for the page's whole life, so a reload, a duplicated
+    tab and a double-click all carry a valid one. Both saves used to run to completion: each
+    validated its own key, each was told the account that key belongs to, and one of the two
+    reached the file — leaving a browser reporting a connected account this machine is not
+    using. The file stayed coherent throughout, which is why nothing looked wrong.
+
+    The window is the call to Delta, so the second save is sent while the first is inside it.
+    """
+    entered, release = threading.Event(), threading.Event()
+
+    async def slow(env, key, secret):
+        entered.set()
+        release.wait(5)
+        return credentials.Check(ok=True, reachable=True, detail=f"account-for-{key}")
+
+    monkeypatch.setattr(credentials, "check", slow)
+
+    first: dict = {}
+    caller = threading.Thread(
+        target=lambda: first.update(json.loads(fetch(f"{page.url}/rpc", body=save_body("first"))[1]))
+    )
+    caller.start()
+    assert entered.wait(5), "the first save never reached Delta"
+
+    # Sent while the first is still in flight — the race, made deterministic.
+    _, refused = fetch(f"{page.url}/rpc", body=save_body("second"))
+    release.set()
+    caller.join(10)
+
+    assert json.loads(refused)["result"]["structuredContent"]["status"] == "rejected"
+    assert first["result"]["structuredContent"]["status"] == "saved"
+    # And the file holds the key whose browser was told it was saved.
+    written = (tmp_path / "config.env").read_text()
+    assert "first" in written and "second" not in written
+
+
+def test_a_spent_save_is_refused_rather_than_silently_replacing_the_first():
+    """The claim survives the save that used it, so nothing arriving later can overwrite it.
+
+    Unit-level because the page closes itself once a save commits, so over HTTP this refusal
+    only exists in the moment between the write and the listener shutting down. It still has
+    to hold: that moment is exactly when a second tab's request is already on the wire.
+    """
+    state = setup._Save()
+
+    assert state.claim() == ""
+    # A second asker while the first still holds it.
+    assert state.claim() == setup._SAVE_IN_FLIGHT
+    state.commit()
+    assert state.claim() == setup._ALREADY_SAVED
+    # A release after the commit must not reopen it.
+    state.release()
+    assert state.claim() == setup._ALREADY_SAVED
+
+
+def test_a_claim_is_handed_back_when_the_save_never_reached_the_file():
+    """A rejected key must not cost the page its one save, or a typo means reopening it."""
+    state = setup._Save()
+
+    assert state.claim() == ""
+    state.release()
+    assert state.claim() == "", "a failed save should leave the page usable"
+
+
+def test_a_key_saved_while_delta_is_unreachable_is_not_reported_as_connected(
+    page, tmp_path, monkeypatch
+):
+    """Saving it is deliberate; calling it a connection is not.
+
+    A page rendering "saved" with an account name says "Connected as <account>", so putting
+    the transport error into the account field told the person "Connected as could not reach
+    Delta: timeout" over a key nothing had checked, and the terminal command exited happy.
+    The in-chat form has always separated these two, and the page now gives the same answer.
+    """
+
+    async def unreachable(env, key, secret):
+        return credentials.Check(ok=False, reachable=False, detail="could not reach Delta: timeout")
+
+    monkeypatch.setattr(credentials, "check", unreachable)
+
+    _, body = fetch(f"{page.url}/rpc", body=save_body("typed-anyway"))
+    result = json.loads(body)["result"]["structuredContent"]
+
+    assert result["status"] == "unverified"
+    # The key is still stored: a flaky connection must not cost someone a key they got right.
+    assert "typed-anyway" in (tmp_path / "config.env").read_text()
+    # No account, because Delta never named one.
+    assert not result.get("account")
+    assert "could not reach Delta" in result["message"]
+    # The file was written, so this page's one save is spent and it closes like any other.
+    assert page.saved.is_set()
