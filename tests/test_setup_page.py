@@ -280,3 +280,36 @@ def test_waiting_on_a_page_ends_when_it_expires(monkeypatch, tmp_path):
     assert finished is False, "it expired, so nobody saved anything"
     assert waited < 5, f"the wait should end with the page, took {waited:.1f}s"
     assert not expiring.running
+
+
+def test_the_page_issues_the_save_grant_itself(page):
+    """Nothing else can issue it here. The URL token already proved who is asking."""
+    _, body = fetch(
+        f"{page.url}/rpc",
+        body={"method": "tools/call", "params": {"name": "setup_credentials", "arguments": {}}},
+    )
+    granted = json.loads(body)["result"]["_meta"]["ui"]["saveGrant"]
+    assert granted and granted in page.url
+
+
+def test_the_view_asks_for_that_grant_when_no_host_will_send_it():
+    """In a client the grant arrives on its own: the host runs the opener and forwards the
+    tool result as a notification. On this page there is no host and no notification.
+
+    Without the request the save button never leaves its disabled state, so the page could
+    not save anything at all — and the whole suite passed, because every other test here
+    posts to the endpoint with a hand-built body and never runs the view's JavaScript.
+
+    This is a structural check standing in for a browser, and that limit is worth stating:
+    it pins the line against removal, it does not prove the button works. Open the page and
+    press it.
+    """
+    served = setup.form.page_html("/a-token/rpc")
+    # The boot block only: from the handshake call to the end of its handler. Searching the
+    # whole file would match the reopen button, which is reachable only after a save and so
+    # cannot supply the first grant — a check that passes on the broken version too.
+    start = served.index('request("ui/initialize"')
+    boot = served[start : served.index('window.addEventListener("resize"', start)]
+    assert 'name: "setup_credentials"' in boot, "boot must obtain a grant with no host present"
+    guard = boot.index("if (!IN_APP)")
+    assert guard < boot.index('name: "setup_credentials"'), "and only when there is no host"

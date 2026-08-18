@@ -197,4 +197,19 @@ There is intentionally **no HTTP transport, no Docker image, and no shared hoste
 
 ## Tests
 
+**Nothing in the suite runs the view's JavaScript.** `tests/test_setup_page.py` drives real
+HTTP against a real listener, but it posts hand-built bodies to the endpoint, so the server
+half is well covered and the client half is not executed at all. The settings page once
+shipped unable to save anything — the save button could never leave its disabled state,
+because in a client the save grant arrives as a host notification and on the page there is
+no host to send one — and the whole suite passed. Open the page and press the button before
+believing it works:
+
+```bash
+uv run delta-exchange-mcp setup --no-browser   # prints the address
+```
+
+Two structural checks stand in for a browser and are labelled as such in their docstrings.
+Neither proves the button works.
+
 `respx` mocks httpx for unit tests (no live network). Live verification happens through `scripts/smoke.py` (Python-level) and `scripts/inspect.sh --cli` (MCP-protocol-level) — both hit real testnet/prod and are run manually, not in CI. When fixing a bug surfaced by live use, add a `respx` regression test (see `test_none_params_are_stripped_before_send` and `test_signing_payload_includes_v2_prefix` for the pattern).

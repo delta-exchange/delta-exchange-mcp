@@ -399,7 +399,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <legend>Where was your key created?</legend>
     </fieldset>
 
-    <div class="field">
+    <div class="field" id="mode-field">
       <label class="lab" for="mode">What should the assistant be able to do?</label>
       <select id="mode">
         <option value="read">Read only &mdash; balances, positions and orders</option>
@@ -790,6 +790,17 @@ _TEMPLATE = """<!DOCTYPE html>
     // The theme and the palette arrive here. Discarding this result is what left the view
     // styling itself off the operating system rather than off the client it renders in.
     applyHostContext(result && result.hostContext);
+    // In a client, the grant arrives on its own: the host runs `setup_credentials` to open
+    // this view and forwards that tool result as a notification. On the settings page there
+    // is no host and no such notification, so the view has to ask. Without this the save
+    // button never leaves its disabled state and the page cannot save anything at all —
+    // which every test missed, because they post to the endpoint directly and never run
+    // this file.
+    if (!IN_APP) {
+      request("tools/call", { name: "setup_credentials", arguments: {} }, 15000)
+        .then(captureGrant)
+        .catch(function (err) { say("Could not start the form: " + err.message, "err"); });
+    }
     // The mode already in force for this client. Without asking, the control would show
     // "Read only" to someone who had already enabled trading, and saving would quietly
     // take it away again.
@@ -803,6 +814,15 @@ _TEMPLATE = """<!DOCTYPE html>
         if (now && now.environment) {
           currentEnvironment = now.environment;
           selectEnv(now.environment);
+        }
+        // Trading is turned on for one app at a time, and it is keyed on the name that
+        // app gives in the handshake. A page opened from a terminal has no such name, so
+        // the server refuses the choice — offering it anyway showed a control that reports
+        // a successful save and then discards what was picked. Only an explicit false
+        // hides it: the in-chat form sends no such field, and it is always able to set it.
+        if (now && now.mode_settable === false) {
+          var modeField = document.getElementById("mode-field");
+          if (modeField) modeField.parentNode.removeChild(modeField);
         }
         configured = !!(now && now.credentials_configured);
         lockOverridden(now && now.overridden_by_client);
