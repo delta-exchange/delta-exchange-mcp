@@ -166,7 +166,13 @@ def mode_key(client: str) -> str:
     while "__" in slug:
         slug = slug.replace("__", "_")
     slug = slug[:32] or "CLIENT"
-    digest = hashlib.sha256(client.encode()).hexdigest()[:12].upper()
+    # `surrogatepass` because the handshake name is whatever a client chose to send, and
+    # JSON can carry an unpaired surrogate that strict UTF-8 refuses to encode. The strict
+    # default raised here, which took the connection down over the client's own label. The
+    # policy has to stay injective as well as total: `replace` would map two different
+    # names onto one digest, and this key is what keeps one client's trading choice from
+    # reaching another.
+    digest = hashlib.sha256(client.encode("utf-8", "surrogatepass")).hexdigest()[:12].upper()
     return f"{_MODE_PREFIX}{slug}_{digest}"
 
 

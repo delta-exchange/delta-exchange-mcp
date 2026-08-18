@@ -5,10 +5,16 @@ server then makes to Delta looks identical whichever client asked. So questions 
 as "which clients do people actually use", "is anyone on the old version", and "which tools
 get called" have no answer at the other end unless this server puts one there.
 
-Everything the handshake offered is forwarded, not a chosen subset. Aggregating later is
-easy; recovering a field nobody sent is impossible. The discrete headers carry what gets
-filtered on, so a log pipeline can group by them without parsing anything; one JSON header
-carries the long tail so nothing is lost.
+The handshake's own description of the client is forwarded, aggregated later rather than
+chosen now: recovering a field nobody sent is impossible. The discrete headers carry what
+gets filtered on, so a log pipeline can group by them without parsing anything; one JSON
+header carries the long tail.
+
+What is forwarded is a closed set, decided here. A client's capability map is not closed —
+`experimental` and `extensions` are open dictionaries an extension author fills with
+whatever that extension needs, which in the wild has meant tokens and local URLs. Only the
+structural answer travels: what kind of thing this client can do, never a key or a value
+out of those maps.
 
 Three rules here are about not breaking requests, and they outrank completeness:
 
@@ -64,13 +70,31 @@ def encode(value: str) -> str:
 
     For the discrete fields only. The JSON header must not come through here — see
     `as_header`.
+
+    Undecodable input is replaced rather than raised on. A Python string can hold an
+    unpaired surrogate that no UTF-8 encoder accepts, a client is free to send one in its
+    name, and the strict default would then raise here — inside the header build, before
+    the request leaves — turning a cosmetic field into a failed tool call.
     """
-    return quote(value, safe=_SAFE)
+    return quote(value, safe=_SAFE, errors="replace")
 
 
 def clean(value: str) -> str:
-    """A header-safe rendering of one bounded field the client chose."""
-    return encode(value.strip()[:_FIELD_LIMIT])
+    """A header-safe rendering of one bounded field the client chose.
+
+    Bounded after encoding rather than before. One emoji is one character to `[:200]` and
+    twelve characters once percent-encoded, so bounding the input let a 200-character name
+    become a 2400-character header and overrun the budget this limit exists to keep.
+
+    A cut lands anywhere, including inside a `%XX` escape, so it is moved back off a
+    partial one: a truncated escape does not decode and some proxies reject it outright.
+    """
+    encoded = encode(value.strip())
+    if len(encoded) <= _FIELD_LIMIT:
+        return encoded
+    cut = encoded[:_FIELD_LIMIT]
+    # An escape is three characters, so only the last two can be part of an unfinished one.
+    return cut[: cut.rfind("%")] if "%" in cut[-2:] else cut
 
 
 def as_header(payload: dict[str, object]) -> str:
@@ -140,6 +164,37 @@ def _params(session: ServerSession | None):
     return getattr(session, "client_params", None)
 
 
+# The four capabilities that are closed types in the protocol, so their presence is a fact
+# about the client and nothing an extension author chose to put there. Named here rather
+# than read off the model, so a field added to the protocol later cannot start forwarding
+# itself: widening this set stays a decision someone makes on purpose.
+_CAPABILITY_NAMES = ("sampling", "elicitation", "roots", "tasks")
+
+# The two that are open `dict[str, dict[str, Any]]` maps. Counted, never read. Both the
+# keys and the values belong to an extension this server knows nothing about, and an
+# extension is free to keep a token or a local address in there.
+_OPEN_CAPABILITY_NAMES = ("experimental", "extensions")
+
+
+def _capabilities(capabilities: object | None) -> dict[str, object]:
+    """What kind of client this is, without one string the client chose.
+
+    Presence for the closed capabilities, a count for the open maps. This replaced a
+    `model_dump` of the whole map, which forwarded an extension's private settings to
+    Delta on every request — an `experimental` entry holding an API key arrived intact.
+    """
+    if capabilities is None:
+        return {}
+    out: dict[str, object] = {}
+    for name in _CAPABILITY_NAMES:
+        if getattr(capabilities, name, None) is not None:
+            out[name] = True
+    for name in _OPEN_CAPABILITY_NAMES:
+        if declared := getattr(capabilities, name, None):
+            out[name] = len(declared)
+    return out
+
+
 def context(session: ServerSession | None) -> dict[str, object]:
     """Everything the handshake offered beyond the fields that get filtered on.
 
@@ -159,10 +214,9 @@ def context(session: ServerSession | None) -> dict[str, object]:
     icons = getattr(info, "icons", None)
     if icons:
         out["icons"] = len(icons)
-    if capabilities is not None:
-        declared = capabilities.model_dump(exclude_none=True, by_alias=True)
-        if declared:
-            out["capabilities"] = declared
+    declared = _capabilities(capabilities)
+    if declared:
+        out["capabilities"] = declared
     out["platform"] = f"{platform.system()} {platform.machine()}"
     out["python"] = f"{sys.version_info.major}.{sys.version_info.minor}"
     return out
@@ -195,6 +249,11 @@ def headers(
     }
     out = {name: value for name, value in discrete.items() if value}
 
+    # Bounded by construction, not by hope: every value here is either ours and short —
+    # the package version, the minted session id, and `env` and `mode`, both validated
+    # against a closed set before a Config exists — or passed through `clean`, which caps
+    # it at `_FIELD_LIMIT` encoded characters. Eight such headers cannot approach the
+    # budget, which is what leaves the whole of it for the JSON context below.
     spent = sum(len(name) + len(value) + 4 for name, value in out.items())
     extra = context(session)
     # Shed the long tail a field at a time, largest and least filtered on first. Truncating

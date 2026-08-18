@@ -240,3 +240,65 @@ async def test_no_unprintable_character_can_reach_a_header():
 
     # And if the invariant is ever broken upstream, nothing goes out at all.
     assert analytics.as_header({"title": "raw" + chr(127)}) != ""
+
+
+def test_no_client_extension_setting_is_ever_forwarded():
+    """A client's capability map is not a closed set, and its open half is not ours to read.
+
+    `experimental` and `extensions` are `dict[str, dict[str, Any]]`: an extension author
+    puts whatever that extension needs in there, and this server has no idea what. Dumping
+    the map wholesale sent it to Delta on every request, so an extension keeping a token in
+    its own capability object had that token forwarded intact under the server's own API
+    key. Only the shape travels now — how many, never which, and never a value.
+    """
+    caps = types.ClientCapabilities(
+        experimental={"private-extension": {"api_key": "client-secret-value"}},
+        roots=types.RootsCapability(listChanged=True),
+    )
+    declared = analytics._capabilities(caps)
+
+    assert declared == {"roots": True, "experimental": 1}
+    rendered = json.dumps(declared)
+    assert "client-secret-value" not in rendered
+    # The name is withheld too. It is a string the client chose, so it can carry as much as
+    # the value can, and nothing here needs it.
+    assert "private-extension" not in rendered
+
+
+@respx.mock
+async def test_a_client_name_of_emoji_cannot_overrun_the_budget():
+    """The limit counted characters before encoding, and the header is what gets sent.
+
+    One emoji is a single character to a slice and twelve after percent-encoding, so a name
+    of 200 of them passed a 200-character check and produced a 2400-character header. Two
+    such fields alone cleared the whole 4096-byte budget, which exists to stop a gateway
+    answering 431 — the failure the person sees is their own question failing, not a lost
+    metric. Dropping the JSON context could not recover it: nothing sheds a discrete field.
+    """
+    sent = await call_ticker(types.Implementation(name="\U0001f600" * 200, version="\U0001f600" * 200))
+    ours = sum(
+        len(name) + len(value) + 4
+        for name, value in sent.items()
+        if name.lower().startswith(analytics.PREFIX.lower())
+    )
+
+    assert ours <= analytics.BUDGET_BYTES, ours
+    # And each field is bounded on its own, not merely in total.
+    for header in (f"{analytics.PREFIX}Client", f"{analytics.PREFIX}Client-Version"):
+        assert len(sent[header]) <= analytics._FIELD_LIMIT, sent[header]
+        # Never cut through a `%XX`, which decodes to nothing a consumer can use.
+        assert not re.search(r"%[0-9A-Fa-f]?$", sent[header]), sent[header]
+
+
+@respx.mock
+async def test_a_client_name_that_cannot_be_encoded_does_not_fail_the_call():
+    """A Python string can hold what UTF-8 cannot encode, and a client may send one.
+
+    An unpaired surrogate raised inside the header build, before the request left the
+    process — so a cosmetic field about who is asking took down the tool call itself. The
+    name it produces need only be safe and bounded; it does not need to be faithful.
+    """
+    sent = await call_ticker(types.Implementation(name="bad\ud800name", version="1"))
+
+    assert sent[f"{analytics.PREFIX}Tool"] == "get_ticker"
+    assert "bad" in sent[f"{analytics.PREFIX}Client"]
