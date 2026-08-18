@@ -581,10 +581,18 @@ def register(
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
         stop_loss_order: dict[str, Any] | None = Field(
-            default=None, description="{order_type, stop_price, limit_price?, trail_amount?}."
+            default=None,
+            description=(
+                "{order_type: limit_order|market_order (default market_order), stop_price, "
+                "limit_price (required for limit_order), trail_amount?}."
+            ),
         ),
         take_profit_order: dict[str, Any] | None = Field(
-            default=None, description="{order_type, stop_price, limit_price?}."
+            default=None,
+            description=(
+                "{order_type: limit_order|market_order (default market_order), stop_price, "
+                "limit_price (required for limit_order)}."
+            ),
         ),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
         dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),

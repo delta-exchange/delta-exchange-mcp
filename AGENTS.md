@@ -173,6 +173,46 @@ API keys are env-scoped on Delta's side: prod keys created at delta.exchange onl
 
 `DELTA_MCP_MODE` is `read` (default) or `trade`; only `trade` registers `tools/trading.py`. `DELTA_MCP_AUDIT` (kill switch) and `DELTA_MCP_AUDIT_FILE` (path override) govern the audit log.
 
+## Evals (tool-selection quality)
+
+`evals/` scores whether the tool names, descriptions and schemas lead a real LLM agent to
+pick the right tool with the right arguments. Run it when renaming a tool or rewriting a
+docstring, and **never in CI** — it spends real tokens, roughly $10-15 for a full run.
+
+```bash
+uv sync --group evals
+uv run --group evals python -m evals.run --list                          # free
+uv run --group evals python -m evals.run --case ticker_basic --no-judge  # cheap smoke
+uv run --group evals python -m evals.run                                 # full run
+```
+
+Deterministic expect/forbid asserts in `evals/dataset.py` are the gate; the DeepEval judge
+scores are advisory. The harness in `evals/agent.py` starts the server over stdio, refuses
+`india_prod` outright, and **forces `dry_run=True` on every mutating call** at the
+`call_tool` boundary — the recorded arguments are the model's own, so the asserts and the
+judge score what it intended rather than what was forced.
+
+DeepEval 4.x has undocumented shape requirements (`MCPToolCall.result` must be a real
+`CallToolResult`, one assistant `Turn` per tool call, a `{"result": ...}` structured body).
+Those workarounds live in `evals/scoring.py`; keep every deepeval import there.
+
+**The harness reads the protocol types, so an SDK rename reaches it.** mcp 2.x renamed the
+result fields to snake_case and removed the old spellings for reading — `structured_content`,
+`is_error` and `input_schema` now, where 1.x had `structuredContent`, `isError` and
+`inputSchema`. Constructing with the old names still works, so this fails only when
+something runs. Reading is what breaks, and the harness reads them on every tool call.
+
+**Any model that speaks the Anthropic Messages API works**, not only Anthropic's own
+endpoint. The client honours `ANTHROPIC_BASE_URL`, so an OpenRouter key runs the whole
+harness against its Anthropic-compatible endpoint, tool use included:
+
+```bash
+ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1 \
+ANTHROPIC_API_KEY=$OPENROUTER_API_KEY \
+uv run --group evals python -m evals.run --case ticker_basic --no-judge \
+  --model anthropic/claude-haiku-4.5
+```
+
 ## Reference — Delta Exchange API
 
 The upstream source of truth for endpoint shapes is the **Slate docs repo at `/Users/anuj/Documents/work/Delta/slate`**, specifically `swagger_v2.json` and `source/includes/_*.md`. When adding or fixing a tool:
