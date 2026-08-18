@@ -605,12 +605,12 @@ below is hidden, and nothing else is added.
 | `X-Delta-MCP-Version` | The version of this server. |
 | `X-Delta-MCP-Client` | The name your app gave when it connected, such as `claude-ai`. |
 | `X-Delta-MCP-Client-Version` | That app's version, as it reported it. |
-| `X-Delta-MCP-Session` | A random number for one connection, made up here. It is not linked to you or your account, and it is forgotten when the app closes. |
+| `X-Delta-MCP-Session` | A random number for one connection, made up here and forgotten when the app closes. It is not derived from your account or your key — but it travels on the same authenticated requests, so Delta can tell that one connection's calls belong together and belong to you. |
 | `X-Delta-MCP-Env` | `india_prod` or `india_testnet`. |
 | `X-Delta-MCP-Mode` | `read` or `trade`. |
 | `X-Delta-MCP-Tool` | Which tool caused the request, such as `get_ticker`. |
 | `X-Delta-MCP-Protocol` | The MCP version your app and this server agreed on. |
-| `X-Delta-MCP-Context` | The rest of what your app said about itself when it connected: its display title, description and website if it sent them, how many icons it has, which MCP features it supports, plus your operating system name and Python version. |
+| `X-Delta-MCP-Context` | The rest of what your app said about itself when it connected: its display title, description and website if it sent them, how many icons it has, which of the MCP features it supports, plus your operating system name and Python version. Apps can also declare their own private extensions; only how many are counted, never their names or their settings. |
 
 **Your API key, your secret, the request signature and your account details are never in
 these**, and the whole set is capped so it cannot grow large enough to make a request fail.
