@@ -53,6 +53,49 @@ _MAX_BODY = 64 * 1024
 
 
 @dataclass
+class _Save:
+    """The one save a page is allowed, and the state that makes it exactly one.
+
+    The URL token and this answer different questions. The token says who may ask, and it
+    cannot say how often: it sits in the address bar for the page's whole life, so every
+    reload, every duplicated tab and every double-click carries a valid one.
+
+    Without this, two saves ran to completion side by side. Each validated its own key,
+    each was told the account that key belongs to, and one of the two files won — leaving a
+    browser reporting a connected account that this machine is not the one using. The
+    store's own lock kept the file coherent, which is why nothing looked wrong.
+
+    The claim is taken before the key is checked against Delta, not after, because checking
+    is the slow part and therefore the whole race.
+    """
+
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _claimed: bool = False
+    # Separate from the claim: a claim is released when a save fails, and this never is.
+    committed: threading.Event = field(default_factory=threading.Event)
+
+    def claim(self) -> str:
+        """Take the right to save. Returns why it was refused, or "" when it is granted."""
+        with self._lock:
+            if self.committed.is_set():
+                return _ALREADY_SAVED
+            if self._claimed:
+                return _SAVE_IN_FLIGHT
+            self._claimed = True
+            return ""
+
+    def release(self) -> None:
+        """Hand it back after a save that never reached the file, so the person can retry."""
+        with self._lock:
+            if not self.committed.is_set():
+                self._claimed = False
+
+    def commit(self) -> None:
+        """The file is written. Nothing after this is allowed to replace it."""
+        self.committed.set()
+
+
+@dataclass
 class Page:
     """A running settings page and where to find it."""
 
@@ -124,6 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
     token: str = ""
     client: str = ""
     saved: threading.Event
+    save_state: _Save
     origin: str = ""
 
     def log_message(self, *args: Any) -> None:
@@ -184,11 +228,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.wfile.flush()
 
-        # Only once the browser holds the answer. This event closes the page and can end
-        # the command that started it, and these request threads are daemon threads that
-        # nothing waits for — so setting it while the write was still pending would let a
-        # durable save reach the browser as a connection reset.
-        if (result.get("structuredContent") or {}).get("status") == "saved":
+        # Only once the browser holds the answer. This event closes the page, and these
+        # request threads are daemon threads nothing waits for, so setting it while the
+        # write was still pending let a durable save reach the browser as a reset
+        # connection. Both stored outcomes close it: `unverified` wrote the file too, and
+        # leaving that page open would leave a form whose one save is already spent.
+        if (result.get("structuredContent") or {}).get("status") in ("saved", "unverified"):
             self.saved.set()
 
     def _dispatch(self, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -213,9 +258,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _save_mode(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self.client:
             return {"status": "rejected", "message": _NO_CLIENT}
+        if refused := self.save_state.claim():
+            return {"status": "rejected", "message": refused}
         failure = credentials.save_mode(self.client, str(args.get("mode") or "read"))
         if failure:
+            self.save_state.release()
             return {"status": "rejected", "message": failure}
+        self.save_state.commit()
         return {"status": "saved", "message": "Saved."}
 
     def _save(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -225,12 +274,18 @@ class _Handler(BaseHTTPRequestHandler):
         if not (env and key and secret):
             return {"status": "rejected", "message": "Fill in every field."}
 
+        # Before the check, not after: asking Delta is the slow part, so it is the whole
+        # window in which a second tab arrives and validates a different key.
+        if refused := self.save_state.claim():
+            return {"status": "rejected", "message": refused}
+
         # `check` is a coroutine and this handler is not. Each request already runs on its
         # own thread, so a loop here is private to it and cannot disturb the MCP server's.
         checked = asyncio.run(credentials.check(env, key, secret))
         # A key Delta rejected must not be saved. A key it could not be asked about must
         # be, or a flaky connection costs someone a credential they typed correctly.
         if not checked.ok and checked.reachable:
+            self.save_state.release()
             return {"status": "rejected", "message": form.rejection(env, checked)}
 
         mode = str(args.get("mode") or "")
@@ -238,16 +293,36 @@ class _Handler(BaseHTTPRequestHandler):
             env, key, secret, client=self.client, mode=mode if self.client else ""
         )
         if failure:
+            self.save_state.release()
             return {"status": "rejected", "message": failure}
 
-        return {
-            "status": "saved",
-            "account": checked.detail,
+        self.save_state.commit()
+        common = {
             "path": str(store.path()),
             "next_step": "Restart your MCP client so it picks up the new settings.",
             "overridden_by_client": credentials.overridden_by_client(self.client, store.read()),
         }
+        if not checked.reachable:
+            # Saved on purpose, and now said plainly. "saved" plus an account name renders
+            # as a connection, so putting the transport error in the account field told the
+            # person "Connected as could not reach Delta: timeout" over a key nothing had
+            # checked. The in-chat form has always drawn this distinction; only this did not.
+            return common | {
+                "status": "unverified",
+                "message": (
+                    f"Saved to {store.path()}, but Delta could not be reached to check it. "
+                    f"{checked.detail}"
+                ),
+            }
+        return common | {"status": "saved", "account": checked.detail}
 
+
+_ALREADY_SAVED = (
+    "These settings were already saved from this page. Ask your assistant to open a new "
+    "one if you want to change them again."
+)
+
+_SAVE_IN_FLIGHT = "Another save from this page is still going. Wait for it to finish."
 
 _NO_CLIENT = (
     "Trading is turned on for one app at a time, and this page was opened from a terminal "
@@ -264,6 +339,7 @@ def serve(client: str = "", open_browser: bool = True) -> Page:
     """
     token = secrets.token_urlsafe(24)
     saved = threading.Event()
+    save_state = _Save()
     server = ThreadingHTTPServer((_LOOPBACK, 0), _Handler)
     origin = f"{_LOOPBACK}:{server.server_address[1]}"
 
@@ -274,7 +350,13 @@ def serve(client: str = "", open_browser: bool = True) -> Page:
     server.RequestHandlerClass = type(
         "_BoundHandler",
         (_Handler,),
-        {"token": token, "client": client, "saved": saved, "origin": origin},
+        {
+            "token": token,
+            "client": client,
+            "saved": saved,
+            "save_state": save_state,
+            "origin": origin,
+        },
     )
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
