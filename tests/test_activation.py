@@ -795,3 +795,49 @@ async def test_no_tool_claims_a_repeat_is_free_when_it_is_not(tmp_path, monkeypa
         "adjust_position_margin",
     ):
         assert tools[name].annotations.idempotent_hint is False, name
+
+
+async def test_turning_trading_off_anywhere_stops_the_next_order():
+    """The running server has to notice a setting that changed outside it.
+
+    Only a status call used to re-read the file, so trading stayed armed for the rest of
+    the session after someone turned it off. The browser page is one way in — it writes
+    from its own thread and cannot reach the running server at all — but a hand-edited
+    file and a second client do the same thing. Checking before the mutation covers all
+    three, and refuses at the point of use rather than at the point of the save.
+    """
+    client_name = "Claude Desktop"
+    credentialled(mode_for=client_name)
+    async with connected(client_name=client_name) as session:
+        assert "place_order" in await session.tool_names()
+
+        # Exactly what the settings page writes, and nothing else. No callback into the
+        # running server, because the page has none.
+        shared = dict(store.read())
+        shared[config_mod.mode_key(client_name)] = "read"
+        store.write(shared)
+
+        result = await session.raw_call(
+            "place_order",
+            product_id=27,
+            size=1,
+            side="buy",
+            order_type="market_order",
+            dry_run=True,
+        )
+        assert result.is_error is True
+        assert "place_order" not in await session.tool_names()
+
+
+async def test_catching_up_before_a_mutation_never_arms_trading():
+    """The safe direction only. Otherwise a market call would arm orders mid-session."""
+    credentialled()  # a key, but no trading entitlement for this client
+    async with connected(client_name="Claude Desktop") as session:
+        assert "place_order" not in await session.tool_names()
+        shared = dict(store.read())
+        shared[config_mod.mode_key("Claude Desktop")] = "trade"
+        store.write(shared)
+
+        # A read tool runs, and the catch-up does not fire for it either way.
+        await session.call("get_connection_status")
+        assert "place_order" not in await session.tool_names(), "arming still waits for a restart"
