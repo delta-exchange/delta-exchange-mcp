@@ -19,7 +19,7 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 
 from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, server, store
+from delta_exchange_mcp import credentials, request, server, store
 
 KEY = "typed-into-the-form-key"
 SECRET = "typed-into-the-form-secret"
@@ -39,8 +39,8 @@ class Session:
 
     async def call(self, name, **arguments):
         result = await self.client.call_tool(name, arguments)
-        if result.structuredContent is not None:
-            return result.structuredContent
+        if result.structured_content is not None:
+            return result.structured_content
         return json.loads(result.content[0].text)
 
     async def raw_call(self, name, **arguments):
@@ -71,7 +71,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
             server_read, server_write = server_streams
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
-                    lambda: app._mcp_server.run(
+                    lambda: app._lowlevel_server.run(
                         server_read,
                         server_write,
                         server.initialization_options(app),
@@ -82,7 +82,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
 
                 async def collect(message):
                     if isinstance(message, types.ServerNotification):
-                        box["session"].notifications.append(message.root)
+                        box["session"].notifications.append(message)
 
                 info = (
                     types.Implementation(name=client_name, version="1")
@@ -135,7 +135,7 @@ async def test_the_server_declares_that_its_tool_list_can_change():
     to say so.
     """
     async with connected() as session:
-        assert session.initialized.capabilities.tools.listChanged is True
+        assert session.initialized.capabilities.tools.list_changed is True
 
 
 async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
@@ -157,6 +157,46 @@ async def test_the_status_tool_exists_with_no_credentials(accepted):
 
 
 # --- bringing the surface up ---------------------------------------------------------
+
+
+async def test_the_server_introduces_itself_with_the_names_a_person_reads(accepted):
+    """`name` is what a client keys on; these are what it shows someone.
+
+    They are the same strings the bundle's install dialog uses, and the point of reading
+    them from `identity` is that the two cannot drift apart. Asserting the values here
+    rather than comparing against the constants is deliberate: a test that reads the same
+    constant as the code passes even when both are wrong.
+    """
+    async with connected() as session:
+        info = session.initialized.server_info
+        assert info.name == "delta-exchange"
+        assert info.title == "Delta Exchange"
+        assert info.description == "Live market data and your Delta Exchange India account."
+        assert info.website_url == "https://www.delta.exchange"
+
+
+async def test_the_status_tool_reports_the_client_that_asked(accepted):
+    """A "the form did not render" report is only actionable with the build behind it."""
+    async with connected(client_name="claude-desktop") as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "claude-desktop"
+        assert status["client_version"] == "1"
+
+
+async def test_a_client_that_names_itself_nothing_still_arrives_named(accepted):
+    """The empty-name guard never fires over a real connection, and that is worth pinning.
+
+    The SDK substitutes `DEFAULT_CLIENT_INFO` — `mcp/0.1.0` — for a client that sends no
+    identity of its own. So every such client scopes its trading mode under the one name
+    `mcp` and shares that entitlement with the others, which is within the documented
+    "convenience scope, not authentication" model but does not read that way from the
+    guard alone. Only a call with no session at all yields an empty name.
+    """
+    assert request.client(None) == request.UNKNOWN
+    async with connected() as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "mcp"
+        assert status["client_version"] == "0.1.0"
 
 
 async def test_a_saved_key_makes_the_account_tools_reachable_without_a_restart(accepted):
@@ -194,7 +234,7 @@ async def test_the_status_tool_reports_the_surface_that_is_actually_live(accepte
 
 
 async def test_a_second_save_does_not_register_the_account_tools_twice(accepted):
-    """Rotating a key goes through the same path, and FastMCP would keep both copies."""
+    """Rotating a key goes through the same path, and the SDK would keep both copies."""
     async with connected() as session:
         await save(session)
         first = await session.tool_names()
@@ -412,7 +452,7 @@ async def test_another_session_cannot_call_a_globally_registered_trade_tool(monk
             assert "place_order" in await trader.tool_names()
 
         # Deliberately skip tools/list. MCP permits a direct tools/call, and the trading
-        # function remains in FastMCP's process-global registry from the prior session.
+        # function remains in the SDK's process-global tool registry from the prior session.
         async with connected(client_name="Reader", mcp=app) as reader:
             result = await reader.raw_call(
                 "place_order",
@@ -422,7 +462,7 @@ async def test_another_session_cannot_call_a_globally_registered_trade_tool(monk
                 order_type="market_order",
                 dry_run=True,
             )
-            assert result.isError is True
+            assert result.is_error is True
             assert "not enabled for this MCP session" in result.content[0].text
     finally:
         await app.close_live_client()

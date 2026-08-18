@@ -15,7 +15,7 @@ from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 
 def _client() -> DeltaClient:
@@ -33,14 +33,14 @@ async def _call(
     gate: trading.TradeGate | None = None,
     **kwargs: Any,
 ) -> Any:
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client, audit, gate)
     return await mcp.call_tool(name, kwargs)
 
 
 def _payload(call_result: Any) -> dict[str, Any]:
-    """mcp.call_tool returns (content, structured); pull the structured dict out."""
-    structured = call_result[1]
+    """mcp.call_tool returns a CallToolResult; pull the structured dict out."""
+    structured = call_result.structured_content
     return structured.get("result", structured) if isinstance(structured, dict) else structured
 
 
@@ -318,7 +318,7 @@ async def test_close_all_fetches_and_caches_user_id():
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client, None)
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
@@ -352,7 +352,7 @@ async def test_audit_records_success_and_error_without_secrets(tmp_path, monkeyp
     client = _client()
     await _call(client, "place_order", audit=audit,
                 product_id=27, size=1, side="buy", order_type="market_order")
-    # FastMCP wraps the DeltaApiError in a ToolError, but _finish records it first.
+    # The SDK wraps the DeltaApiError in a ToolError, but _finish records it first.
     with pytest.raises(Exception, match="insufficient_margin"):
         await _call(client, "place_order", audit=audit,
                     product_id=27, size=1, side="buy", order_type="market_order")
@@ -411,7 +411,7 @@ def test_trade_tools_present_in_trade_mode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_all_trading_tools_declare_mutating_metadata():
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     client = _client()
     try:
         trading.register(mcp, client)
@@ -498,7 +498,7 @@ async def test_place_batch_flags_partial_failure_with_dropped_coids():
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
     assert route.called
-    pf = out[1]["partial_failure"]
+    pf = out.structured_content["partial_failure"]
     assert pf["requested"] == 3 and pf["succeeded"] == 2 and pf["dropped"] == 1
     assert pf["dropped_client_order_ids"] == ["b"]
 
@@ -514,7 +514,7 @@ async def test_cancel_batch_flags_dropped_ids():
         client, "cancel_batch_orders", product_id=84,
         orders=[{"id": 111}, {"id": 999999999}],
     )
-    pf = out[1]["partial_failure"]
+    pf = out.structured_content["partial_failure"]
     assert pf["requested"] == 2 and pf["succeeded"] == 1
     assert pf["dropped_ids"] == [999999999]
 
@@ -531,7 +531,7 @@ async def test_batch_no_partial_flag_when_all_succeed():
         {"side": "buy", "order_type": "limit_order", "limit_price": "61000", "size": 1},
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
-    assert "partial_failure" not in out[1]
+    assert "partial_failure" not in out.structured_content
 
 
 # --------------------------------------------------------------- BUG-4: close_all scope
@@ -641,7 +641,7 @@ async def test_off_tick_price_rounded_to_nearest():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.1"' in route.calls[0].request.content
-    structured = out[1]
+    structured = out.structured_content
     assert structured["price_adjustments"] == [
         {"field": "limit_price", "sent": "62000.07", "normalized": "62000.1"}
     ]
@@ -663,4 +663,4 @@ async def test_tick_rounding_skipped_when_unresolved():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
-    assert "price_adjustments" not in out[1]
+    assert "price_adjustments" not in out.structured_content

@@ -3,7 +3,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials, form, store
@@ -14,7 +14,7 @@ SECRET = "typed-into-the-form-secret"
 
 @pytest.fixture
 def server():
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     form.register(mcp)
     return mcp
 
@@ -34,8 +34,9 @@ async def save(mcp, **overrides):
         "grant": getattr(mcp, "_test_save_grant", ""),
     }
     args.update(overrides)
-    content, structured = await mcp.call_tool("save_credentials", args)
-    return structured, "".join(getattr(block, "text", "") for block in content)
+    result = await mcp.call_tool("save_credentials", args)
+    text = "".join(getattr(block, "text", "") for block in result.content)
+    return result.structured_content, text
 
 
 def checking(**kwargs):
@@ -60,7 +61,7 @@ async def test_the_opener_names_a_resource_the_server_actually_serves(server):
 async def test_the_view_is_declared_as_an_app_rather_than_a_document(server):
     """Without the profile parameter a client treats the HTML as content, not a view."""
     resource = next(r for r in await server.list_resources() if str(r.uri) == form.VIEW_URI)
-    assert resource.mimeType == "text/html;profile=mcp-app"
+    assert resource.mime_type == "text/html;profile=mcp-app"
 
 
 async def test_the_saving_tools_are_hidden_from_the_model(server):
@@ -211,7 +212,7 @@ async def test_the_save_grant_is_metadata_only(server):
     visible = json.dumps(
         {
             "content": [block.model_dump(mode="json") for block in result.content],
-            "structuredContent": result.structuredContent,
+            "structuredContent": result.structured_content,
         }
     )
     assert grant

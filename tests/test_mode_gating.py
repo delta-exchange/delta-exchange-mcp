@@ -2,7 +2,7 @@
 
 import asyncio
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -67,7 +67,7 @@ def test_partial_creds_skip_account_tools(monkeypatch):
 
 
 def test_account_removal_manifest_matches_the_registered_surface():
-    mcp = FastMCP("account-tools")
+    mcp = MCPServer("account-tools")
     client = DeltaClient(
         Config(
             env="india_testnet",
@@ -81,7 +81,7 @@ def test_account_removal_manifest_matches_the_registered_surface():
 
 
 def test_trading_removal_manifest_matches_the_registered_surface():
-    mcp = FastMCP("trading-tools")
+    mcp = MCPServer("trading-tools")
     client = DeltaClient(
         Config(
             env="india_testnet",

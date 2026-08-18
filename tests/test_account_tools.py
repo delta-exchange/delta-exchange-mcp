@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -29,14 +29,14 @@ def _client() -> DeltaClient:
 
 
 def _build_tools() -> dict[str, Any]:
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     account.register(mcp, _client())
     return {t.name: t for t in asyncio.run(mcp.list_tools())}
 
 
 async def _call_tool(tool_name: str, **kwargs: Any) -> Any:
-    """Invoke a registered tool through the FastMCP runtime."""
-    mcp = FastMCP("test")
+    """Invoke a registered tool through the MCPServer runtime."""
+    mcp = MCPServer("test")
     account.register(mcp, _client())
     return await mcp.call_tool(tool_name, kwargs)
 
@@ -95,7 +95,7 @@ async def test_get_wallet_transactions_csv_and_pagination():
 
 
 def _structured(result: Any) -> Any:
-    return result[1] if isinstance(result, tuple) else result
+    return result.structured_content
 
 
 @pytest.mark.asyncio
@@ -400,7 +400,7 @@ async def test_bulk_fills_export_writes_csv(tmp_path, monkeypatch):
         end_time_us=2000,
         product_ids=[1, 2],
     )
-    structured = result[1] if isinstance(result, tuple) else result
+    structured = result.structured_content
     assert (tmp_path / "fills.csv").read_bytes() == csv_body
     assert structured["row_count"] == 2
     assert structured["size_bytes"] == len(csv_body)
@@ -455,8 +455,7 @@ async def test_get_margined_positions_patches_short_option_pnl():
         )
     )
     result = await _call_tool("get_margined_positions")
-    # FastMCP returns (content, structured) — the structured dict is what we want.
-    structured = result[1] if isinstance(result, tuple) else result
+    structured = result.structured_content
     positions = structured["result"] if isinstance(structured, dict) else None
     assert positions is not None, f"unexpected tool result shape: {result!r}"
     short_call = next(p for p in positions if p["product_symbol"].startswith("C-"))

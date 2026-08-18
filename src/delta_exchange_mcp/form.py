@@ -87,11 +87,11 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, TextContent
 
-from delta_exchange_mcp import credentials, store
+from delta_exchange_mcp import credentials, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
     DASHBOARDS,
@@ -786,16 +786,16 @@ def _override_message(overridden: list[str]) -> str:
 def _client_name(ctx: Context) -> str:
     """What the connected client called itself, or "" when there is no session to ask.
 
-    The session hangs off the request context, and FastMCP raises rather than returning
+    The session hangs off the request context, and the SDK raises rather than returning
     None when there is none — which is what calling the tool in-process does, as the
     tests do. An empty name is handled by the caller, since a trading mode that cannot be
     scoped to a client must not be written at all.
     """
     try:
-        params = ctx.session.client_params
+        session = ctx.session
     except ValueError:
         return ""
-    return params.clientInfo.name if params and params.clientInfo else ""
+    return request.client(session).name
 
 
 def _opened_message() -> str:
@@ -819,7 +819,7 @@ def _opened_message() -> str:
     )
 
 
-def register(mcp: FastMCP, activate: Activate | None = None) -> None:
+def register(mcp: MCPServer, activate: Activate | None = None) -> None:
     """Add the credential form and the two tools that drive it.
 
     `activate` brings up the surface a newly saved credential unlocks, in the running
@@ -835,15 +835,15 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
     the tool result metadata as well; the grant is deliberately documented as a second gate,
     not as authenticated user presence.
     """
-    # Keep the session object itself as the key. An integer ``id(session)`` can be reused
-    # after a connection closes while its grant is still live, which would let a new
-    # session inherit that old grant. Retaining the object for at most the grant TTL makes
-    # that identity unambiguous and bounds the lifetime of the reference.
+    # Keep the connection object itself as the key. An integer id can be reused after a
+    # connection closes while its grant is still live, which would let a new client inherit
+    # that old grant. Retaining the object for at most the grant TTL makes that identity
+    # unambiguous and bounds the lifetime of the reference.
     grants: dict[object, _Grant] = {}
 
     def session_key(ctx: Context) -> object:
         try:
-            return ctx.session
+            return request.peer(ctx.session)
         except ValueError:
             # Direct in-process tests have no protocol session. They still exercise the
             # grant lifecycle under one sentinel rather than bypassing it.

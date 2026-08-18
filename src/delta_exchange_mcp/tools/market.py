@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from delta_exchange_mcp.client import DeltaClient
@@ -18,7 +18,7 @@ def _csv(values: list[str] | None) -> str | None:
     return ",".join(values)
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
+def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mcp.tool()
     async def list_products(
         contract_types: list[str] | None = Field(

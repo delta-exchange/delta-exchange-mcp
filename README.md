@@ -593,7 +593,7 @@ package published 2.0.0 on 28 July 2026, and 2.0.0 removed the `mcp.server.fastm
 `uvx` resolves from the declared range and ignores `uv.lock`, so a fresh install gets 2.0.0
 and the server stops at import. Existing installs and `uv sync` checkouts are not affected.
 
-Move to 0.4.2 or a newer version, which sets an upper limit of `mcp<2`:
+Move to 0.4.2 or a newer version. Those releases pin the SDK to a range that works:
 
 ```bash
 uvx --refresh delta-exchange-mcp --help
