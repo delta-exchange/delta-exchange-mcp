@@ -1,5 +1,7 @@
+import importlib.util
 import json
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -187,11 +189,21 @@ def _contrast(one: str, two: str) -> float:
 
 
 def test_the_view_carries_delta_s_own_brand_colours():
-    """Surfaces follow the host, but the accent has to be Delta's or it is a generic form."""
-    # --brand-india-bg-primary from delta.exchange's own token set, used for the mark.
-    assert "#fe6c02" in form.VIEW_HTML
+    """Surfaces follow the host, but the accent has to be Delta's or it is a generic form.
+
+    The mark paints its own fills rather than reading a variable, so it is asserted by the
+    colour it actually draws. Delta's undarkened #fe6c02 is deliberately not a variable:
+    white text on it measures 2.85:1, and a declared variable is exactly how it would find
+    its way back onto a control. The stylesheet records the value in a comment instead.
+    """
     # The official mark, inlined because nothing may be fetched.
     assert 'viewBox="0 0 53 52"' in form.VIEW_HTML
+    assert "#FD7D02" in form.VIEW_HTML
+    # The interactive accent: --brand-india-bg-primary walked toward black until white text
+    # is readable on it. The ratio itself is enforced by the contrast test below.
+    assert "--brand-strong: #c45302" in form.VIEW_HTML
+    assert re.search(r"--brand:\s*#", form.VIEW_HTML) is None
+    assert "var(--brand)" not in form.VIEW_HTML
 
 
 def test_every_colour_that_carries_text_is_readable_in_light_mode():
@@ -397,6 +409,16 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     assert "never ask them to send a key" in text
 
 
+def _harness():
+    """`scripts/host.py`, loaded by path because `scripts` is not an importable package."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "host.py"
+    spec = importlib.util.spec_from_file_location("delta_host_harness", path)
+    assert spec and spec.loader, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_the_harness_can_still_find_the_touch_rules_it_injects():
     """`(pointer: coarse)` answers to the device, so no page can ask to be measured as one.
 
@@ -406,10 +428,9 @@ def test_the_harness_can_still_find_the_touch_rules_it_injects():
     against a 500px ceiling before anything could measure it. If this block is renamed or
     reformatted past the harness's pattern, the harness reports the mouse height under a
     control that says touch, which is worse than not having the control at all.
-    """
-    import re as _re
 
-    pattern = _re.compile(r"@media \(pointer: coarse\) \{\n(.*?)\n  \}", _re.S)
-    found = pattern.search(form.VIEW_HTML)
-    assert found is not None, "scripts/host.py could no longer find the touch rules"
-    assert "min-height: 44px" in found.group(1)
+    It calls the harness rather than restating its pattern. A copy of the pattern here
+    would still pass after the harness's own copy stopped matching, which is the one
+    outcome this test exists to prevent.
+    """
+    assert "min-height: 44px" in _harness().coarse_rules()

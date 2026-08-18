@@ -801,18 +801,18 @@ async def test_turning_trading_off_anywhere_stops_the_next_order():
     """The running server has to notice a setting that changed outside it.
 
     Only a status call used to re-read the file, so trading stayed armed for the rest of
-    the session after someone turned it off. The browser page is one way in — it writes
-    from its own thread and cannot reach the running server at all — but a hand-edited
-    file and a second client do the same thing. Checking before the mutation covers all
-    three, and refuses at the point of use rather than at the point of the save.
+    the session after someone turned it off. There are two ways in that reach the file
+    without reaching this process: a hand edit, and a second client writing its own scoped
+    key. Checking before the mutation covers both, and refuses at the point of use rather
+    than at the point of the save.
     """
     client_name = "Claude Desktop"
     credentialled(mode_for=client_name)
     async with connected(client_name=client_name) as session:
         assert "place_order" in await session.tool_names()
 
-        # Exactly what the settings page writes, and nothing else. No callback into the
-        # running server, because the page has none.
+        # Exactly what another writer of the settings file leaves behind, and nothing
+        # else. No callback into the running server, because neither way in has one.
         shared = dict(store.read())
         shared[config_mod.mode_key(client_name)] = "read"
         store.write(shared)

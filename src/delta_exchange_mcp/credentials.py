@@ -54,7 +54,7 @@ def overridden_by_client(
     verifies one account against Delta, reports it by name, and the server goes on signing
     with a different one.
 
-    The question is which fields this page cannot change, so the test is whether the
+    The question is which fields a save cannot change, so the test is whether the
     process environment supplies the value — that is the layer `config.setting` puts first,
     and nothing written to the file can outrank it. Presence alone is still the wrong test:
     a client pinning a setting to the value the file already holds changes no outcome, and
@@ -89,8 +89,8 @@ def overridden_by_client(
     ):
         overridden.extend(CREDENTIAL_NAMES)
     if client and (scoped := mode_key(client)):
-        saved_mode = (stored.get(scoped) or "").strip().lower() or DEFAULT_MODE
-        process_mode = (os.environ.get("DELTA_MCP_MODE") or "").strip().lower()
+        saved_mode = held(scoped).lower() or DEFAULT_MODE
+        process_mode = supplied("DELTA_MCP_MODE").lower()
         if process_mode and process_mode != saved_mode:
             overridden.append("DELTA_MCP_MODE")
     return overridden

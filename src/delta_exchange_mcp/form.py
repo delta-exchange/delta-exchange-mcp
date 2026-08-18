@@ -208,12 +208,14 @@ _TEMPLATE = """<!DOCTYPE html>
   :root {
     color-scheme: light dark;
     /* Delta's own, always. These are the colours that make it Delta rather than a form.
-       `--brand` is the mark, and only the mark: WCAG exempts a logo from contrast, which is
-       the only reason Delta's orange can stay exactly as the brand defines it. Measured
-       against white it is 2.85:1, which fails the 4.5:1 that text needs and also the 3:1
-       that a control edge needs, so every interactive use takes `--brand-strong` instead —
-       the same hue walked toward black until it clears 4.5:1 with white text at 4.58:1. */
-    --brand: #fe6c02;
+       Delta's orange is #fe6c02, and deliberately no variable holds it. WCAG exempts a logo
+       from contrast, so the mark keeps that hue in the four fills of its own inlined SVG,
+       and nothing else in the view may use it: measured against white it is 2.85:1, which
+       fails the 4.5:1 that text needs and also the 3:1 that a control edge needs. Every
+       interactive fill takes `--brand-strong` instead — the same hue walked toward black
+       until it clears 4.5:1 with white text at 4.58:1. Declaring the undarkened orange as a
+       variable is what would invite it back onto a control, which is why the value is
+       recorded in this sentence rather than on the next line. */
     --brand-strong: #c45302;
     --brand-strong-hover: #ac4902;
     --on-brand: #ffffff;
@@ -281,7 +283,8 @@ _TEMPLATE = """<!DOCTYPE html>
 
   fieldset { border: 0; padding: 0; margin: 0 0 var(--gap); }
   legend { padding: 0; margin-bottom: var(--gap-tight); }
-  /* Block, so the whole row is a click target rather than just the words. */
+  /* The whole row is the click target, not just the words. Flex keeps the control
+     centred against a label that wraps to a second line. */
   .choice { display: flex; align-items: center; cursor: pointer; }
   .choice + .choice { margin-top: var(--gap-tight); }
   .choice input { margin: 0 .45em 0 0; flex: none; }

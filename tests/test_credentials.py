@@ -96,7 +96,7 @@ def test_a_client_key_is_reported_even_when_the_file_holds_none(monkeypatch):
 
     Every other test here fills the file first, which is how a test for a value the file
     does not hold came to be missing. A client supplying its own key leaves a field that
-    looks editable: someone types a key, the page checks it against Delta and names the
+    looks editable: someone types a key, the form checks it against Delta and names the
     account back to them, and the server signs every request with the client's key.
     """
     monkeypatch.setenv("DELTA_API_KEY", "from-the-clients-own-config")
@@ -115,7 +115,7 @@ def test_a_client_supplying_only_the_key_locks_the_secret_too(monkeypatch):
     A client naming only DELTA_API_KEY also decides the secret, and the secret it decides
     is nothing at all. Reporting the key alone would leave the secret field editable while
     nothing typed into it can ever be used, and every signed request then fails against a
-    page that said the account was connected.
+    form that said the account was connected.
     """
     monkeypatch.setenv("DELTA_API_KEY", "from-the-clients-own-config")
     monkeypatch.delenv("DELTA_API_SECRET", raising=False)
