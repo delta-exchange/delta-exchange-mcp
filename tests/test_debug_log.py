@@ -46,7 +46,7 @@ async def test_logs_request_and_body_but_no_secrets(tmp_path, monkeypatch):
 
     for h in logging.getLogger("delta_exchange_mcp").handlers:
         h.flush()
-    text = log_file.read_text()
+    text = log_file.read_text(encoding="utf-8")
 
     # Request + body are captured.
     assert "wallet/transactions" in text
@@ -78,7 +78,7 @@ async def test_logs_csv_body_for_raw_text_response(tmp_path, monkeypatch):
 
     for h in logging.getLogger("delta_exchange_mcp").handlers:
         h.flush()
-    text = log_file.read_text()
+    text = log_file.read_text(encoding="utf-8")
     assert "Time,Contract,Side" in text  # raw CSV body captured, not just byte count
 
 

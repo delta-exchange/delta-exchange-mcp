@@ -7,6 +7,7 @@ the MCP server, and asserts the request URL + query string + auth headers.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -296,8 +297,11 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     monkeypatch.chdir(sandbox)
+    outside = Path(tmp_path.anchor) / "delta-mcp-outside.csv"
+    relative = os.path.relpath(outside, sandbox)
+    assert ".." in Path(relative).parts
     with pytest.raises(ValueError, match="must be inside"):
-        _safe_export_path("../../../../etc/passwd")
+        _safe_export_path(relative)
 
 
 @pytest.mark.asyncio
