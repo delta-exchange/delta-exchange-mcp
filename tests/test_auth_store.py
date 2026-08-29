@@ -10,6 +10,7 @@ from delta_exchange_mcp.auth import store as auth_store
 from delta_exchange_mcp.auth.store import (
     BackendOperationError,
     BackendUnavailableError,
+    CredentialActivationError,
     CredentialConflictError,
     CredentialCorruptError,
     CredentialSource,
@@ -29,6 +30,7 @@ class FakeSecretBackend:
         self.deleted: list[str] = []
         self.mismatch: set[str] = set()
         self.fail_delete: set[str] = set()
+        self.fail_delete_after: set[str] = set()
         self._lock = threading.RLock()
 
     def get(self, name):
@@ -48,6 +50,9 @@ class FakeSecretBackend:
                 raise BackendOperationError("delete failed")
             self.values.pop(name, None)
             self.deleted.append(name)
+            if name in self.fail_delete_after:
+                self.fail_delete_after.remove(name)
+                raise BackendOperationError("delete failed after removal")
 
 
 class FailingMetadata:
@@ -184,6 +189,80 @@ def test_old_record_delete_failure_rolls_the_rotation_back(tmp_path):
     assert set(backend.values) == {"credential:india_prod:1"}
 
 
+def test_activation_runs_after_publication_and_before_old_record_retirement(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    observed: list[int | None] = []
+
+    def activate(credential):
+        assert credentials.metadata("india_prod").revision == 2
+        assert set(backend.values) == {
+            "credential:india_prod:1",
+            "credential:india_prod:2",
+        }
+        observed.append(credential.revision if credential is not None else None)
+
+    second = credentials.replace(
+        "india_prod",
+        "new-key",
+        "new-secret",
+        expected_revision=first.revision,
+        activate=activate,
+    )
+
+    assert second.revision == 2
+    assert observed == [2]
+    assert set(backend.values) == {"credential:india_prod:2"}
+
+
+def test_activation_failure_restores_metadata_and_removes_the_new_record(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    observed: list[int | None] = []
+
+    def activate(credential):
+        revision = credential.revision if credential is not None else None
+        observed.append(revision)
+        if revision == 2:
+            raise RuntimeError("rebind failed")
+
+    with pytest.raises(CredentialActivationError, match="could not activate"):
+        credentials.replace(
+            "india_prod",
+            "new-key",
+            "new-secret",
+            expected_revision=first.revision,
+            activate=activate,
+        )
+
+    assert observed == [2, 1]
+    assert credentials.get("india_prod") == first
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+def test_retirement_failure_restores_a_record_deleted_before_the_error(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    backend.fail_delete_after.add("credential:india_prod:1")
+    observed: list[int | None] = []
+
+    def activate(credential):
+        observed.append(credential.revision if credential is not None else None)
+
+    with pytest.raises(BackendOperationError, match="could not retire"):
+        credentials.replace(
+            "india_prod",
+            "new-key",
+            "new-secret",
+            expected_revision=first.revision,
+            activate=activate,
+        )
+
+    assert observed == [2, 1]
+    assert credentials.get("india_prod") == first
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
 def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
     credentials, backend = make_store(tmp_path)
     saved = credentials.replace("india_prod", "key", "secret")
@@ -300,6 +379,19 @@ def test_no_approved_system_backend_uses_process_local_memory(monkeypatch, tmp_p
     assert credentials.source is CredentialSource.MEMORY
     assert credentials.fallback_reason == "no secure backend"
     assert credentials.get("india_prod") == saved
+    assert not (tmp_path / "credentials.json").exists()
+
+
+def test_keyring_discovery_failure_uses_process_local_memory(monkeypatch, tmp_path):
+    def fail_discovery():
+        raise RuntimeError("backend discovery failed")
+
+    monkeypatch.setattr(auth_store.keyring, "get_keyring", fail_discovery)
+
+    credentials = CredentialStore.open(tmp_path / "credentials.json")
+
+    assert credentials.source is CredentialSource.MEMORY
+    assert "backend discovery failed" in credentials.fallback_reason
     assert not (tmp_path / "credentials.json").exists()
 
 
@@ -456,6 +548,44 @@ def test_migration_never_overwrites_a_different_active_credential(tmp_path):
     assert result.credential == active
     assert config_path.read_text() == original
     assert credentials.get("india_prod") == active
+
+
+def test_migration_create_uses_compare_and_swap(tmp_path, monkeypatch):
+    credentials, backend = make_store(tmp_path)
+    other_process_view = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=file-key\nDELTA_API_SECRET=file-secret\n"
+    config_path.write_text(original)
+    real_replace = credentials.replace
+
+    def replace_after_browser_write(environment, key, secret, **kwargs):
+        assert kwargs["expected_revision"] == 0
+        other_process_view.replace(environment, "browser-key", "browser-secret")
+        return real_replace(environment, key, secret, **kwargs)
+
+    monkeypatch.setattr(credentials, "replace", replace_after_browser_write)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.CONFLICT
+    assert result.credential is not None
+    assert result.credential.api_key == "browser-key"
+    assert config_path.read_text() == original
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+@pytest.mark.parametrize("environment", ["india_devnet", "other", "../india_prod"])
+def test_store_rejects_unsupported_environments(tmp_path, environment):
+    credentials, backend = make_store(tmp_path)
+
+    with pytest.raises(ValueError, match="must be one of"):
+        credentials.replace(environment, "key", "secret")
+
+    assert backend.values == {}
 
 
 def test_generation_is_a_metadata_only_read(tmp_path, monkeypatch):

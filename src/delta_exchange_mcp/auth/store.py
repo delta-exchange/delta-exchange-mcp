@@ -7,7 +7,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +26,7 @@ METADATA_VERSION = 1
 SECRET_VERSION = 1
 DEFAULT_DIR = Path.home() / ".delta-exchange-mcp"
 DEFAULT_METADATA_NAME = "credentials.json"
+SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
 
 _CREDENTIAL_NAMES = frozenset({"DELTA_API_KEY", "DELTA_API_SECRET"})
 _LOCK_TIMEOUT_SECONDS = 10.0
@@ -81,6 +82,10 @@ class CredentialConflictError(CredentialStoreError):
 
 
 class CredentialCorruptError(CredentialStoreError):
+    pass
+
+
+class CredentialActivationError(CredentialStoreError):
     pass
 
 
@@ -187,8 +192,17 @@ def _backend_name(backend: KeyringBackend) -> str:
 class SystemKeyringBackend:
     """Store secrets only in an approved operating-system keyring backend."""
 
-    def __init__(self, backend: KeyringBackend | None = None):
-        selected = backend if backend is not None else keyring.get_keyring()
+    def __init__(
+        self,
+        backend: KeyringBackend | None = None,
+        service_name: str = SERVICE_NAME,
+    ):
+        try:
+            selected = backend if backend is not None else keyring.get_keyring()
+        except Exception as exc:
+            raise BackendUnavailableError(
+                f"could not discover a system keyring: {exc}"
+            ) from exc
         name = _backend_name(selected)
         try:
             priority = selected.priority
@@ -201,10 +215,11 @@ class SystemKeyringBackend:
                 f"keyring backend {name} is not an approved system credential store"
             )
         self._backend = selected
+        self._service_name = service_name
 
     def get(self, name: str) -> str | None:
         try:
-            return self._backend.get_password(SERVICE_NAME, name)
+            return self._backend.get_password(self._service_name, name)
         except Exception as exc:
             raise BackendOperationError(
                 f"could not read {name} from the system store"
@@ -212,7 +227,7 @@ class SystemKeyringBackend:
 
     def set(self, name: str, value: str) -> None:
         try:
-            self._backend.set_password(SERVICE_NAME, name, value)
+            self._backend.set_password(self._service_name, name, value)
         except Exception as exc:
             raise BackendOperationError(
                 f"could not write {name} to the system store"
@@ -220,7 +235,7 @@ class SystemKeyringBackend:
 
     def delete(self, name: str) -> None:
         try:
-            self._backend.delete_password(SERVICE_NAME, name)
+            self._backend.delete_password(self._service_name, name)
         except PasswordDeleteError as exc:
             if self.get(name) is None:
                 return
@@ -471,8 +486,9 @@ class CredentialStore:
         state: CredentialState = CredentialState.UNVERIFIED,
         account_id: str = "",
         expected_revision: int | None = None,
+        activate: Callable[[Credential | None], None] | None = None,
     ) -> Credential:
-        """Atomically replace an environment's active credential."""
+        """Publish, activate, and retire one credential as a transaction."""
         env = _normalize_environment(environment)
         key = api_key.strip()
         secret = api_secret.strip()
@@ -481,8 +497,20 @@ class CredentialStore:
 
         with self._metadata.lock():
             values = self._metadata.read()
+            had_previous = env in values
             previous = values.get(env, _EnvironmentState())
             _check_revision(previous, expected_revision)
+            previous_credential = self._credential(env, previous)
+            previous_payload = None
+            if previous.active_revision is not None:
+                previous_payload = self._backend.get(
+                    _record_name(env, previous.active_revision)
+                )
+                if previous_payload is None:
+                    raise CredentialCorruptError(
+                        f"credential metadata points to missing revision "
+                        f"{previous.active_revision} for {env}"
+                    )
             revision = previous.next_revision
             now = _now()
             current = _EnvironmentState(
@@ -511,27 +539,65 @@ class CredentialStore:
                 self._delete_new(name)
                 raise
 
+            try:
+                credential = self._credential(env, current)
+                if credential is None:
+                    raise CredentialCorruptError(
+                        "the new credential has no active revision"
+                    )
+                if activate is not None:
+                    # The pointer and readback must precede a live rebind. Rollback sends
+                    # the previous credential, or None after a failed first connection.
+                    activate(credential)
+            except Exception as exc:
+                self._rollback_replace(
+                    values,
+                    env,
+                    previous,
+                    had_previous,
+                    name,
+                    activate,
+                    previous_credential,
+                )
+                if isinstance(exc, CredentialStoreError):
+                    raise
+                raise CredentialActivationError(
+                    f"could not activate credential revision {revision}"
+                ) from exc
+
             if previous.active_revision is not None:
                 old_name = _record_name(env, previous.active_revision)
                 try:
                     self._backend.delete(old_name)
                 except Exception as exc:
-                    values[env] = previous
+                    restored = self._backend.get(old_name)
+                    if restored != previous_payload:
+                        if previous_payload is None:
+                            raise CredentialStoreError(
+                                "credential retirement failed after removing the old record"
+                            ) from exc
+                        self._backend.set(old_name, previous_payload)
+                        if self._backend.get(old_name) != previous_payload:
+                            raise CredentialStoreError(
+                                "credential retirement failed and the old record could not be restored"
+                            ) from exc
                     try:
-                        self._metadata.write(values)
-                        self._delete_new(name)
+                        self._rollback_replace(
+                            values,
+                            env,
+                            previous,
+                            had_previous,
+                            name,
+                            activate,
+                            previous_credential,
+                        )
                     except Exception as rollback_exc:
                         raise CredentialStoreError(
-                            "credential replacement failed and its metadata rollback also failed"
+                            "credential retirement failed and its transaction rollback also failed"
                         ) from rollback_exc
                     raise BackendOperationError(
                         f"could not retire credential revision {previous.active_revision}"
                     ) from exc
-            credential = self._credential(env, current)
-            if credential is None:
-                raise CredentialCorruptError(
-                    "the new credential has no active revision"
-                )
             return credential
 
     def delete(self, environment: str, *, expected_revision: int | None = None) -> bool:
@@ -602,7 +668,17 @@ class CredentialStore:
                     staged.unlink(missing_ok=True)
                     return MigrationResult(MigrationStatus.CONFLICT, env, current)
                 if current is None:
-                    created = self.replace(env, key, secret)
+                    try:
+                        created = self.replace(
+                            env,
+                            key,
+                            secret,
+                            expected_revision=0,
+                        )
+                    except CredentialConflictError:
+                        current = self.get(env)
+                        staged.unlink(missing_ok=True)
+                        return MigrationResult(MigrationStatus.CONFLICT, env, current)
                     current = created
                 if self.get(env) != current:
                     raise MigrationError(
@@ -668,21 +744,35 @@ class CredentialStore:
                 f"credential write failed and temporary record {name} could not be removed"
             ) from exc
 
+    def _rollback_replace(
+        self,
+        values: dict[str, _EnvironmentState],
+        environment: str,
+        previous: _EnvironmentState,
+        had_previous: bool,
+        new_name: str,
+        activate: Callable[[Credential | None], None] | None,
+        previous_credential: Credential | None,
+    ) -> None:
+        if had_previous:
+            values[environment] = previous
+        else:
+            values.pop(environment, None)
+        self._metadata.write(values)
+        try:
+            if activate is not None:
+                activate(previous_credential)
+        finally:
+            self._delete_new(new_name)
+
 
 def _normalize_environment(environment: str) -> str:
     value = environment.strip().lower()
-    valid_characters = all(
-        character.isascii() and (character.isalnum() or character == "_")
-        for character in value
-    )
-    if (
-        not value
-        or len(value) > 64
-        or not value[0].isalpha()
-        or not value[0].isascii()
-        or not valid_characters
-    ):
-        raise ValueError(f"invalid Delta environment {environment!r}")
+    if value not in SUPPORTED_ENVIRONMENTS:
+        raise ValueError(
+            f"Delta environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}, "
+            f"got {environment!r}"
+        )
     return value
 
 
