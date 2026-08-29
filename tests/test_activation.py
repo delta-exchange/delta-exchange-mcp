@@ -16,7 +16,7 @@ from mcp.types import CallToolResult, InputRequiredResult
 
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import authorization
-from delta_exchange_mcp import connection_app, store
+from delta_exchange_mcp import connection_app, debug_log, store
 from delta_exchange_mcp.server import DeltaMCP, build_server
 from delta_exchange_mcp.tools import account, trading
 
@@ -108,6 +108,38 @@ async def test_connection_status_does_not_return_credentials() -> None:
     assert "test-secret" not in rendered
     assert "signature" not in rendered.lower()
     assert result.structured_content["credentials_configured"] is True
+    assert result.structured_content["client_name"] == CLIENT_NAME
+    assert result.structured_content["client_version"] == "1"
+
+
+async def test_debug_setting_does_not_change_tool_discovery(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "debug.log"))
+    without_debug = build_server(
+        config_mod.Config(
+            env="india_testnet",
+            base_url=config_mod.INDIA_TESTNET_REST,
+            debug=False,
+        )
+    )
+    with_debug = build_server(
+        config_mod.Config(
+            env="india_testnet",
+            base_url=config_mod.INDIA_TESTNET_REST,
+            debug=True,
+        )
+    )
+    try:
+        before = {tool.name for tool in await without_debug.list_tools()}
+        after = {tool.name for tool in await with_debug.list_tools()}
+    finally:
+        await without_debug.close_live_client()
+        await with_debug.close_live_client()
+        debug_log.shutdown()
+
+    assert before == after
+    assert "get_debug_status" in before
 
 
 async def test_connection_status_rebinds_an_externally_rotated_credential() -> None:
@@ -448,4 +480,3 @@ async def test_non_idempotent_writes_do_not_invite_automatic_retries(
         "adjust_position_margin",
     ):
         assert tools[name].annotations.idempotent_hint is False, name
-

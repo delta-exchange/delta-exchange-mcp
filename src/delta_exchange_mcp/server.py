@@ -9,7 +9,6 @@ from typing import Any
 import anyio
 from mcp.server.apps import Apps
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
 from delta_exchange_mcp import audit_log
@@ -163,11 +162,11 @@ def build_server(
         return config.env, config.api_key, config.api_secret
 
     async def reconcile(
-        session: ServerSession | None,
+        ctx: Context,
     ) -> tuple[config_mod.Config, dict[str, str], authorization.AccessState]:
         """Refresh the client binding and authorization for one request."""
         nonlocal live, trade_audit
-        who = request.client(session)
+        who = request.context_client(ctx)
         shared = store.read()
         next_config = config_mod.load_for_client(who.name, shared)
         identity_changed = http_identity(live) != http_identity(next_config)
@@ -189,14 +188,10 @@ def build_server(
 
     async def state_for(ctx: Context) -> authorization.AccessState:
         nonlocal trade_audit
-        try:
-            session = ctx.session
-        except ValueError:
-            session = None
         current = (
             await access_state(ctx)
             if access_state is not None
-            else (await reconcile(session))[2]
+            else (await reconcile(ctx))[2]
         )
         trade_gate.bind_final_check(current.final_trading_check)
         if current.credentials_ready and current.trading_enabled:
@@ -214,13 +209,9 @@ def build_server(
     @mcp.tool(annotations=hints.reads("Connection status", external=False))
     async def get_connection_status(ctx: Context) -> dict[str, object]:
         """Report connection and trading state without returning credential material."""
-        try:
-            session = ctx.session
-        except ValueError:
-            session = None
-        who = request.client(session)
+        who = request.context_client(ctx)
         if access_state is None:
-            next_config, shared, current = await reconcile(session)
+            next_config, shared, current = await reconcile(ctx)
         else:
             current = await state_for(ctx)
             next_config = client.config
@@ -252,12 +243,13 @@ def build_server(
             "audit_log_path": str(trade_audit.path) if trade_audit else None,
         }
 
-    if log_path is not None:
-
-        @mcp.tool(annotations=hints.reads("Debug status", external=False))
-        def get_debug_status() -> dict[str, object]:
-            """Report whether debug logging is on and where its log is stored."""
-            return {"enabled": True, "log_path": str(log_path)}
+    @mcp.tool(annotations=hints.reads("Debug status", external=False))
+    def get_debug_status() -> dict[str, object]:
+        """Report whether debug logging is on and where its log is stored."""
+        return {
+            "enabled": log_path is not None,
+            "log_path": str(log_path) if log_path is not None else None,
+        }
 
     return mcp
 

@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 from mcp import types
-from mcp.server.apps import client_supports_apps
+from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
+from mcp_types import CLIENT_CAPABILITIES_META_KEY, ClientCapabilities
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from delta_exchange_mcp.connection_app import VIEW_URI
@@ -188,19 +189,40 @@ class ToolAuthorization:
 
     @staticmethod
     def _supports_url(ctx: Context) -> bool:
-        try:
-            capabilities = ctx.client_capabilities
-        except ValueError:
-            return False
+        capabilities = ToolAuthorization._request_capabilities(ctx)
         elicitation = capabilities.elicitation if capabilities is not None else None
         return elicitation is not None and elicitation.url is not None
 
     @staticmethod
     def _supports_apps(ctx: Context) -> bool:
-        try:
-            return client_supports_apps(ctx)
-        except ValueError:
+        capabilities = ToolAuthorization._request_capabilities(ctx)
+        extensions = capabilities.extensions if capabilities is not None else None
+        settings = extensions.get(EXTENSION_ID) if extensions else None
+        if settings is None:
             return False
+        mime_types = settings.get("mimeTypes")
+        return isinstance(mime_types, list | tuple) and APP_MIME_TYPE in mime_types
+
+    @staticmethod
+    def _request_capabilities(ctx: Context) -> ClientCapabilities | None:
+        try:
+            meta = ctx.request_context.meta
+        except ValueError:
+            return None
+        raw = meta.get(CLIENT_CAPABILITIES_META_KEY) if meta is not None else None
+        try:
+            return (
+                raw
+                if isinstance(raw, ClientCapabilities)
+                else ClientCapabilities.model_validate(raw)
+            )
+        except (TypeError, ValueError):
+            if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+                return None
+            try:
+                return ctx.client_capabilities
+            except ValueError:
+                return None
 
     @staticmethod
     def _encode_state(required: Access) -> str:
