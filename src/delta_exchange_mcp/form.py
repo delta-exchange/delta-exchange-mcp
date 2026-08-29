@@ -356,8 +356,10 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="row">
       <label class="reveal"><input id="show" type="checkbox">Show what I typed</label>
       <button id="create" class="link" type="button" aria-disabled="true">
-        Get a key &mdash; Read Data is enough</button>
+        Get a key in Delta API management</button>
     </div>
+    <p class="note">The key must have permission for trading preferences. Current Delta
+      documentation does not establish whether Read Data alone is sufficient.</p>
 
     <button id="save" type="button" aria-disabled="true">Check and save</button>
   </div>
@@ -741,8 +743,9 @@ def _rejection(env: str, result: credentials.Check) -> str:
         )
     if result.code in _NO_PERMISSION:
         return (
-            "This key cannot read your account. Give it the Read Data permission under "
-            "Account → API Keys on Delta, then save again."
+            "API key lacks permission for trading preferences. Update its account-data "
+            "permissions in Delta API management. Current Delta documentation does not "
+            "establish whether Read Data alone is sufficient."
         )
     if result.code in _IP_BLOCKED:
         seen = f" It saw {result.ip}." if result.ip else ""

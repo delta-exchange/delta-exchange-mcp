@@ -104,8 +104,19 @@ def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
     login.run()
 
     body = store.path().read_text()
-    assert "Read Data" in body
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
     assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
+
+
+def test_login_does_not_claim_read_data_is_sufficient(terminal, monkeypatch, capsys):
+    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
+    login.run()
+
+    body = capsys.readouterr().out
+    assert "permission for trading preferences" in body
+    assert "does not establish whether Read Data alone is sufficient" in body
+    assert "permission is enough" not in body
 
 
 def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):

@@ -41,16 +41,18 @@ The form has four fields:
   `india_testnet` for the practice site at demo.delta.exchange.
 - **API key** and **API secret** — fill them in to let the assistant read your own account.
   Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys)
-  with the **Read Data** permission, which is the one that allows viewing but not trading.
-  Leaving them empty gives you market data only, unless you have already put a key in the
-  [shared file](#add-your-api-key), in which case that one is used.
+  with permission for the account endpoints that you plan to use. Current Delta
+  documentation does not establish whether **Read Data** alone is sufficient. Authenticated
+  testnet verification of the exact Read Data and Trading permission matrix is still
+  pending. Leaving the fields empty gives you market data only, unless you have already put
+  a key in the [shared file](#add-your-api-key), in which case that one is used.
 - **Mode** — defaults to `read`, which cannot place, change or cancel orders. Setting it to
   `trade` adds the tools that do.
 
 > [!WARNING]
 > `trade` mode places **real orders with no size cap**, sized in **contracts rather than
-> coins**. It also needs an API key with trading permission, not just Read Data. Leave Mode
-> on `read` unless placing live orders is exactly what you want.
+> coins**. The key must have permission for every trading endpoint that the server calls.
+> Leave Mode on `read` unless placing live orders is exactly what you want.
 
 <details>
 <summary><b>Claude Desktop — JSON config by hand</b> (also how you pin a specific version)</summary>
@@ -171,7 +173,10 @@ Safety features:
 - **Dry run.** Every mutating tool takes a `dry_run` flag. When `true`, the tool validates and returns the exact payload it *would* send, without sending it. Ask the assistant to "place the order as a dry run first."
 - **Audit log.** Every mutation (real or dry-run) is appended as one JSON line to `~/.delta-exchange-mcp/audit/` (owner-only `0600`). On by default in trade mode; disable with `DELTA_MCP_AUDIT=off`. The log records the tool, params, and result/order id — **never** credentials. Ask the assistant "where is the audit log?".
 - **No silent retries.** Unlike GET reads, mutations are never auto-retried on timeout or rate-limit — a failure is surfaced, not re-sent.
-- **API key permission.** The key must have Trading enabled in Delta API management, and the requesting IP whitelisted.
+- **API key permission.** Delta checks permission for each endpoint. An
+  `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
+  it does not prove that the key is invalid. Current Delta documentation does not establish
+  whether Read Data alone is sufficient for account reads.
 
 ## Add your API key
 
@@ -247,14 +252,13 @@ this file.
 
 1. Create it at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
 2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
-3. **Read Data** permission is enough for the read tiers. Trading permission is needed only for trade mode.
-4. **IP whitelisting is only for trading.** Delta requires whitelisted IPs to create a key with Trading permission; a read-only key needs none. If a key does carry a whitelist, Delta blocks other IPs and names the one it saw in the error.
+3. Choose permissions that allow the account and trading endpoints that you plan to call. Current Delta documentation does not establish whether **Read Data** alone is sufficient. Authenticated testnet verification of the exact Read Data and Trading permission matrix is still pending.
+4. Delta can reject a request when its source IP is not on the key's whitelist. The error names the IP that Delta received, so you can update the key in API management.
 5. **Match the environment**: a key from delta.exchange works only with `india_prod`, one from demo.delta.exchange only with `india_testnet`. Mixing them returns `InvalidApiKey`.
 
-The in-chat form and `login` both check all four for you and refuse to save a key Delta
-rejects, so you find out while you still have the key in front of you rather than the next
-time you ask a question. Both also write `DELTA_MCP_ENV` alongside the key, so point 5
-takes care of itself.
+The in-chat form and `login` check the credential pair against the account identity endpoint
+and refuse to save a key that Delta rejects. Both also write `DELTA_MCP_ENV` alongside the
+key, so the environment stays with the credential pair.
 
 ### Settings reference
 

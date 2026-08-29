@@ -86,9 +86,10 @@ def overridden_by_client(
 async def check(env: str, key: str, secret: str) -> Check:
     """One authenticated call, so four documented failures surface here and not later.
 
-    A wrong environment for the key, an unwhitelisted IP, a key without Read Data, and
-    a truncated paste are all invisible until something signs a request. Doing it while
-    the person is still holding the key turns each into a message they can act on.
+    A wrong environment for the key, an unwhitelisted IP, a key without permission for
+    trading preferences, and a truncated paste are all invisible until something signs a
+    request. Doing it while the person is still holding the key turns each into a message
+    they can act on.
     """
     cfg = Config(env=env, base_url=BASE_URLS[env], api_key=key, api_secret=secret)  # type: ignore[arg-type]
     client = DeltaClient(cfg)

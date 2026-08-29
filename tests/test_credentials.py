@@ -67,6 +67,8 @@ async def test_a_missing_endpoint_permission_is_not_an_invalid_credential():
     error = DeltaApiError(result.code)
 
     assert (result.ok, result.reachable) == (False, True)
+    assert "lacks permission for trading preferences" in result.detail
+    assert "does not establish whether Read Data alone is sufficient" in result.detail
     assert is_permission_failure(error)
     assert not is_auth_failure(error)
 

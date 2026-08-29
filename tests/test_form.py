@@ -190,6 +190,12 @@ def test_the_view_carries_the_dashboards_the_rest_of_the_package_uses():
     assert {e["value"] for e in injected["environments"]} <= set(config_mod.DASHBOARDS)
 
 
+def test_the_view_does_not_claim_read_data_is_sufficient():
+    assert "permission for trading preferences" in form.VIEW_HTML
+    assert "does not establish whether Read Data alone is sufficient" in form.VIEW_HTML
+    assert "Read Data is enough" not in form.VIEW_HTML
+
+
 # --- saving --------------------------------------------------------------------------
 
 
@@ -328,7 +334,8 @@ async def test_saving_keeps_the_template_and_its_instructions(server, monkeypatc
     await save(await opened(server))
 
     body = store.path().read_text()
-    assert "Read Data" in body
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
     assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
 
 

@@ -43,9 +43,9 @@ TEMPLATE = """\
 #
 # Market data works with this file empty. Fill these in to let an assistant read
 # your own account. Create a key under Account -> API Keys at
-# https://www.delta.exchange/app/account/manageapikeys with the "Read Data"
-# permission. Whitelisting an IP is not needed for that; Delta only requires it
-# on keys that also carry Trading permission.
+# https://www.delta.exchange/app/account/manageapikeys. The key must have
+# permission for trading preferences. Current Delta documentation does not
+# establish whether Read Data alone is sufficient.
 #
 # Match the environment to where the key came from: a key from delta.exchange
 # works only with india_prod, one from demo.delta.exchange only with
