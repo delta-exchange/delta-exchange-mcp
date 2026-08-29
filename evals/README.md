@@ -8,10 +8,17 @@ deterministic checks are the gate.
 The server must return the same tool list before and after account connection or trading
 approval. A missing required tool fails the case. It does not become a skipped case.
 
+The unit contract also checks the two authorization states that the paid runner cannot
+combine in one call. A disconnected server must still discover all account and trading
+tools. A selected real trading call without consent must return `input_required` before
+the server sends any `POST`, `PUT`, or `DELETE` request. Model-driven mutation calls stay
+separate and always receive `dry_run=true` from the runner.
+
 Set `ANTHROPIC_API_KEY` to run an agent. Account-data cases also need a complete testnet
 `DELTA_API_KEY` and `DELTA_API_SECRET` pair if the response content matters. Trading cases
 do not need trading consent because the harness forces `dry_run=true` at the call boundary.
-The harness does not export `DELTA_MCP_MODE`, and it refuses to run against production.
+The harness uses a temporary settings path, does not export `DELTA_MCP_MODE`, and refuses
+to run against production. It does not migrate or change the user's normal MCP settings.
 
 ```bash
 uv sync --group evals

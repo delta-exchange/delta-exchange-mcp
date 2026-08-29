@@ -1,9 +1,8 @@
-"""MCP stdio session + Anthropic tool-use loop for the eval harness."""
-
-from __future__ import annotations
+"""MCP stdio session and Anthropic tool-use loop for the eval harness."""
 
 import json
 import os
+import tempfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -94,7 +93,7 @@ class Transcript:
         return self.turns[-1].reply if self.turns else ""
 
 
-def server_environment() -> dict[str, str]:
+def server_environment(config_file: Path | None = None) -> dict[str, str]:
     """Build the safe child environment without legacy trading authorization."""
     # stdio_client replaces the child env wholesale when env= is given, so PATH/HOME
     # must be merged back in or `uv` won't resolve.
@@ -106,29 +105,33 @@ def server_environment() -> dict[str, str]:
     for key in ("DELTA_API_KEY", "DELTA_API_SECRET"):
         if os.environ.get(key):
             env[key] = os.environ[key]
+    if config_file is not None:
+        env["DELTA_MCP_CONFIG_FILE"] = str(config_file)
     return env
 
 
 @asynccontextmanager
 async def mcp_session() -> AsyncIterator[Client]:
     """Connect through server/discover and require the current MCP protocol."""
-    params = StdioServerParameters(
-        command="uv",
-        args=["run", "delta-exchange-mcp"],
-        env=server_environment(),
-        cwd=str(REPO_ROOT),
-    )
-    async with Client(
-        params,
-        mode="auto",
-        client_info=_CLIENT_INFO,
-    ) as client:
-        if client.protocol_version != _MODERN_PROTOCOL:
-            raise RuntimeError(
-                "evals require MCP 2026 server/discover; "
-                f"negotiated {client.protocol_version}"
-            )
-        yield client
+    with tempfile.TemporaryDirectory(prefix="delta-mcp-evals-") as state_dir:
+        env = server_environment(Path(state_dir) / "config.env")
+        params = StdioServerParameters(
+            command="uv",
+            args=["run", "delta-exchange-mcp"],
+            env=env,
+            cwd=str(REPO_ROOT),
+        )
+        async with Client(
+            params,
+            mode="auto",
+            client_info=_CLIENT_INFO,
+        ) as client:
+            if client.protocol_version != _MODERN_PROTOCOL:
+                raise RuntimeError(
+                    "evals require MCP 2026 server/discover; "
+                    f"negotiated {client.protocol_version}"
+                )
+            yield client
 
 
 def _parse_result(res: CallToolResult) -> Any:
@@ -174,7 +177,7 @@ async def _call(
 
 async def run_case(
     session: Client,
-    llm: anthropic.AsyncAnthropic,
+    llm: "anthropic.AsyncAnthropic",
     prompts: Sequence[str],
     *,
     model: str,

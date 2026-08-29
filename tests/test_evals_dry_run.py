@@ -1,14 +1,27 @@
-"""The eval harness must never send a live mutation: dry_run is forced at the
-call_tool boundary and the dry-run echo is verified."""
+"""Keep eval tool selection separate from live mutation authorization."""
+
+from pathlib import Path
 
 import pytest
-from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
-from delta_exchange_mcp.server import DeltaMCP
-from delta_exchange_mcp.tools import trading
-from evals.agent import _call, mutating_tools, server_environment
+from mcp import types
 from mcp.client import Client
-from mcp.types import CallToolResult, Implementation, TextContent, Tool
+from mcp.server.mcpserver import Context
+from mcp.types import (
+    CallToolResult,
+    Implementation,
+    InputRequiredResult,
+    TextContent,
+    Tool,
+)
+
+from delta_exchange_mcp import authorization
+from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.server import build_server
+from delta_exchange_mcp.tools import account, trading
+from evals.agent import _call, mutating_tools, server_environment
+
+MANAGE_URL = "http://127.0.0.1:43123/manage"
+CLIENT_INFO = Implementation(name="delta-mcp-evals", version="1")
 
 
 class FakeSession:
@@ -40,29 +53,48 @@ def test_mutating_set_derived_from_dry_run_property():
     assert mutating_tools(tools) == {"place_order"}
 
 
-def test_child_environment_does_not_export_legacy_trading_mode(monkeypatch):
+def test_child_environment_isolates_settings_and_legacy_trading_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setenv("DELTA_MCP_ENV", "india_testnet")
     monkeypatch.setenv("DELTA_MCP_MODE", "trade")
+    config_file = tmp_path / "config.env"
+    environment = server_environment(config_file)
 
-    assert "DELTA_MCP_MODE" not in server_environment()
+    assert "DELTA_MCP_MODE" not in environment
+    assert environment["DELTA_MCP_CONFIG_FILE"] == str(config_file)
 
 
 async def test_modern_discovery_lists_every_trade_tool_without_consent(
-    monkeypatch,
-):
-    app = DeltaMCP()
-    delta = DeltaClient(Config(env="india_testnet", base_url=INDIA_TESTNET_REST))
-    trading.register(app, delta, gate=trading.TradeGate(armed=False))
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def disconnected(ctx: Context) -> authorization.AccessState:
+        del ctx
+        return authorization.AccessState(
+            credentials_ready=False,
+            trading_enabled=False,
+            client_name=CLIENT_INFO.name,
+            final_trading_check=lambda: False,
+        )
 
-    async def fail_if_called(*args, **kwargs):
+    app = build_server(
+        Config(env="india_testnet", base_url=INDIA_TESTNET_REST),
+        access_state=disconnected,
+    )
+
+    async def fail_if_called(*args: object, **kwargs: object) -> None:
+        del args, kwargs
         raise AssertionError("dry-run evaluation sent a mutation request")
 
-    monkeypatch.setattr(delta, "post", fail_if_called)
+    monkeypatch.setattr(app.live_client, "post", fail_if_called)
+    monkeypatch.setattr(app.live_client, "put", fail_if_called)
+    monkeypatch.setattr(app.live_client, "delete", fail_if_called)
     try:
         async with Client(
             app,
             mode="auto",
-            client_info=Implementation(name="delta-mcp-evals", version="1"),
+            client_info=CLIENT_INFO,
         ) as client:
             tools = (await client.list_tools(cache_mode="refresh")).tools
             result = await client.call_tool(
@@ -77,11 +109,81 @@ async def test_modern_discovery_lists_every_trade_tool_without_consent(
             )
             protocol_version = client.protocol_version
     finally:
-        await delta.aclose()
+        await app.close_live_client()
 
     assert protocol_version == "2026-07-28"
+    assert account.TOOL_NAMES <= {tool.name for tool in tools}
     assert mutating_tools(tools) == trading.TOOL_NAMES
     assert result.structured_content["dry_run"] is True
+
+
+@pytest.mark.parametrize("dry_run", [None, False])
+async def test_selected_real_trade_requires_input_without_sending_a_mutation(
+    dry_run: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def credentials_without_consent(ctx: Context) -> authorization.AccessState:
+        del ctx
+        return authorization.AccessState(
+            credentials_ready=True,
+            trading_enabled=False,
+            client_name=CLIENT_INFO.name,
+            final_trading_check=lambda: False,
+        )
+
+    async def manage_url(ctx: Context, access: authorization.Access) -> str:
+        del ctx, access
+        return MANAGE_URL
+
+    async def elicit(ctx: object, params: object) -> types.ElicitResult:
+        del ctx, params
+        return types.ElicitResult(action="accept")
+
+    app = build_server(
+        Config(env="india_testnet", base_url=INDIA_TESTNET_REST),
+        access_state=credentials_without_consent,
+        manage_url=manage_url,
+    )
+    mutations: list[str] = []
+
+    async def record_mutation(
+        *args: object, **kwargs: object
+    ) -> dict[str, object]:
+        del args, kwargs
+        mutations.append("sent")
+        return {}
+
+    monkeypatch.setattr(app.live_client, "post", record_mutation)
+    monkeypatch.setattr(app.live_client, "put", record_mutation)
+    monkeypatch.setattr(app.live_client, "delete", record_mutation)
+    arguments: dict[str, object] = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "market_order",
+    }
+    if dry_run is not None:
+        arguments["dry_run"] = dry_run
+
+    try:
+        async with Client(
+            app,
+            mode="auto",
+            client_info=CLIENT_INFO,
+            elicitation_callback=elicit,
+        ) as client:
+            result = await client.session.call_tool(
+                "place_order",
+                arguments,
+                allow_input_required=True,
+            )
+    finally:
+        await app.close_live_client()
+
+    assert isinstance(result, InputRequiredResult)
+    request = result.input_requests["delta_exchange_authorization"]
+    assert "Enable trading" in request.params.message
+    assert mutations == []
 
 
 async def test_explicit_dry_run_false_is_overridden():

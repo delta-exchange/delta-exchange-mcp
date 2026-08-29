@@ -137,7 +137,7 @@
     },
     {
       "name": "get_order_history",
-      "description": "Closed / cancelled orders, filterable + paginated. Timestamps are microseconds."
+      "description": "Closed or cancelled order records. Use get_fills for executed trades."
     },
     {
       "name": "get_orderbook",
