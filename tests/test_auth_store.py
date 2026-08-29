@@ -24,6 +24,10 @@ from delta_exchange_mcp.auth.store import (
 )
 
 
+class SimulatedProcessDeath(BaseException):
+    pass
+
+
 class FakeSecretBackend:
     def __init__(self):
         self.values: dict[str, str] = {}
@@ -31,6 +35,8 @@ class FakeSecretBackend:
         self.mismatch: set[str] = set()
         self.fail_delete: set[str] = set()
         self.fail_delete_after: set[str] = set()
+        self.crash_delete: set[str] = set()
+        self.crash_delete_after: set[str] = set()
         self._lock = threading.RLock()
 
     def get(self, name):
@@ -48,11 +54,17 @@ class FakeSecretBackend:
             if name in self.fail_delete:
                 self.fail_delete.remove(name)
                 raise BackendOperationError("delete failed")
+            if name in self.crash_delete:
+                self.crash_delete.remove(name)
+                raise SimulatedProcessDeath
             self.values.pop(name, None)
             self.deleted.append(name)
             if name in self.fail_delete_after:
                 self.fail_delete_after.remove(name)
                 raise BackendOperationError("delete failed after removal")
+            if name in self.crash_delete_after:
+                self.crash_delete_after.remove(name)
+                raise SimulatedProcessDeath
 
 
 class FailingMetadata:
@@ -115,6 +127,18 @@ def test_replace_publishes_one_active_revision_without_secrets_in_metadata(tmp_p
     metadata = json.loads(body)["environments"]["india_prod"]
     assert metadata["active_revision"] == 1
     assert metadata["generation"] == 1
+
+
+def test_metadata_without_pending_revisions_remains_readable(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    metadata_path = tmp_path / "credentials.json"
+    document = json.loads(metadata_path.read_text())
+    document["environments"]["india_prod"].pop("pending_revisions")
+    metadata_path.write_text(json.dumps(document))
+
+    assert credentials.get("india_prod") == saved
+    assert credentials.metadata("india_prod").pending_revisions == ()
 
 
 def test_rotation_advances_revision_and_generation_then_deletes_the_old_record(
@@ -303,6 +327,7 @@ def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
     assert metadata.revision is None
     assert metadata.generation == 2
     assert metadata.state is None
+    assert metadata.pending_revisions == ()
     assert backend.values == {}
 
 
@@ -320,7 +345,130 @@ def test_delete_failure_after_removal_restores_the_active_record(tmp_path):
     assert set(backend.values) == {"credential:india_prod:1"}
 
 
-def test_a_metadata_failure_restores_a_deleted_secret():
+@pytest.mark.parametrize("crash_point", ["before_delete", "after_delete"])
+def test_process_death_during_disconnect_leaves_a_retryable_tombstone(
+    tmp_path,
+    crash_point,
+):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    name = "credential:india_prod:1"
+    if crash_point == "before_delete":
+        backend.crash_delete.add(name)
+    else:
+        backend.crash_delete_after.add(name)
+
+    with pytest.raises(SimulatedProcessDeath):
+        credentials.delete(
+            "india_prod",
+            expected_revision=saved.revision,
+            expected_generation=saved.generation,
+        )
+
+    tombstone = credentials.metadata("india_prod")
+    assert tombstone.revision is None
+    assert tombstone.generation == 2
+    assert tombstone.pending_revisions == (1,)
+
+    restarted = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    assert restarted.get("india_prod") is None
+    cleaned = restarted.metadata("india_prod")
+    assert cleaned.generation == 2
+    assert cleaned.pending_revisions == ()
+    assert backend.values == {}
+
+
+def test_startup_retries_pending_disconnect_cleanup(tmp_path, monkeypatch):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    backend.crash_delete.add("credential:india_prod:1")
+
+    with pytest.raises(SimulatedProcessDeath):
+        credentials.delete(
+            "india_prod",
+            expected_revision=saved.revision,
+            expected_generation=saved.generation,
+        )
+
+    monkeypatch.setattr(auth_store, "SystemKeyringBackend", lambda: backend)
+    restarted = CredentialStore.open(tmp_path / "credentials.json")
+
+    assert restarted.metadata("india_prod").pending_revisions == ()
+    assert restarted.get("india_prod") is None
+    assert backend.values == {}
+
+
+def test_failed_pending_cleanup_stays_disconnected_and_retries(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    name = "credential:india_prod:1"
+    backend.crash_delete.add(name)
+
+    with pytest.raises(SimulatedProcessDeath):
+        credentials.delete(
+            "india_prod",
+            expected_revision=saved.revision,
+            expected_generation=saved.generation,
+        )
+
+    backend.fail_delete.add(name)
+    restarted = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    assert restarted.get("india_prod") is None
+    assert restarted.metadata("india_prod").pending_revisions == (1,)
+    assert set(backend.values) == {name}
+
+    assert restarted.get("india_prod") is None
+    assert restarted.metadata("india_prod").pending_revisions == ()
+    assert backend.values == {}
+
+
+def test_generation_cas_rejects_a_stale_absent_page_after_disconnect(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    initial = credentials.metadata("india_prod")
+    saved = credentials.replace(
+        "india_prod",
+        "key",
+        "secret",
+        expected_revision=0,
+        expected_generation=initial.generation,
+    )
+
+    with pytest.raises(CredentialConflictError, match="generation"):
+        credentials.delete(
+            "india_prod",
+            expected_revision=saved.revision,
+            expected_generation=initial.generation,
+        )
+
+    assert credentials.delete(
+        "india_prod",
+        expected_revision=saved.revision,
+        expected_generation=saved.generation,
+    )
+
+    with pytest.raises(CredentialConflictError, match="generation"):
+        credentials.replace(
+            "india_prod",
+            "stale-key",
+            "stale-secret",
+            expected_revision=0,
+            expected_generation=initial.generation,
+        )
+
+    tombstone = credentials.metadata("india_prod")
+    assert (tombstone.revision, tombstone.generation) == (None, 2)
+    assert backend.values == {}
+
+
+def test_a_tombstone_publication_failure_prevents_secret_deletion():
     backend = FakeSecretBackend()
     metadata = FailingMetadata()
     credentials = CredentialStore(backend, metadata, CredentialSource.OS_STORE)
@@ -334,6 +482,7 @@ def test_a_metadata_failure_restores_a_deleted_secret():
     assert current is not None
     assert current.revision == 1
     assert (current.api_key, current.api_secret) == ("key", "secret")
+    assert backend.deleted == []
 
 
 def test_expected_revision_serializes_concurrent_rotations(tmp_path):
@@ -727,9 +876,12 @@ def test_migration_stays_complete_when_inactive_record_retirement_fails(
     assert result.status is MigrationStatus.MIGRATED
     assert result.credential is not None
     assert (result.credential.revision, result.credential.generation) == (2, 2)
-    assert credentials.get("india_prod") == result.credential
     assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
     assert set(backend.values) == expected_records
+    assert credentials.metadata("india_prod").pending_revisions == (1,)
+    assert credentials.get("india_prod") == result.credential
+    assert credentials.metadata("india_prod").pending_revisions == ()
+    assert set(backend.values) == {"credential:india_prod:2"}
     assert first.revision == 1
     assert "could not retire inactive credential revision 1" in caplog.text
     assert "same-key" not in caplog.text

@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as replace_fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -114,6 +114,7 @@ class CredentialMetadata:
     created_at: str
     updated_at: str
     validated_at: str
+    pending_revisions: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ class _EnvironmentState:
     created_at: str = ""
     updated_at: str = ""
     validated_at: str = ""
+    pending_revisions: tuple[int, ...] = ()
 
     def metadata(self, environment: str) -> CredentialMetadata:
         return CredentialMetadata(
@@ -169,6 +171,7 @@ class _EnvironmentState:
             created_at=self.created_at,
             updated_at=self.updated_at,
             validated_at=self.validated_at,
+            pending_revisions=self.pending_revisions,
         )
 
 
@@ -431,11 +434,13 @@ class CredentialStore:
                 CredentialSource.MEMORY,
                 fallback_reason=str(exc),
             )
-        return cls(
+        store = cls(
             backend,
             FileMetadata(metadata_path or default_metadata_path()),
             CredentialSource.OS_STORE,
         )
+        store._retry_pending_cleanup()
+        return store
 
     @property
     def persistent(self) -> bool:
@@ -456,7 +461,9 @@ class CredentialStore:
         """Read the active credential for an environment."""
         env = _normalize_environment(environment)
         with self._metadata.lock():
-            return self._get_locked(env, self._metadata.read())
+            values = self._metadata.read()
+            self._cleanup_pending_locked(values, env)
+            return self._get_locked(env, values)
 
     def resolve(
         self,
@@ -501,6 +508,7 @@ class CredentialStore:
         state: CredentialState = CredentialState.UNVERIFIED,
         account_id: str = "",
         expected_revision: int | None = None,
+        expected_generation: int | None = None,
         activate: Callable[[Credential | None], None] | None = None,
     ) -> Credential:
         """Publish, activate, and retire one credential as a transaction."""
@@ -512,6 +520,7 @@ class CredentialStore:
 
         with self._metadata.lock():
             values = self._metadata.read()
+            self._cleanup_pending_locked(values, env)
             return self._replace_locked(
                 values,
                 env,
@@ -520,15 +529,28 @@ class CredentialStore:
                 state=state,
                 account_id=account_id,
                 expected_revision=expected_revision,
+                expected_generation=expected_generation,
                 activate=activate,
             )
 
-    def delete(self, environment: str, *, expected_revision: int | None = None) -> bool:
+    def delete(
+        self,
+        environment: str,
+        *,
+        expected_revision: int | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         """Delete an active credential and advance its revocation generation."""
         env = _normalize_environment(environment)
         with self._metadata.lock():
             values = self._metadata.read()
-            return self._delete_locked(values, env, expected_revision)
+            self._cleanup_pending_locked(values, env)
+            return self._delete_locked(
+                values,
+                env,
+                expected_revision,
+                expected_generation,
+            )
 
     def migrate(self, config_path: Path) -> MigrationResult:
         """Move one complete legacy file credential into this store."""
@@ -557,6 +579,7 @@ class CredentialStore:
             try:
                 with self._metadata.lock():
                     values = self._metadata.read()
+                    self._cleanup_pending_locked(values, env)
                     current = self._get_locked(env, values)
                     if current is not None and (
                         current.api_key != key or current.api_secret != secret
@@ -594,6 +617,10 @@ class CredentialStore:
                         state=state,
                         account_id=account_id,
                         expected_revision=expected_revision,
+                        expected_generation=values.get(
+                            env,
+                            _EnvironmentState(),
+                        ).generation,
                         publish=publish_config,
                         keep_active_on_retirement_failure=True,
                     )
@@ -622,6 +649,7 @@ class CredentialStore:
         state: CredentialState,
         account_id: str,
         expected_revision: int | None,
+        expected_generation: int | None,
         activate: Callable[[Credential | None], None] | None = None,
         publish: Callable[[Credential], None] | None = None,
         keep_active_on_retirement_failure: bool = False,
@@ -629,6 +657,7 @@ class CredentialStore:
         had_previous = environment in values
         previous = values.get(environment, _EnvironmentState())
         _check_revision(previous, expected_revision)
+        _check_generation(previous, expected_generation)
         previous_credential = self._credential(environment, previous)
         previous_payload = None
         if previous.active_revision is not None:
@@ -652,6 +681,14 @@ class CredentialStore:
             created_at=now,
             updated_at=now,
             validated_at=now if state is CredentialState.VERIFIED else "",
+            pending_revisions=(
+                *previous.pending_revisions,
+                *(
+                    (previous.active_revision,)
+                    if previous.active_revision is not None
+                    else ()
+                ),
+            ),
         )
         name = _record_name(environment, revision)
         payload = _encode_secret(api_key, api_secret)
@@ -714,7 +751,7 @@ class CredentialStore:
                 if keep_active_on_retirement_failure:
                     logger.warning(
                         "could not retire inactive credential revision %s for %s "
-                        "after migration publication: %s",
+                        "after migration publication; cleanup remains pending: %s",
                         previous.active_revision,
                         environment,
                         exc,
@@ -747,6 +784,22 @@ class CredentialStore:
                 raise BackendOperationError(
                     f"could not retire credential revision {previous.active_revision}"
                 ) from exc
+            cleaned = replace_fields(
+                current,
+                pending_revisions=previous.pending_revisions,
+            )
+            values[environment] = cleaned
+            try:
+                self._metadata.write(values)
+            except Exception as exc:
+                values[environment] = current
+                logger.warning(
+                    "activated credential revision %s for %s, but pending cleanup "
+                    "metadata could not be cleared: %s",
+                    revision,
+                    environment,
+                    exc,
+                )
         return credential
 
     def _delete_locked(
@@ -754,18 +807,36 @@ class CredentialStore:
         values: dict[str, _EnvironmentState],
         environment: str,
         expected_revision: int | None,
+        expected_generation: int | None,
     ) -> bool:
         previous = values.get(environment, _EnvironmentState())
         _check_revision(previous, expected_revision)
+        _check_generation(previous, expected_generation)
         if previous.active_revision is None:
             return False
-        name = _record_name(environment, previous.active_revision)
+        revision = previous.active_revision
+        name = _record_name(environment, revision)
         payload = self._backend.get(name)
         if payload is None:
             raise CredentialCorruptError(
                 f"credential metadata points to missing revision "
-                f"{previous.active_revision} for {environment}"
+                f"{revision} for {environment}"
             )
+
+        tombstone = _EnvironmentState(
+            active_revision=None,
+            next_revision=previous.next_revision,
+            generation=previous.generation + 1,
+            state=None,
+            account_id="",
+            created_at="",
+            updated_at=_now(),
+            validated_at="",
+            pending_revisions=(*previous.pending_revisions, revision),
+        )
+        values[environment] = tombstone
+        self._metadata.write(values)
+
         try:
             self._backend.delete(name)
         except Exception as exc:
@@ -773,35 +844,102 @@ class CredentialStore:
                 self._restore_record(name, payload)
             except Exception as restore_exc:
                 raise CredentialStoreError(
-                    "credential deletion failed and its system-store record "
-                    "could not be restored"
+                    "credential deletion failed after the disconnect was published; "
+                    "the server remains disconnected and cleanup is pending"
                 ) from restore_exc
+            values[environment] = previous
+            try:
+                self._metadata.write(values)
+            except Exception as rollback_exc:
+                values[environment] = tombstone
+                raise CredentialStoreError(
+                    "credential deletion failed after the disconnect was published; "
+                    "the record was restored but metadata rollback failed"
+                ) from rollback_exc
             raise BackendOperationError(
-                f"could not delete credential revision "
-                f"{previous.active_revision} for {environment}"
+                f"could not delete credential revision {revision} for {environment}"
             ) from exc
-        now = _now()
-        values[environment] = _EnvironmentState(
-            active_revision=None,
-            next_revision=previous.next_revision,
-            generation=previous.generation + 1,
-            state=None,
-            account_id="",
-            created_at="",
-            updated_at=now,
-            validated_at="",
+
+        cleaned = replace_fields(
+            tombstone,
+            pending_revisions=previous.pending_revisions,
         )
+        values[environment] = cleaned
         try:
             self._metadata.write(values)
-        except Exception:
-            if payload is not None:
-                self._backend.set(name, payload)
-                if self._backend.get(name) != payload:
-                    raise CredentialStoreError(
-                        "credential deletion failed and its system-store rollback did not verify"
-                    )
-            raise
+        except Exception as exc:
+            values[environment] = tombstone
+            logger.warning(
+                "disconnected %s at generation %s, but pending cleanup metadata "
+                "could not be cleared: %s",
+                environment,
+                tombstone.generation,
+                exc,
+            )
         return True
+
+    def _retry_pending_cleanup(self) -> None:
+        try:
+            with self._metadata.lock():
+                values = self._metadata.read()
+                for environment in tuple(values):
+                    self._cleanup_pending_locked(values, environment)
+        except CredentialStoreError as exc:
+            logger.warning("could not inspect pending credential cleanup: %s", exc)
+
+    def _cleanup_pending_locked(
+        self,
+        values: dict[str, _EnvironmentState],
+        environment: str,
+    ) -> None:
+        previous = values.get(environment, _EnvironmentState())
+        if not previous.pending_revisions:
+            return
+
+        remaining: list[int] = []
+        for revision in previous.pending_revisions:
+            name = _record_name(environment, revision)
+            try:
+                self._backend.delete(name)
+            except Exception as exc:
+                try:
+                    still_present = self._backend.get(name) is not None
+                except Exception as read_exc:
+                    remaining.append(revision)
+                    logger.warning(
+                        "could not inspect inactive credential revision %s for %s: %s",
+                        revision,
+                        environment,
+                        read_exc,
+                    )
+                    continue
+                if still_present:
+                    remaining.append(revision)
+                    logger.warning(
+                        "could not clean inactive credential revision %s for %s: %s",
+                        revision,
+                        environment,
+                        exc,
+                    )
+
+        pending_revisions = tuple(remaining)
+        if pending_revisions == previous.pending_revisions:
+            return
+        current = replace_fields(
+            previous,
+            pending_revisions=pending_revisions,
+        )
+        values[environment] = current
+        try:
+            self._metadata.write(values)
+        except Exception as exc:
+            values[environment] = previous
+            logger.warning(
+                "cleaned inactive credentials for %s, but pending cleanup metadata "
+                "could not be updated: %s",
+                environment,
+                exc,
+            )
 
     def _observe_process_pair(
         self,
@@ -942,6 +1080,16 @@ def _check_revision(state: _EnvironmentState, expected: int | None) -> None:
         )
 
 
+def _check_generation(state: _EnvironmentState, expected: int | None) -> None:
+    if expected is None:
+        return
+    if state.generation != expected:
+        raise CredentialConflictError(
+            f"expected credential generation {expected}, but the current generation "
+            f"is {state.generation}"
+        )
+
+
 def _state_from_json(value: object, path: Path) -> _EnvironmentState:
     if not isinstance(value, dict):
         raise MetadataError(
@@ -957,6 +1105,7 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         created_at = value["created_at"]
         updated_at = value["updated_at"]
         validated_at = value["validated_at"]
+        raw_pending = value.get("pending_revisions", [])
     except (KeyError, TypeError, ValueError) as exc:
         raise MetadataError(
             f"credential metadata in {path} has an invalid entry"
@@ -971,6 +1120,25 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         )
     if type(generation) is not int or generation < 0:
         raise MetadataError(f"credential metadata in {path} has an invalid generation")
+    if not isinstance(raw_pending, list) or any(
+        type(revision) is not int or revision < 1 for revision in raw_pending
+    ):
+        raise MetadataError(
+            f"credential metadata in {path} has invalid pending revisions"
+        )
+    pending_revisions = tuple(raw_pending)
+    if len(set(pending_revisions)) != len(pending_revisions):
+        raise MetadataError(
+            f"credential metadata in {path} has duplicate pending revisions"
+        )
+    if any(revision >= next_revision for revision in pending_revisions):
+        raise MetadataError(
+            f"credential metadata in {path} has a pending revision that was not issued"
+        )
+    if active in pending_revisions:
+        raise MetadataError(
+            f"credential metadata in {path} marks its active revision for cleanup"
+        )
     if active is not None and next_revision <= active:
         raise MetadataError(
             f"credential metadata in {path} would reuse an active revision"
@@ -991,10 +1159,13 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         created_at=created_at,
         updated_at=updated_at,
         validated_at=validated_at,
+        pending_revisions=pending_revisions,
     )
 
 
-def _state_to_json(state: _EnvironmentState) -> dict[str, int | str | None]:
+def _state_to_json(
+    state: _EnvironmentState,
+) -> dict[str, int | str | list[int] | None]:
     return {
         "active_revision": state.active_revision,
         "next_revision": state.next_revision,
@@ -1004,6 +1175,7 @@ def _state_to_json(state: _EnvironmentState) -> dict[str, int | str | None]:
         "created_at": state.created_at,
         "updated_at": state.updated_at,
         "validated_at": state.validated_at,
+        "pending_revisions": list(state.pending_revisions),
     }
 
 
