@@ -14,9 +14,9 @@ from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, InputRequiredResult
 
-from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import authorization
+from delta_exchange_mcp import authorization, config as config_mod
 from delta_exchange_mcp import connection_app, debug_log, store
+from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import DeltaMCP, build_server
 from delta_exchange_mcp.tools import account, trading
 
@@ -110,6 +110,39 @@ async def test_connection_status_does_not_return_credentials() -> None:
     assert result.structured_content["credentials_configured"] is True
     assert result.structured_content["client_name"] == CLIENT_NAME
     assert result.structured_content["client_version"] == "1"
+
+
+async def test_tool_errors_expose_only_deliberate_safe_messages() -> None:
+    app = DeltaMCP()
+
+    @app.tool()
+    async def rejected_by_delta() -> None:
+        raise DeltaApiError(
+            "insufficient_margin",
+            context={"upstream_private_value": "must-not-cross-mcp"},
+            status=400,
+        )
+
+    @app.tool()
+    async def crashed() -> None:
+        raise RuntimeError("unexpected-private-value")
+
+    try:
+        async with connected(app) as client:
+            rejected = await client.call_tool("rejected_by_delta", {})
+            unexpected = await client.call_tool("crashed", {})
+    finally:
+        await app.close_live_client()
+
+    assert rejected.is_error is True
+    assert rejected.content[0].text == (
+        "Error executing tool rejected_by_delta: "
+        "delta api error: insufficient_margin [http 400]"
+    )
+    assert "must-not-cross-mcp" not in rejected.content[0].text
+    assert unexpected.is_error is True
+    assert unexpected.content[0].text == "Error executing tool crashed"
+    assert "unexpected-private-value" not in unexpected.content[0].text
 
 
 async def test_debug_setting_does_not_change_tool_discovery(

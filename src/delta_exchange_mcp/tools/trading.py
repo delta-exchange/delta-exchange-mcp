@@ -17,6 +17,7 @@ from functools import wraps
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp import hints
@@ -93,7 +94,7 @@ class TradeGate:
 
     def lease(self) -> TradeLease:
         if not self.armed:
-            raise RuntimeError(_REVOKED_MESSAGE)
+            raise ToolError(_REVOKED_MESSAGE)
         checker = self._final_check.get() or self._in_memory_check
         self._final_check.set(None)
         return TradeLease(generation=self.generation, final_check=checker)
@@ -134,7 +135,7 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _require_one(product_id: int | None, product_symbol: str | None) -> None:
     if (product_id is None) == (product_symbol is None):
-        raise ValueError("pass exactly one of product_id or product_symbol")
+        raise ToolError("pass exactly one of product_id or product_symbol")
 
 
 def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) -> None:
@@ -144,7 +145,9 @@ def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) 
     dry-run) with a clearer message instead of spending a live round-trip.
     """
     if stop_loss_price is not None and trail_amount is not None:
-        raise ValueError("bracket stop-loss takes either a fixed price or a trailing amount, not both")
+        raise ToolError(
+            "bracket stop-loss takes either a fixed price or a trailing amount, not both"
+        )
 
 
 def _validate_order(order_type: str | None, limit_price: str | None, size: int | None) -> None:
@@ -154,11 +157,13 @@ def _validate_order(order_type: str | None, limit_price: str | None, size: int |
     documented API constraints — they are not a full server simulation.
     """
     if size is not None and size <= 0:
-        raise ValueError("size must be a positive integer")
+        raise ToolError("size must be a positive integer")
     if order_type == "limit_order" and limit_price is None:
-        raise ValueError("limit_price is required for limit_order")
+        raise ToolError("limit_price is required for limit_order")
     if order_type == "market_order" and limit_price is not None:
-        raise ValueError("market_order must not carry a limit_price (it is ignored, not a cap)")
+        raise ToolError(
+            "market_order must not carry a limit_price (it is ignored, not a cap)"
+        )
 
 
 def _flag_partial(result: Any, sent: list[dict[str, Any]]) -> Any:
@@ -359,11 +364,11 @@ def register(
         try:
             accepted = gate.accepts(active_lease.get())
         except FinalTradingCheckError:
-            raise RuntimeError(_CHECK_FAILED_MESSAGE) from None
+            raise ToolError(_CHECK_FAILED_MESSAGE) from None
         if not accepted:
             if log:
                 log.record(tool, payload, error=_REVOKED_MESSAGE)
-            raise RuntimeError(_REVOKED_MESSAGE)
+            raise ToolError(_REVOKED_MESSAGE)
         try:
             result = await sender(path, payload, auth=True)
         except DeltaApiError as e:
@@ -497,7 +502,7 @@ def register(
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
-            raise ValueError("pass exactly one of id or client_order_id")
+            raise ToolError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("cancel_order", "DELETE", "/orders", payload, dry_run=dry_run)
 
@@ -539,9 +544,9 @@ def register(
 
     def _check_batch(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not orders:
-            raise ValueError("orders must be a non-empty list")
+            raise ToolError("orders must be a non-empty list")
         if len(orders) > _MAX_BATCH:
-            raise ValueError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
+            raise ToolError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
         return [_clean(o) for o in orders]
 
     @mutation_tool("Place orders in batch", destructive=False, idempotent=False)
@@ -567,7 +572,7 @@ def register(
             coid = order.get("client_order_id")
             if coid is not None:
                 if coid in seen_coids:
-                    raise ValueError(f"duplicate client_order_id in batch: {coid}")
+                    raise ToolError(f"duplicate client_order_id in batch: {coid}")
                 seen_coids.add(coid)
         payload = {
             "product_id": product_id,
@@ -641,7 +646,9 @@ def register(
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
-            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
+            raise ToolError(
+                "provide at least one of stop_loss_order or take_profit_order"
+            )
         sl = _clean(stop_loss_order) if stop_loss_order else None
         tp = _clean(take_profit_order) if take_profit_order else None
         if sl:
@@ -747,7 +754,9 @@ def register(
         (fetched once and cached) — you do not pass it.
         """
         if not (close_all_portfolio or close_all_isolated):
-            raise ValueError("set at least one of close_all_portfolio or close_all_isolated to true")
+            raise ToolError(
+                "set at least one of close_all_portfolio or close_all_isolated to true"
+            )
         payload = {
             "close_all_portfolio": close_all_portfolio,
             "close_all_isolated": close_all_isolated,

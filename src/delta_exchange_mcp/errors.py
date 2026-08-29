@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 # Documented in slate `_authentication.md`. Lookup of server error code → human hint.
 _AUTH_HINTS: dict[str, str] = {
     "SignatureExpired": (
@@ -52,7 +54,14 @@ def extract_ip(context: Any) -> str | None:
     return None
 
 
-class DeltaApiError(Exception):
+class DeltaApiError(ToolError):
+    """An anticipated Delta API failure that an MCP client can act on.
+
+    The public message omits the upstream response context. Delta controls that
+    context, so it can contain data that must stay in local diagnostics rather than
+    cross the MCP boundary.
+    """
+
     def __init__(self, code: str, context: Any = None, status: int | None = None):
         self.code = code
         self.context = context
@@ -68,8 +77,6 @@ class DeltaApiError(Exception):
             msg += f" — {self.hint}"
             if extra_ip:
                 msg += f" (request IP: {extra_ip})"
-        if context:
-            msg += f" (context={context})"
         if status:
             msg += f" [http {status}]"
         super().__init__(msg)
