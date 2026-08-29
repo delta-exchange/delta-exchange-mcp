@@ -11,6 +11,7 @@ import respx
 from delta_exchange_mcp import credentials, store
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp.config import INDIA_TESTNET_REST
+from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure, is_permission_failure
 
 KEY = "a-key"
 SECRET = "a-secret"
@@ -51,6 +52,23 @@ async def test_a_key_delta_has_never_seen_is_rejected_with_its_code():
     result = await credentials.check("india_testnet", KEY, SECRET)
     assert (result.ok, result.reachable) == (False, True)
     assert result.code == "invalid_api_key"
+
+
+@respx.mock
+async def test_a_missing_endpoint_permission_is_not_an_invalid_credential():
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            401,
+            json={"success": False, "error": {"code": "UnauthorizedApiAccess"}},
+        )
+    )
+
+    result = await credentials.check("india_testnet", KEY, SECRET)
+    error = DeltaApiError(result.code)
+
+    assert (result.ok, result.reachable) == (False, True)
+    assert is_permission_failure(error)
+    assert not is_auth_failure(error)
 
 
 @respx.mock

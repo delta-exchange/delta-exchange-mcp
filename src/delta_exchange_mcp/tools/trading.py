@@ -21,7 +21,7 @@ from pydantic import Field
 
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.identity import fetch_account_identity
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.errors import DeltaApiError
 
 logger = logging.getLogger("delta_exchange_mcp")

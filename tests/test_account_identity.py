@@ -4,7 +4,10 @@ import respx
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
-from delta_exchange_mcp.identity import InvalidIdentityResponse, fetch_account_identity
+from delta_exchange_mcp.account_identity import (
+    InvalidIdentityResponse,
+    fetch_account_identity,
+)
 
 
 def _client() -> DeltaClient:

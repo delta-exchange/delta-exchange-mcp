@@ -13,10 +13,17 @@ from dataclasses import dataclass
 import httpx
 
 from delta_exchange_mcp import store
+from delta_exchange_mcp.account_identity import (
+    InvalidIdentityResponse,
+    fetch_account_identity,
+)
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import BASE_URLS, DEFAULT_MODE, Config, load, mode_key
-from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure
-from delta_exchange_mcp.identity import InvalidIdentityResponse, fetch_account_identity
+from delta_exchange_mcp.errors import (
+    DeltaApiError,
+    is_auth_failure,
+    is_permission_failure,
+)
 
 
 @dataclass(frozen=True)
@@ -90,7 +97,7 @@ async def check(env: str, key: str, secret: str) -> Check:
     except DeltaApiError as exc:
         return Check(
             ok=False,
-            reachable=is_auth_failure(exc),
+            reachable=is_auth_failure(exc) or is_permission_failure(exc),
             detail=str(exc),
             code=exc.code,
             ip=exc.ip or "",

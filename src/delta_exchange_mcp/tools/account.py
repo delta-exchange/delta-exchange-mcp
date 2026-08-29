@@ -8,8 +8,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.identity import fetch_account_identity
 
 TOOL_NAMES = frozenset(
     {
