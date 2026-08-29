@@ -329,8 +329,10 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         page_size: int = Field(default=50, ge=1, le=200),
         after: str | None = None,
     ) -> dict[str, Any]:
-        """Closed / cancelled orders (lifecycle states, not executions — use get_fills for what
-        actually traded). Filterable + paginated. Timestamps are microseconds."""
+        """Closed or cancelled order records. Use get_fills for executed trades.
+
+        Results are filterable and paginated. Timestamps are microseconds.
+        """
         return await client.get(
             "/orders/history",
             params={
