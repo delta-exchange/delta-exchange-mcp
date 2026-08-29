@@ -380,14 +380,14 @@ async def test_audit_kill_switch(tmp_path, monkeypatch):
 # --------------------------------------------------------------- mode gating
 
 
-def test_trade_tools_absent_in_read_mode():
+def test_trade_tools_stay_discoverable_in_read_mode():
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="read",
     )
     mcp = build_server(cfg)
     names = {t.name for t in mcp._tool_manager.list_tools()}
-    assert "place_order" not in names
+    assert "place_order" in names
     assert "get_positions" in names  # account tools still present
 
 

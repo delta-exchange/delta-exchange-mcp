@@ -4,19 +4,19 @@ import argparse
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from typing import Any
 
 import anyio
-from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
-from mcp.server.lowlevel import NotificationOptions
+from mcp.server.apps import Apps
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
-from mcp.server.stdio import stdio_server
+from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
 from delta_exchange_mcp import audit_log
+from delta_exchange_mcp import authorization
+from delta_exchange_mcp import connection_app
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials, debug_log
-from delta_exchange_mcp import form
 from delta_exchange_mcp import hints
 from delta_exchange_mcp import identity
 from delta_exchange_mcp import request
@@ -30,8 +30,7 @@ configuration (the settings below, from your MCP client or the shared file):
   DELTA_MCP_ENV         india_prod (default), india_testnet, india_devnet
   DELTA_API_KEY         optional; requires DELTA_API_SECRET for the account tools
   DELTA_API_SECRET      required alongside DELTA_API_KEY
-  DELTA_MCP_MODE        read (default) or trade; trade registers the mutating tools
-                        when both credentials are set
+  DELTA_MCP_MODE        legacy compatibility value; it does not authorize trading
   DELTA_MCP_DEBUG       1/true/yes/on to trace HTTP requests and responses to a file
   DELTA_MCP_DEBUG_FILE  override the debug log path
   DELTA_MCP_AUDIT       off/false/0/no to disable the trade-mode audit log
@@ -42,44 +41,67 @@ Each is read from the environment your MCP client launched this server with, and
 falls back to a shared file at ~/.delta-exchange-mcp/config.env that every client
 on this machine reads. That file is created with instructions in it on first run,
 so an API key is set once rather than pasted into each client's own config.
-DELTA_MCP_MODE is the exception. That name is never read from the shared file, because a
-value there would arm order placement in every client on the machine at once. Trading is
-stored per client instead, under DELTA_MCP_MODE_<READABLE>_<DIGEST> keyed on the exact
-name the client gives in the handshake — which is what the in-chat form writes, and what
-the first tools/list of a session applies. This is convenience scope, not authenticated
-client identity.
+Legacy DELTA_MCP_MODE values do not authorize order placement. Trading requires browser
+consent for the exact client name, environment, and credential revision.
 
 Prod and testnet API keys are separate; DELTA_MCP_ENV must match the dashboard the
 key was created on. The server speaks MCP over stdio and is normally launched by a
 client rather than by hand.
 """
 
-# Sent to the model once per session, which is the only channel that reaches it in the
-# state that matters most: no key configured, so no account tool exists to carry a hint
-# on its own description. Without this, "what is my BTC position" on a fresh install gets
-# answered with "I have no tool for that" and no offer to fix it.
 INSTRUCTIONS = """\
-Delta Exchange India. Market data needs no setup and always works. The user's own account
-— positions, orders, fills, balances — is readable only when an API key is configured,
-and placing orders additionally requires trading to be turned on for this client.
-
-If the user asks about their own account and no account tool is available, call
-setup_credentials: it opens a form they type the key into. The same form is where trading
-is turned on, so call it for that too rather than telling them to edit a config file.
-Never ask for an API key or secret in the conversation, and never accept one sent as a
-message — anything sent that way is stored in the conversation and visible to you.
-get_connection_status reports whether a key is configured, which environment it points
-at, what this client may do now, what it may do after a restart, and whether one is due.
+Delta Exchange India. Market data needs no setup. Account and trading tools stay visible,
+but a call that needs authorization opens the browser connection flow. Never ask for an
+API key or secret in the conversation, and never accept one in a tool argument. Use
+setup_credentials to open the same browser flow directly. A trading dry run does not need
+trading consent because it sends no mutation to Delta.
 """
 
 
+BeforeToolCall = Callable[
+    [str, dict[str, Any], Context],
+    Awaitable[CallToolResult | InputRequiredResult | None],
+]
+
+
 class DeltaMCP(MCPServer):
-    """MCPServer with hooks before the tool list is built and before a mutation runs."""
+    """MCP server with one injectable request-scoped authorization hook."""
 
     def __init__(self) -> None:
-        self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = None
-        self._before_mutation: Callable[[ServerSession], Awaitable[None]] | None = None
+        self._before_tool_call: BeforeToolCall | None = None
         self.live_client: DeltaClient | None = None
+        apps = Apps()
+
+        @apps.tool(
+            resource_uri=connection_app.VIEW_URI,
+            visibility=["model", "app"],
+            annotations=hints.mutates(
+                "Manage Delta Exchange connection",
+                destructive=False,
+                idempotent=False,
+                external=False,
+            ),
+            description="Open the browser page for credentials and trading consent.",
+        )
+        async def setup_credentials(ctx: Context) -> CallToolResult:
+            message = (
+                "The browser connection service is not available in this build. Do not "
+                "send an API key or secret in the conversation."
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)],
+                structuredContent={"status": "unavailable", "message": message},
+                isError=True,
+            )
+
+        apps.add_html_resource(
+            connection_app.VIEW_URI,
+            connection_app.VIEW_HTML,
+            name="Delta Exchange connection",
+            title="Manage Delta Exchange connection",
+            description="Open the browser page for account connection and trading consent.",
+            prefers_border=True,
+        )
         super().__init__(
             "delta-exchange",
             # What a client shows a person, as against `name`, which is what it keys on.
@@ -90,358 +112,159 @@ class DeltaMCP(MCPServer):
             website_url=identity.HOMEPAGE,
             version=PACKAGE_VERSION,
             instructions=INSTRUCTIONS,
-            middleware=[self._serve],
+            extensions=[apps],
         )
 
-    def before_list_tools(
-        self, callback: Callable[[ServerSession], Awaitable[None]]
-    ) -> None:
-        self._before_list_tools = callback
+    def before_tool_call(self, callback: BeforeToolCall) -> None:
+        """Install the call-time account and trading authorization provider."""
+        self._before_tool_call = callback
 
-    def before_mutation(
-        self, callback: Callable[[ServerSession], Awaitable[None]]
-    ) -> None:
-        self._before_mutation = callback
-
-    async def _serve(
-        self, ctx: ServerRequestContext, call_next: CallNext
-    ) -> HandlerResult:
-        """Publish the session being served, and entitle it before the tool list is built.
-
-        Middleware is the one place both are in reach: `MCPServer.list_tools()` takes no
-        context, and the session reaches a handler only through a declared `Context`
-        parameter, which the shared mutation decorator cannot add for what it wraps.
-        """
-        token = request.session.set(ctx.session)
-        # Which tool was asked for. Read from the raw params rather than a typed field,
-        # because the same middleware sees every method and only `tools/call` carries a
-        # name; anything else leaves it empty and matches no mutating tool.
-        called = ""
-        if ctx.method == "tools/call":
-            params = ctx.params
-            called = (
-                params.get("name", "")
-                if isinstance(params, dict)
-                else getattr(params, "name", "")
-            ) or ""
-        try:
-            if ctx.method == "tools/list" and self._before_list_tools is not None:
-                await self._before_list_tools(ctx.session)
-            elif called in trading.TOOL_NAMES and self._before_mutation is not None:
-                # Settings can change from outside this process between one call and the
-                # next: a second client writes its own scoped key, or someone edits the
-                # file by hand. Only a status call used to notice, so an order could still
-                # be placed after trading was turned off. Checking here fails closed at
-                # the point of use, which is where a permission belongs, and covers both
-                # of those ways in rather than only the one that prompted it.
-                await self._before_mutation(ctx.session)
-            return await call_next(ctx)
-        finally:
-            request.session.reset(token)
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        """Authorize through the public SDK call path before dispatching a tool."""
+        if context is None:
+            context = Context(mcp_server=self, subscriptions=self._subscriptions)
+        if self._before_tool_call is not None:
+            blocked = await self._before_tool_call(name, arguments, context)
+            if blocked is not None:
+                return blocked
+        return await super().call_tool(name, arguments, context)
 
     async def close_live_client(self) -> None:
         if self.live_client is not None:
             await self.live_client.aclose()
 
 
-def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
+def build_server(
+    cfg: config_mod.Config | None = None,
+    *,
+    manage_url: authorization.ManageUrlProvider | None = None,
+    access_state: authorization.StateProvider | None = None,
+) -> DeltaMCP:
+    """Build a server whose tool list does not depend on authorization state."""
     cfg = cfg or config_mod.load()
     mcp = DeltaMCP()
-
-    # Mode controls which tools exist, not how HTTP is sent. Start the shared client in
-    # read mode and let the one runtime transition below arm mutations when appropriate.
     live = replace(cfg, mode="read")
     client = DeltaClient(live)
     mcp.live_client = client
     log_path = debug_log.configure(cfg)
+    trade_gate = trading.TradeGate(armed=False)
+    trade_audit: audit_log.AuditLog | None = None
+
     market.register(mcp, client)
-
-    account_registered = False
-    trade_audit = None
-    trade_gate: trading.TradeGate | None = None
-
-    def surface() -> str:
-        names = ["market"]
-        if account_registered:
-            names.append("account")
-        if trade_audit is not None or live.mode == "trade":
-            names.append("trade")
-        return "+".join(names)
-
-    def announce_transition(reason: str) -> None:
-        audit = str(trade_audit.path) if trade_audit else "off"
-        print(
-            f"[delta-exchange-mcp] runtime transition={reason} env={live.env} "
-            f"mode={live.mode} surface={surface()} audit={audit}",
-            file=sys.stderr,
-        )
-
-    def arm_trading(
-        armed: config_mod.Config, session: ServerSession | None = None
-    ) -> None:
-        """Register mutations against the same rebindable client as every other tool."""
-        nonlocal trade_audit, trade_gate, live
-        client.rebind(armed)
-        trade_audit = audit_log.configure(armed)
-        trade_gate = trading.TradeGate()
-        if session is not None:
-            trade_gate.bind(request.peer(session))
-        trading.register(mcp, client, trade_audit, trade_gate)
-        live = armed
-
-        @mcp.tool(annotations=hints.reads("Trading status", external=False))
-        def get_trading_status() -> dict[str, object]:
-            """Trading mode status and the audit log path (None if auditing is disabled).
-
-            Use this to tell the user that mutations are enabled and where the audit log lives.
-            """
-            return {
-                "mode": "trade",
-                "audit_log_path": str(trade_audit.path) if trade_audit else None,
-            }
-
-    def disarm_trading() -> None:
-        """Remove mutations before credentials, environment, or entitlement can move."""
-        nonlocal trade_audit, trade_gate, live
-        if trade_gate is not None:
-            trade_gate.revoke()
-        for name in (*trading.TOOL_NAMES, "get_trading_status"):
-            mcp.remove_tool(name)
-        trade_audit = None
-        trade_gate = None
-        live = replace(live, mode="read")
-        client.rebind(live)
+    account.register(mcp, client)
+    trading.register(mcp, client, lambda: trade_audit, trade_gate)
 
     def http_identity(config: config_mod.Config) -> tuple[str, str | None, str | None]:
-        """The secret-bearing comparison stays internal and is never returned by a tool."""
         return config.env, config.api_key, config.api_secret
 
-    def restart_required(next_config: config_mod.Config) -> bool:
-        return (
-            next_config.has_credentials
-            and next_config.mode == "trade"
-            and live.mode != "trade"
-        )
-
     async def reconcile(
-        session: ServerSession, *, allow_trade: bool, notify: bool
-    ) -> tuple[config_mod.Config, dict[str, str]]:
-        """Move every live surface to one coherent next configuration.
-
-        Read surfaces can move immediately. Trading is removed before an identity change and
-        can only be armed by the first tools/list of a new session, never by the form save
-        that requested it.
-        """
-        nonlocal account_registered, live
-        client_name = request.client(session).name
+        session: ServerSession | None,
+    ) -> tuple[config_mod.Config, dict[str, str], authorization.AccessState]:
+        """Refresh the client binding and authorization for one request."""
+        nonlocal live, trade_audit
+        who = request.client(session)
         shared = store.read()
-        next_config = config_mod.load_for_client(client_name, shared)
+        next_config = config_mod.load_for_client(who.name, shared)
         identity_changed = http_identity(live) != http_identity(next_config)
-        tools_changed = False
-        transitions: list[str] = []
-
-        if live.mode == "trade" and (identity_changed or next_config.mode != "trade"):
-            transitions.append(
-                "trade-disarmed-identity-change"
-                if identity_changed
-                else "trade-disarmed-read-mode"
-            )
-            disarm_trading()
-            tools_changed = True
-
         if identity_changed:
-            client.rebind(replace(next_config, mode="read"))
-            transitions.append("identity-rebound")
+            trade_gate.revoke()
 
-        if account_registered and not next_config.has_credentials:
-            for name in account.TOOL_NAMES:
-                mcp.remove_tool(name)
-            account_registered = False
-            tools_changed = True
-            transitions.append("account-disarmed")
-        elif not account_registered and next_config.has_credentials:
-            account.register(mcp, client)
-            account_registered = True
-            tools_changed = True
-            transitions.append("account-armed")
+        client.rebind(next_config)
+        live = next_config
+        if trade_gate.armed:
+            trade_gate.revoke()
+        trade_audit = None
 
-        if (
-            allow_trade
-            and next_config.has_credentials
-            and next_config.mode == "trade"
-            and live.mode != "trade"
-        ):
-            arm_trading(next_config, session)
-            tools_changed = True
-            transitions.append("trade-armed")
-        elif (
-            allow_trade
-            and next_config.has_credentials
-            and next_config.mode == "trade"
-            and live.mode == "trade"
-            and trade_gate is not None
-        ):
-            trade_gate.bind(request.peer(session))
+        return next_config, shared, authorization.AccessState(
+            credentials_ready=next_config.has_credentials,
+            # DELTA_MCP_MODE is a legacy preference, not proof of browser consent.
+            trading_enabled=False,
+            client_name=who.name,
+        )
+
+    async def state_for(ctx: Context) -> authorization.AccessState:
+        nonlocal trade_audit
+        try:
+            session = ctx.session
+        except ValueError:
+            session = None
+        current = (
+            await access_state(ctx)
+            if access_state is not None
+            else (await reconcile(session))[2]
+        )
+        if current.credentials_ready and current.trading_enabled:
+            trade_gate.arm()
+            trade_audit = audit_log.configure(replace(client.config, mode="trade"))
         else:
-            runtime_mode = "trade" if live.mode == "trade" else "read"
-            live = replace(next_config, mode=runtime_mode)
-            client.rebind(live)
+            if trade_gate.armed:
+                trade_gate.revoke()
+            trade_audit = None
+        return current
 
-        if transitions:
-            announce_transition("+".join(transitions))
-        if notify and tools_changed:
-            await session.send_tool_list_changed()
-        return next_config, shared
+    authorizer = authorization.ToolAuthorization(state_for, manage_url)
+    mcp.before_tool_call(authorizer.before_call)
 
-    if cfg.has_credentials:
-        account.register(mcp, client)
-        account_registered = True
-    if cfg.has_credentials and cfg.mode == "trade":
-        arm_trading(cfg)
-
-    # Retain the connection object rather than its integer id. Python may reuse an id after
-    # a connection closes; carrying that integer forward could make a later client skip its
-    # own entitlement check. Stdio has one live connection, so this set stays trivially small.
-    entitlement_checked: set[object] = set()
-
-    async def activate(
-        session: ServerSession, expected: form.ExpectedState
-    ) -> form.Activation:
-        """Hot-apply safe form changes and report whether account reads are live."""
-        # A form save must never become the event that arms trading. Mark the decision made
-        # even for a protocol peer that called the opener directly before its first list.
-        entitlement_checked.add(request.peer(session))
-        next_config, shared = await reconcile(session, allow_trade=False, notify=True)
-        identity_current = (
-            expected.environment is None
-            or (
-                (shared.get("DELTA_MCP_ENV") or "").strip() == expected.environment
-                and (shared.get("DELTA_API_KEY") or "").strip() == expected.api_key
-                and (shared.get("DELTA_API_SECRET") or "").strip() == expected.api_secret
-            )
-        )
-        mode_current = (
-            not expected.mode_setting
-            or (shared.get(expected.mode_setting) or "").strip().lower() == expected.mode
-        )
-        return form.Activation(
-            account_ready=account_registered,
-            mode=live.mode,
-            effective_mode=next_config.mode,
-            expected_current=identity_current and mode_current,
-        )
-
-    # Registered whether or not credentials are set: someone with none needs to add a
-    # first key, and someone with one still rotates it, switches environment, or changes mode.
-    form.register(mcp, activate)
-
-    # Read-only despite reconciling: it changes what this process believes to match the
-    # settings file, rather than changing anything outside the process. Nobody needs to
-    # hesitate before asking whether they are connected.
     @mcp.tool(annotations=hints.reads("Connection status", external=False))
     async def get_connection_status(ctx: Context) -> dict[str, object]:
-        """Whether an API key is configured, where it points, and if a restart is due.
-
-        Reconciles safe external file changes before answering and returns no key, secret,
-        or credential fingerprint.
-        """
-        session = ctx.session
+        """Report connection and trading state without returning credential material."""
+        try:
+            session = ctx.session
+        except ValueError:
+            session = None
         who = request.client(session)
-        client_name = who.name
-        next_config, shared = await reconcile(session, allow_trade=False, notify=True)
-        overridden = credentials.overridden_by_client(client_name, shared)
-        binding = config_mod.mode_key(client_name)
+        if access_state is None:
+            next_config, shared, current = await reconcile(session)
+        else:
+            current = await state_for(ctx)
+            next_config = client.config
+            shared = store.read()
+        overridden = credentials.overridden_by_client(who.name, shared)
         return {
-            "environment": live.env,
-            "credentials_configured": next_config.has_credentials,
-            "account_tools_available": account_registered,
-            "mode": live.mode,
-            "mode_after_restart": next_config.mode,
-            # Credential/environment overrides cannot be repaired by restarting. A mode
-            # override is different: if it says trade, restart is exactly what will arm it,
-            # so retain that warning while also naming the override below.
-            "restart_required": not (
-                set(overridden) - {"DELTA_MCP_MODE"}
-            )
-            and restart_required(next_config),
+            "environment": next_config.env,
+            "credentials_configured": current.credentials_ready,
+            "account_tools_available": current.credentials_ready,
+            "mode": "trade" if current.trading_enabled else "read",
+            "mode_after_restart": "read",
+            "restart_required": False,
             "overridden_by_client": overridden,
-            "client_name": client_name,
-            # The build behind the name. A report of "the form did not render" is only
-            # actionable with it: the same client name covers versions that differ in
-            # whether they render an MCP App at all.
+            "client_name": who.name,
             "client_version": who.version,
-            "mode_setting": binding,
+            "mode_setting": config_mod.mode_key(who.name),
             "client_identity": "self-reported name; convenience scope, not authentication",
             "version": PACKAGE_VERSION,
-            "view_build": form.build_id(),
+            "view": connection_app.VIEW_URI,
         }
 
-    # A client identifies itself only during the handshake. Apply its scoped entitlement
-    # before the first tools/list, through the SDK's own middleware chain rather than by
-    # replacing its private request handler table. It is checked once per session so
-    # choosing trade through the form cannot arm mutations in that same session later.
-    async def apply_session_entitlement(session: ServerSession) -> None:
-        connection = request.peer(session)
-        if connection in entitlement_checked:
-            return
-        await reconcile(session, allow_trade=True, notify=False)
-        entitlement_checked.add(connection)
-
-    async def catch_up_before_mutating(session: ServerSession) -> None:
-        """Re-read the settings before the entitled client can place an order.
-
-        `reconcile` already removes trading when the file no longer allows it. It only ran
-        on a status call or at the start of a session, so turning trading off anywhere else
-        stayed invisible for the rest of that session. `allow_trade` stays false for the
-        same reason the form save keeps it false: catching up must never be the event that
-        arms mutations, only the one that stops them.
-
-        Scoped to the connection trading was armed for, because `reconcile` resolves the
-        mode of whichever client is asking. Running it for any other caller would let one
-        client's settings tear down another client's live entitlement, and that caller is
-        already refused by the gate, with a message that says why.
-        """
-        if trade_gate is None or trade_gate.peer is not request.peer(session):
-            return
-        await reconcile(session, allow_trade=False, notify=True)
-
-    mcp.before_list_tools(apply_session_entitlement)
-    mcp.before_mutation(catch_up_before_mutating)
+    @mcp.tool(annotations=hints.reads("Trading status", external=False))
+    async def get_trading_status(ctx: Context) -> dict[str, object]:
+        """Report whether this client can send trading mutations."""
+        current = await state_for(ctx)
+        return {
+            "mode": "trade" if current.trading_enabled else "read",
+            "enabled": current.trading_enabled,
+            "audit_log_path": str(trade_audit.path) if trade_audit else None,
+        }
 
     if log_path is not None:
 
         @mcp.tool(annotations=hints.reads("Debug status", external=False))
         def get_debug_status() -> dict[str, object]:
-            """Whether debug logging is on and the absolute path of the current log file.
-
-            Use this to tell the user where to find / fetch the HTTP debug log.
-            """
+            """Report whether debug logging is on and where its log is stored."""
             return {"enabled": True, "log_path": str(log_path)}
 
     return mcp
 
 
-def initialization_options(mcp: MCPServer) -> InitializationOptions:
-    """What this server tells a client about itself, declaring a changeable tool list.
-
-    The SDK's own `run_stdio_async` builds these with every notification flag off, so the
-    server would advertise `tools.listChanged: false`. A client told that has no reason to
-    re-read the tool list, which makes the notification sent when a saved credential
-    brings the account tools up a no-op — leaving the restart it exists to avoid as the
-    only way through.
-    """
-    return mcp._lowlevel_server.create_initialization_options(
-        NotificationOptions(tools_changed=True)
-    )
-
-
 async def serve(mcp: MCPServer) -> None:
     """Serve over stdio, the only transport."""
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            await mcp._lowlevel_server.run(
-                read_stream, write_stream, initialization_options(mcp)
-            )
+        await mcp.run_stdio_async()
     finally:
         if isinstance(mcp, DeltaMCP):
             await mcp.close_live_client()
@@ -487,19 +310,13 @@ def main(argv: list[str] | None = None) -> None:
 
     cfg = config_mod.load()
     mcp = build_server(cfg)
-    surface = "market+account" if cfg.has_credentials else "market"
-    trade_on = cfg.has_credentials and cfg.mode == "trade"
-    if trade_on:
-        surface += "+trade"
+    surface = "market+account+trade"
     banner = (
         f"[delta-exchange-mcp] startup stdio env={cfg.env} base_url={cfg.base_url} "
-        f"mode={cfg.mode} surface={surface}"
+        f"mode=read surface={surface}"
     )
     if cfg.config_file is not None:
         banner += f" config={cfg.config_file}"
-    if trade_on:
-        audit = audit_log.configure(cfg)  # idempotent: appends to the same file path
-        banner += f" audit={audit.path if audit else 'off'}"
     if cfg.debug:
         log_path = debug_log.configure(cfg)  # idempotent — returns the same path
         if log_path is not None:  # configure returns None if the log file can't be opened

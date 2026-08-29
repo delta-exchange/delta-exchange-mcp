@@ -19,7 +19,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
-from delta_exchange_mcp import hints, request
+from delta_exchange_mcp import hints
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -49,7 +49,6 @@ _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
 _MUTATING_TOOL_META = {MUTATING_TOOL_META_KEY: True}
 _REVOKED_MESSAGE = "trading was disabled while this request was being prepared; no mutation was sent"
-_SESSION_MESSAGE = "trading is not enabled for this MCP session; no mutation was sent"
 
 
 @dataclass
@@ -58,18 +57,16 @@ class TradeGate:
 
     generation: int = 0
     armed: bool = True
-    peer: object | None = None
 
-    def bind(self, peer: object) -> None:
-        if self.peer is not None and self.peer is not peer:
+    def arm(self) -> None:
+        """Authorize future mutations after the request-scoped check succeeds."""
+        if not self.armed:
             self.generation += 1
-        self.peer = peer
+        self.armed = True
 
-    def lease(self, peer: object | None) -> int:
+    def lease(self) -> int:
         if not self.armed:
             raise RuntimeError(_REVOKED_MESSAGE)
-        if self.peer is not None and self.peer is not peer:
-            raise RuntimeError(_SESSION_MESSAGE)
         return self.generation
 
     def revoke(self) -> None:
@@ -187,7 +184,7 @@ def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
 def register(
     mcp: MCPServer,
     client: DeltaClient,
-    audit: AuditLog | None = None,
+    audit: AuditLog | Callable[[], AuditLog | None] | None = None,
     gate: TradeGate | None = None,
 ) -> None:
     gate = gate or TradeGate()
@@ -198,6 +195,9 @@ def register(
     # tick_size keyed by both product id (int) and symbol (str); filled lazily.
     _tick_cache: dict[int | str, Decimal] = {}
     _tick_list_loaded = {"done": False}
+
+    def current_audit() -> AuditLog | None:
+        return audit() if callable(audit) else audit
 
     def mutation_tool(
         title: str, *, destructive: bool, idempotent: bool
@@ -215,7 +215,10 @@ def register(
         ) -> Callable[..., Awaitable[Any]]:
             @wraps(function)
             async def pinned(*args: Any, **kwargs: Any) -> Any:
-                lease = gate.lease(request.peer(request.session.get()))
+                if kwargs.get("dry_run") is True:
+                    async with client.pin():
+                        return await function(*args, **kwargs)
+                lease = gate.lease()
                 token = active_lease.set(lease)
                 try:
                     async with client.pin():
@@ -310,23 +313,24 @@ def register(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
     ) -> Any:
         payload = _clean(payload)
+        log = current_audit()
         if dry_run:
-            if audit:
-                audit.record(tool, payload, dry_run=True)
+            if log:
+                log.record(tool, payload, dry_run=True)
             return {"dry_run": True, "method": method, "path": path, "payload": payload}
         if not gate.accepts(active_lease.get()):
-            if audit:
-                audit.record(tool, payload, error=_REVOKED_MESSAGE)
+            if log:
+                log.record(tool, payload, error=_REVOKED_MESSAGE)
             raise RuntimeError(_REVOKED_MESSAGE)
         sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
         try:
             result = await sender(path, payload, auth=True)
         except DeltaApiError as e:
-            if audit:
-                audit.record(tool, payload, error=str(e))
+            if log:
+                log.record(tool, payload, error=str(e))
             raise
-        if audit:
-            audit.record(tool, payload, result=result)
+        if log:
+            log.record(tool, payload, result=result)
         return result
 
     def _attach(result: Any, adjustments: list[dict[str, str]]) -> Any:
@@ -706,7 +710,7 @@ def register(
         payload = {
             "close_all_portfolio": close_all_portfolio,
             "close_all_isolated": close_all_isolated,
-            "user_id": await _user_id(),
+            "user_id": None if dry_run else await _user_id(),
         }
         return await _finish("close_all_positions", "POST", "/positions/close_all", payload, dry_run=dry_run)
 
