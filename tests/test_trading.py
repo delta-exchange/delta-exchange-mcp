@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from typing import Any
 from unittest.mock import Mock
 
@@ -14,6 +15,7 @@ import respx
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
 from mcp.server.mcpserver import MCPServer
@@ -365,8 +367,11 @@ async def test_batch_cap_enforced():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
+    profile = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 999}},
+        )
     )
     close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -731,8 +736,11 @@ async def test_close_all_requires_a_scope():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_explicit_scope_not_broadened():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 7}},
+        )
     )
     route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -863,7 +871,7 @@ async def test_a_mutation_is_never_resent_after_a_transport_failure():
     """
     route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
         side_effect=[
-            httpx.ReadTimeout("response never arrived"),
+            httpx.ReadTimeout("private-httpx-timeout-marker"),
             httpx.Response(200, json={"success": True, "result": {"id": 7}}),
         ]
     )
@@ -871,6 +879,8 @@ async def test_a_mutation_is_never_resent_after_a_transport_failure():
         await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
     assert route.call_count == 1
     assert err.value.code == "execution_outcome_unknown"
+    assert "private-httpx-timeout-marker" not in str(err.value)
+    assert "private-httpx-timeout-marker" not in repr(err.value.context)
 
 
 @pytest.mark.asyncio
@@ -878,12 +888,82 @@ async def test_a_mutation_is_never_resent_after_a_transport_failure():
 async def test_a_mutation_connect_failure_says_nothing_was_sent():
     """A connect failure provably sent nothing, so its error says a retry is safe."""
     route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
-        side_effect=httpx.ConnectError("no route to host")
+        side_effect=httpx.ConnectError("private-httpx-connect-marker")
     )
     with pytest.raises(DeltaApiError) as err:
         await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
     assert route.call_count == 1
     assert err.value.code == "upstream_unreachable"
+    assert "private-httpx-connect-marker" not in str(err.value)
+    assert "private-httpx-connect-marker" not in repr(err.value.context)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_server_failure_has_an_unknown_outcome_without_retry():
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.Response(
+                503,
+                json={
+                    "success": False,
+                    "error": {"code": "private-upstream-code-marker"},
+                },
+            ),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+    assert "private-upstream-code-marker" not in str(err.value)
+    assert "private-upstream-code-marker" not in repr(err.value.context)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_malformed_mutation_response_has_an_unknown_outcome_without_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="delta_exchange_mcp")
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.Response(200, text="private-response-body-marker"),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+    assert "private-response-body-marker" not in str(err.value)
+    assert "private-response-body-marker" not in repr(err.value.context)
+    assert "private-response-body-marker" not in caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_explicit_mutation_rejection_preserves_its_error_code() -> None:
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "success": False,
+                "error": {"code": "insufficient_margin"},
+            },
+        )
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "insufficient_margin"
 
 
 @pytest.mark.asyncio
@@ -905,12 +985,14 @@ async def test_audit_records_an_unknown_outcome(tmp_path, monkeypatch):
     assert audit is not None
 
     respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
-        side_effect=httpx.ReadTimeout("response never arrived")
+        side_effect=httpx.ReadTimeout("private-audit-transport-marker")
     )
-    with pytest.raises(Exception, match="execution_outcome_unknown"):
+    with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
         await _call(_client(), "place_order", audit=audit,
                     product_id=27, size=1, side="buy", order_type="market_order")
 
     lines = (tmp_path / "audit.log").read_text().splitlines()
     assert len(lines) == 1
+    assert "private-audit-transport-marker" not in str(caught.value)
     assert "execution_outcome_unknown" in json.loads(lines[0])["error"]
+    assert "private-audit-transport-marker" not in lines[0]

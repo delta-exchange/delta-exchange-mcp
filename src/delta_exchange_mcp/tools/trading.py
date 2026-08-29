@@ -20,6 +20,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp import hints
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -329,7 +330,12 @@ def register(
                         _store_product(prod)
                 _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
-            logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
+            logger.info(
+                "tick_size lookup failed for %s/%s: %s",
+                product_id,
+                product_symbol,
+                type(e).__name__,
+            )
             return None
         return _tick_cache.get(key) if key is not None else None
 

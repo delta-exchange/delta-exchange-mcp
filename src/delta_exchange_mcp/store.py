@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -27,6 +27,7 @@ TEMPLATE = """\
 # Manage API credentials and trading consent in the browser page that the MCP opens.
 # This file contains non-secret runtime settings only.
 DELTA_MCP_ENV=india_prod
+DELTA_MCP_ENV_GENERATION=0
 """
 
 
@@ -85,6 +86,33 @@ def ensure() -> Path | None:
 _LOCK_TIMEOUT_SECONDS = 10.0
 _LOCK_POLL_SECONDS = 0.05
 _LEGACY_CREDENTIAL_NAMES = frozenset({"DELTA_API_KEY", "DELTA_API_SECRET"})
+_ENVIRONMENT_KEY = "DELTA_MCP_ENV"
+_ENVIRONMENT_GENERATION_KEY = "DELTA_MCP_ENV_GENERATION"
+_DEFAULT_ENVIRONMENT = "india_prod"
+
+
+class SettingsConflictError(RuntimeError):
+    """A shared-settings compare-and-swap used an old value."""
+
+
+def _environment_state(
+    values: Mapping[str, str | None], default_environment: str
+) -> tuple[str, int]:
+    environment = (values.get(_ENVIRONMENT_KEY) or default_environment).strip().lower()
+    raw_generation = values.get(_ENVIRONMENT_GENERATION_KEY) or "0"
+    try:
+        generation = int(raw_generation)
+    except ValueError:
+        generation = -1
+    return environment, generation
+
+
+def environment_state(default_environment: str) -> tuple[str, int]:
+    """Read one atomic environment and generation snapshot."""
+    try:
+        return _environment_state(dotenv_values(path()), default_environment)
+    except OSError:
+        return default_environment, 0
 
 
 @contextmanager
@@ -133,6 +161,32 @@ def _write_lock(target: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def _publish(target: Path, values: dict[str, str]) -> str | None:
+    """Publish values while the caller holds the shared-settings lock."""
+    staged = None
+    try:
+        # Carry the owner bits across and drop access for group and other users.
+        # This also protects a legacy file until automatic migration removes secrets.
+        mode = stat.S_IMODE(target.stat().st_mode) & 0o700
+        handle, name = tempfile.mkstemp(
+            dir=target.parent, prefix=".config-", suffix=".tmp"
+        )
+        os.close(handle)
+        staged = Path(name)
+        shutil.copyfile(target, staged)
+        for key, value in values.items():
+            written, _, _ = set_key(str(staged), key, value)
+            if not written:
+                return f"the shared settings key {key} could not be updated"
+        os.chmod(staged, mode)
+        os.replace(staged, target)
+        staged = None
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+    return None
+
+
 def write(values: dict[str, str]) -> str | None:
     """Set non-secret values atomically, or leave the shared file unchanged."""
     if _LEGACY_CREDENTIAL_NAMES.intersection(values):
@@ -140,35 +194,62 @@ def write(values: dict[str, str]) -> str | None:
 
     target = ensure()
     if target is None:
-        return f"cannot write {path()}"
+        return "the shared settings could not be updated"
 
-    staged = None
     try:
         with _write_lock(target):
-            # Carry the owner bits across and drop access for group and other users.
-            # This also protects a legacy file until automatic migration removes secrets.
-            mode = stat.S_IMODE(target.stat().st_mode) & 0o700
-            handle, name = tempfile.mkstemp(
-                dir=target.parent, prefix=".config-", suffix=".tmp"
+            published = dict(values)
+            selected = published.get(_ENVIRONMENT_KEY)
+            if selected is not None:
+                current, generation = _environment_state(
+                    dotenv_values(target), _DEFAULT_ENVIRONMENT
+                )
+                if generation < 0:
+                    return "the shared environment generation is invalid"
+                if selected.strip().lower() != current:
+                    published[_ENVIRONMENT_GENERATION_KEY] = str(generation + 1)
+            return _publish(target, published)
+    except OSError:
+        # A browser result must not include an operating-system exception or local path.
+        return "the shared settings could not be updated"
+
+
+def compare_and_write_environment(
+    expected_environment: str,
+    expected_generation: int,
+    environment: str,
+    *,
+    default_environment: str,
+    before_publish: Callable[[], None],
+) -> str | None:
+    """Select an environment only if the shared value still matches the page token."""
+    target = ensure()
+    if target is None:
+        return "the shared settings could not be updated"
+
+    try:
+        with _write_lock(target):
+            active, generation = _environment_state(
+                dotenv_values(target), default_environment
             )
-            os.close(handle)
-            staged = Path(name)
-            shutil.copyfile(target, staged)
-            for key, value in values.items():
-                written, _, _ = set_key(str(staged), key, value)
-                if not written:
-                    return f"could not write {key} to {target}"
-            os.chmod(staged, mode)
-            os.replace(staged, target)
-            staged = None
-    except OSError as exc:
-        # Reported rather than raised because a caller may be a tool answering a form,
-        # where an exception becomes a protocol error the person cannot act on.
-        return f"could not write {', '.join(values)} to {target}: {exc}"
-    finally:
-        if staged is not None:
-            staged.unlink(missing_ok=True)
-    return None
+            if (
+                generation < 0
+                or active != expected_environment
+                or generation != expected_generation
+            ):
+                raise SettingsConflictError("the active environment changed")
+            if active == environment:
+                return None
+            before_publish()
+            return _publish(
+                target,
+                {
+                    _ENVIRONMENT_KEY: environment,
+                    _ENVIRONMENT_GENERATION_KEY: str(generation + 1),
+                },
+            )
+    except OSError:
+        return "the shared settings could not be updated"
 
 
 def insecure_permissions() -> str | None:

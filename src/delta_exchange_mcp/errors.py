@@ -54,10 +54,15 @@ _OPERATION_HINTS: dict[str, str] = {
 
 _SAFE_CODE = re.compile(r"[A-Za-z0-9_. -]{1,128}\Z")
 
-# A response carrying one of these codes proves that the submitted credential pair
-# itself is unusable. Other API failures — especially a rate limit or service outage —
-# only prove that Delta could not verify it at that moment.
-_AUTH_FAILURE_CODES = frozenset(_AUTH_HINTS)
+# A permission response proves that Delta received an authenticated request. It does
+# not prove that the same key can access the trading-preferences validation endpoint.
+_PERMISSION_FAILURE_CODES = frozenset(
+    {"UnauthorizedApiAccess", "unauthorized_api_access"}
+)
+
+# Keep permission separate so candidate validation can distinguish authentication-layer
+# responses from a valid key that lacks access to this one endpoint.
+_AUTH_FAILURE_CODES = frozenset(_AUTH_HINTS) - _PERMISSION_FAILURE_CODES
 
 
 def extract_ip(context: Any) -> str | None:
@@ -111,8 +116,13 @@ class DeltaApiError(ToolError):
 
 
 def is_auth_failure(error: DeltaApiError) -> bool:
-    """Whether an API error decisively rejects the submitted credentials."""
+    """Whether Delta returned an authentication-layer error."""
     return error.code in _AUTH_FAILURE_CODES
+
+
+def is_permission_failure(error: DeltaApiError) -> bool:
+    """Whether valid credentials lack permission for the requested endpoint."""
+    return error.code in _PERMISSION_FAILURE_CODES
 
 
 class ConfigError(Exception):

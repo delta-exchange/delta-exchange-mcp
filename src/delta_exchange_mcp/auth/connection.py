@@ -17,6 +17,7 @@ from delta_exchange_mcp import store as legacy_store
 from delta_exchange_mcp.auth.consent import (
     ConsentBinding,
     ConsentLease,
+    ConsentStorageError,
     ConsentStore,
     MemoryConsentBackend,
     StaleConsentError,
@@ -276,7 +277,7 @@ class ConnectionService:
         if environment not in SUPPORTED_ENVIRONMENTS:
             return self._rejected(client_name, "Choose production or testnet.")
         if operation == "activate":
-            return self._activate_environment(client_name, environment)
+            return self._activate_environment(client_name, environment, expected)
         if operation == "disconnect":
             return self._disconnect(client_name, environment, expected)
         if operation != "replace":
@@ -326,11 +327,32 @@ class ConnectionService:
                 "The secure credential service could not update the connection.",
             )
 
-        self.consent.revoke_environment(environment)
-        environment_result = self._set_environment(environment)
+        status = "saved" if checked.ok else "unverified"
+        try:
+            self.consent.revoke_environment(environment)
+            environment_result = self._set_environment(environment, expected)
+        except legacy_store.SettingsConflictError:
+            self._reconcile()
+            return setup.ActionResult(
+                {
+                    "status": status,
+                    "message": (
+                        "The credential was saved, but the active environment changed. "
+                        "Reload this page."
+                    ),
+                },
+                revision=self._revision(client_name),
+                stale=True,
+            )
+        except ConsentStorageError:
+            self._reconcile()
+            return self._rejected(
+                client_name,
+                "The credential was saved, but trading consent could not be revoked. "
+                "The active environment is unchanged.",
+            )
         self._reconcile()
         warning = _validation_warning(checked)
-        status = "saved" if checked.ok else "unverified"
         message = (
             "Connection updated. Trading remains off until you enable it below."
             if checked.ok
@@ -388,9 +410,25 @@ class ConnectionService:
         )
 
     def _activate_environment(
-        self, client_name: str, environment: str
+        self,
+        client_name: str,
+        environment: str,
+        expected: RevisionToken,
     ) -> setup.ActionResult:
-        message = self._set_environment(environment)
+        try:
+            message = self._set_environment(environment, expected)
+        except legacy_store.SettingsConflictError:
+            self._reconcile()
+            return setup.ActionResult(
+                {"message": "The active environment changed. Reload this page."},
+                revision=self._revision(client_name),
+                stale=True,
+            )
+        except ConsentStorageError:
+            return self._rejected(
+                client_name,
+                "Trading consent could not be revoked. The active environment is unchanged.",
+            )
         self._reconcile()
         return setup.ActionResult(
             {
@@ -468,6 +506,18 @@ class ConnectionService:
         """Recheck the active credential identity immediately before consent changes."""
         if expected.get("active_environment") != _ENVIRONMENT_TOKEN[environment]:
             return False
+        if self.fixed_config is not None or _process_setting("DELTA_MCP_ENV"):
+            if expected.get("active_environment_generation") != 0:
+                return False
+        else:
+            active_environment, active_generation = legacy_store.environment_state(
+                config_mod.DEFAULT_ENV
+            )
+            if (
+                active_environment != environment
+                or expected.get("active_environment_generation") != active_generation
+            ):
+                return False
         if credential is not None and credential.source is CredentialSource.PROCESS:
             return expected.get("active_credential_session_generation") == (
                 credential.session_generation or 0
@@ -500,15 +550,44 @@ class ConnectionService:
                 detail="validation failed",
             )
 
-    def _set_environment(self, environment: str) -> str:
+    def _set_environment(
+        self,
+        environment: str,
+        expected: RevisionToken,
+    ) -> str:
         base = self._base_config()
-        if base.env == environment:
-            return ""
+        expected_token = expected.get("active_environment", 0)
+        expected_generation = expected.get("active_environment_generation", -1)
+        expected_environment = next(
+            (
+                name
+                for name, token in _ENVIRONMENT_TOKEN.items()
+                if token == expected_token
+            ),
+            "",
+        )
+        if expected_environment not in SUPPORTED_ENVIRONMENTS:
+            raise legacy_store.SettingsConflictError(
+                "the active environment token is invalid"
+            )
         if self.fixed_config is not None or _process_setting("DELTA_MCP_ENV"):
+            if base.env != expected_environment or expected_generation != 0:
+                raise legacy_store.SettingsConflictError(
+                    "the active environment changed"
+                )
             return "The active environment is managed by this MCP client's configuration."
-        self.consent.revoke_environment(base.env)
-        self.consent.revoke_environment(environment)
-        problem = legacy_store.write({"DELTA_MCP_ENV": environment})
+
+        def revoke() -> None:
+            self.consent.revoke_environment(expected_environment)
+            self.consent.revoke_environment(environment)
+
+        problem = legacy_store.compare_and_write_environment(
+            expected_environment,
+            expected_generation,
+            environment,
+            default_environment=config_mod.DEFAULT_ENV,
+            before_publish=revoke,
+        )
         if problem is not None:
             return "The active environment could not be changed."
         return ""
@@ -608,7 +687,15 @@ class ConnectionService:
             token[f"{environment}_credential_generation"] = (
                 metadata.generation if metadata is not None else 0
             )
-        token["active_environment"] = _ENVIRONMENT_TOKEN.get(base.env, 0)
+        if self.fixed_config is not None or _process_setting("DELTA_MCP_ENV"):
+            active_environment = base.env
+            environment_generation = 0
+        else:
+            active_environment, environment_generation = legacy_store.environment_state(
+                config_mod.DEFAULT_ENV
+            )
+        token["active_environment"] = _ENVIRONMENT_TOKEN.get(active_environment, 0)
+        token["active_environment_generation"] = environment_generation
         token["active_credential_session_generation"] = (
             credential.session_generation
             if credential is not None and credential.session_generation is not None

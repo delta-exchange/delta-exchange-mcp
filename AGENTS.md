@@ -51,6 +51,10 @@ supports it.
   version. An older protocol can use the session fallback.
 - The client name is self-reported. It partitions consent records. It does not authenticate
   a client. Client-name impersonation by another local process is outside this threat model.
+- The setup URL is a capability that the MCP returns to the local client for URL elicitation,
+  MCP Apps, and the clickable-link fallback. A malicious local MCP client that uses this URL
+  without separate browser user presence is outside this threat model. Host, Origin, cookie,
+  and CSRF checks protect the browser boundary; they do not authenticate a local URL holder.
 - `setup_credentials` has no secret arguments. It opens Manage Connection through URL
   elicitation, an MCP App open-link result, or a clickable text link.
 - A resumed authorization request reports state. It never executes the pending trade.

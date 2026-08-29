@@ -10,6 +10,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp import hints
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
 
 TOOL_NAMES = frozenset(
@@ -25,7 +26,6 @@ TOOL_NAMES = frozenset(
         "get_product_leverage",
         "get_trading_stats",
         "get_trading_preferences",
-        "get_profile",
         "bulk_fills_export",
     }
 )
@@ -368,12 +368,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mcp.tool(annotations=hints.reads("Trading preferences"))
     async def get_trading_preferences() -> dict[str, Any]:
         """User trading preferences (margin mode, notifications, etc.)."""
-        return await client.get("/users/trading_preferences", auth=True)
-
-    @mcp.tool(annotations=hints.reads("Profile"))
-    async def get_profile() -> dict[str, Any]:
-        """User profile."""
-        return await client.get("/profile", auth=True)
+        return (await fetch_account_identity(client)).response
 
     # The one tool here that is not read-only: it writes a CSV, and `write_bytes` replaces
     # an existing file rather than refusing. Annotating it read-only would let a client

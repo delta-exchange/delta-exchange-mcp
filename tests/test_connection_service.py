@@ -207,6 +207,104 @@ def test_rotation_disconnect_and_environment_round_trip_revoke_consent() -> None
     assert connection._status(client_name, "").as_dict()["trading"]["enabled"] is False
 
 
+def test_two_services_serialize_environment_selection_with_page_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DELTA_MCP_ENV", raising=False)
+    first = service(verified)
+    second = service(verified)
+    client_name = "Codex"
+    first_revision = first._revision(client_name)
+    second_revision = second._revision(client_name)
+    entered = threading.Event()
+    release = threading.Event()
+    original = first._activate_environment
+    results: list[setup.ActionResult] = []
+
+    def paused_activate(
+        name: str,
+        environment: str,
+        expected: connection_mod.RevisionToken,
+    ) -> setup.ActionResult:
+        entered.set()
+        assert release.wait(5)
+        return original(name, environment, expected)
+
+    monkeypatch.setattr(first, "_activate_environment", paused_activate)
+
+    def select_prod_from_stale_page() -> None:
+        results.append(
+            action(
+                first,
+                client_name,
+                "credentials",
+                {"operation": "activate", "environment": "india_prod"},
+                first_revision,
+            )
+        )
+
+    worker = threading.Thread(target=select_prod_from_stale_page)
+    worker.start()
+    assert entered.wait(5)
+
+    selected = action(
+        second,
+        client_name,
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+        second_revision,
+    )
+    release.set()
+    worker.join(5)
+
+    assert worker.is_alive() is False
+    assert selected.content["status"] == "selected"
+    assert len(results) == 1
+    assert results[0].stale is True
+    assert store.environment_state("india_prod") == ("india_testnet", 1)
+
+
+def test_environment_generation_rejects_a_stale_page_after_an_aba_change() -> None:
+    connection = service(verified)
+    client_name = "Codex"
+    original_page = connection._revision(client_name)
+
+    testnet = action(
+        connection,
+        client_name,
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+        original_page,
+    )
+    prod = action(
+        connection,
+        client_name,
+        "credentials",
+        {"operation": "activate", "environment": "india_prod"},
+        testnet.revision,
+    )
+    stale_consent = connection._consent_action(
+        client_name,
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+        original_page,
+    )
+    stale = connection._activate_environment(
+        client_name,
+        "india_testnet",
+        original_page,
+    )
+
+    assert prod.content["status"] == "selected"
+    assert stale_consent.stale is True
+    assert stale.stale is True
+    assert connection._status(client_name, "").trading["enabled"] is False
+    assert store.environment_state("india_prod") == ("india_prod", 2)
+
+
 def test_inactive_environment_cannot_receive_trading_consent() -> None:
     connection = service(verified)
     connected = action(

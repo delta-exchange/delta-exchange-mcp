@@ -228,6 +228,40 @@ def test_write_leaves_settings_it_was_not_given_alone():
 
     cfg = config_mod.load()
     assert (cfg.env, cfg.debug) == ("india_prod", True)
+    assert store.environment_state(config_mod.DEFAULT_ENV) == ("india_prod", 1)
+
+
+def test_environment_compare_and_write_rejects_an_aba_generation() -> None:
+    write_store("DELTA_MCP_ENV=india_prod\nDELTA_MCP_ENV_GENERATION=2\n")
+
+    with pytest.raises(store.SettingsConflictError):
+        store.compare_and_write_environment(
+            "india_prod",
+            0,
+            "india_testnet",
+            default_environment=config_mod.DEFAULT_ENV,
+            before_publish=lambda: None,
+        )
+
+    assert store.environment_state(config_mod.DEFAULT_ENV) == ("india_prod", 2)
+
+
+def test_environment_compare_and_write_rejects_a_corrupt_generation() -> None:
+    settings = write_store(
+        "DELTA_MCP_ENV=india_prod\nDELTA_MCP_ENV_GENERATION=not-an-integer\n"
+    )
+    before = settings.read_text()
+
+    with pytest.raises(store.SettingsConflictError):
+        store.compare_and_write_environment(
+            "india_prod",
+            -1,
+            "india_testnet",
+            default_environment=config_mod.DEFAULT_ENV,
+            before_publish=lambda: None,
+        )
+
+    assert settings.read_text() == before
 
 
 @pytest.mark.parametrize(
@@ -300,9 +334,8 @@ def test_write_reports_a_read_only_directory_rather_than_raising():
         problem = store.write({"CUSTOM_SETTING": "value"})
     finally:
         os.chmod(path.parent, 0o700)
-    assert problem is not None
-    assert "write" in problem
-    assert str(path) in problem
+    assert problem == "the shared settings could not be updated"
+    assert str(path) not in problem
 
 
 def test_the_template_points_at_the_dashboard_the_rest_of_the_package_uses():
