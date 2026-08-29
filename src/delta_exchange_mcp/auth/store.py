@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -27,6 +28,8 @@ SECRET_VERSION = 1
 DEFAULT_DIR = Path.home() / ".delta-exchange-mcp"
 DEFAULT_METADATA_NAME = "credentials.json"
 SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
+
+logger = logging.getLogger(__name__)
 
 _CREDENTIAL_NAMES = frozenset({"DELTA_API_KEY", "DELTA_API_SECRET"})
 _LOCK_TIMEOUT_SECONDS = 10.0
@@ -126,10 +129,16 @@ class Credential:
     validated_at: str
     api_key: str = field(repr=False)
     api_secret: str = field(repr=False)
+    session_generation: int | None = None
 
     @property
     def externally_managed(self) -> bool:
         return self.source is CredentialSource.PROCESS
+
+    @property
+    def session_only(self) -> bool:
+        """Whether this credential can support consent only in this process."""
+        return self.source is not CredentialSource.OS_STORE
 
 
 @dataclass(frozen=True)
@@ -406,6 +415,9 @@ class CredentialStore:
         self._metadata = metadata
         self.source = source
         self.fallback_reason = fallback_reason
+        self._process_lock = threading.RLock()
+        self._process_pairs: dict[str, tuple[str, str]] = {}
+        self._process_generations: dict[str, int] = {}
 
     @classmethod
     def open(cls, metadata_path: Path | None = None) -> "CredentialStore":
@@ -444,8 +456,7 @@ class CredentialStore:
         """Read the active credential for an environment."""
         env = _normalize_environment(environment)
         with self._metadata.lock():
-            state = self._metadata.read().get(env, _EnvironmentState())
-            return self._credential(env, state)
+            return self._get_locked(env, self._metadata.read())
 
     def resolve(
         self,
@@ -459,9 +470,11 @@ class CredentialStore:
         secret = (supplied.get("DELTA_API_SECRET") or "").strip()
         if key or secret:
             if not key or not secret:
+                self._clear_process_pair(env)
                 raise IncompleteCredentialError(
                     "the process environment must supply DELTA_API_KEY and DELTA_API_SECRET together"
                 )
+            session_generation = self._observe_process_pair(env, key, secret)
             return Credential(
                 environment=env,
                 revision=None,
@@ -474,7 +487,9 @@ class CredentialStore:
                 validated_at="",
                 api_key=key,
                 api_secret=secret,
+                session_generation=session_generation,
             )
+        self._clear_process_pair(env)
         return self.get(env)
 
     def replace(
@@ -497,143 +512,23 @@ class CredentialStore:
 
         with self._metadata.lock():
             values = self._metadata.read()
-            had_previous = env in values
-            previous = values.get(env, _EnvironmentState())
-            _check_revision(previous, expected_revision)
-            previous_credential = self._credential(env, previous)
-            previous_payload = None
-            if previous.active_revision is not None:
-                previous_payload = self._backend.get(
-                    _record_name(env, previous.active_revision)
-                )
-                if previous_payload is None:
-                    raise CredentialCorruptError(
-                        f"credential metadata points to missing revision "
-                        f"{previous.active_revision} for {env}"
-                    )
-            revision = previous.next_revision
-            now = _now()
-            current = _EnvironmentState(
-                active_revision=revision,
-                next_revision=revision + 1,
-                generation=previous.generation + 1,
+            return self._replace_locked(
+                values,
+                env,
+                key,
+                secret,
                 state=state,
-                account_id=account_id.strip(),
-                created_at=now,
-                updated_at=now,
-                validated_at=now if state is CredentialState.VERIFIED else "",
+                account_id=account_id,
+                expected_revision=expected_revision,
+                activate=activate,
             )
-            name = _record_name(env, revision)
-            payload = _encode_secret(key, secret)
-            self._backend.set(name, payload)
-            if self._backend.get(name) != payload:
-                self._delete_new(name)
-                raise BackendOperationError(
-                    f"the system store did not return credential revision {revision} after writing it"
-                )
-
-            values[env] = current
-            try:
-                self._metadata.write(values)
-            except Exception:
-                self._delete_new(name)
-                raise
-
-            try:
-                credential = self._credential(env, current)
-                if credential is None:
-                    raise CredentialCorruptError(
-                        "the new credential has no active revision"
-                    )
-                if activate is not None:
-                    # The pointer and readback must precede a live rebind. Rollback sends
-                    # the previous credential, or None after a failed first connection.
-                    activate(credential)
-            except Exception as exc:
-                self._rollback_replace(
-                    values,
-                    env,
-                    previous,
-                    had_previous,
-                    name,
-                    activate,
-                    previous_credential,
-                )
-                if isinstance(exc, CredentialStoreError):
-                    raise
-                raise CredentialActivationError(
-                    f"could not activate credential revision {revision}"
-                ) from exc
-
-            if previous.active_revision is not None:
-                old_name = _record_name(env, previous.active_revision)
-                try:
-                    self._backend.delete(old_name)
-                except Exception as exc:
-                    restored = self._backend.get(old_name)
-                    if restored != previous_payload:
-                        if previous_payload is None:
-                            raise CredentialStoreError(
-                                "credential retirement failed after removing the old record"
-                            ) from exc
-                        self._backend.set(old_name, previous_payload)
-                        if self._backend.get(old_name) != previous_payload:
-                            raise CredentialStoreError(
-                                "credential retirement failed and the old record could not be restored"
-                            ) from exc
-                    try:
-                        self._rollback_replace(
-                            values,
-                            env,
-                            previous,
-                            had_previous,
-                            name,
-                            activate,
-                            previous_credential,
-                        )
-                    except Exception as rollback_exc:
-                        raise CredentialStoreError(
-                            "credential retirement failed and its transaction rollback also failed"
-                        ) from rollback_exc
-                    raise BackendOperationError(
-                        f"could not retire credential revision {previous.active_revision}"
-                    ) from exc
-            return credential
 
     def delete(self, environment: str, *, expected_revision: int | None = None) -> bool:
         """Delete an active credential and advance its revocation generation."""
         env = _normalize_environment(environment)
         with self._metadata.lock():
             values = self._metadata.read()
-            previous = values.get(env, _EnvironmentState())
-            _check_revision(previous, expected_revision)
-            if previous.active_revision is None:
-                return False
-            name = _record_name(env, previous.active_revision)
-            payload = self._backend.get(name)
-            self._backend.delete(name)
-            now = _now()
-            values[env] = _EnvironmentState(
-                active_revision=None,
-                next_revision=previous.next_revision,
-                generation=previous.generation + 1,
-                state=None,
-                account_id="",
-                created_at="",
-                updated_at=now,
-                validated_at="",
-            )
-            try:
-                self._metadata.write(values)
-            except Exception:
-                if payload is not None:
-                    self._backend.set(name, payload)
-                    if self._backend.get(name) != payload:
-                        raise CredentialStoreError(
-                            "credential deletion failed and its system-store rollback did not verify"
-                        )
-                raise
-            return True
+            return self._delete_locked(values, env, expected_revision)
 
     def migrate(self, config_path: Path) -> MigrationResult:
         """Move one complete legacy file credential into this store."""
@@ -659,52 +554,259 @@ class CredentialStore:
 
             rewritten = _without_credentials(original)
             staged = _stage_replacement(config_path, rewritten)
-            created: Credential | None = None
             try:
-                current = self.get(env)
-                if current is not None and (
-                    current.api_key != key or current.api_secret != secret
-                ):
-                    staged.unlink(missing_ok=True)
-                    return MigrationResult(MigrationStatus.CONFLICT, env, current)
-                if current is None:
-                    try:
-                        created = self.replace(
+                with self._metadata.lock():
+                    values = self._metadata.read()
+                    current = self._get_locked(env, values)
+                    if current is not None and (
+                        current.api_key != key or current.api_secret != secret
+                    ):
+                        return MigrationResult(
+                            MigrationStatus.CONFLICT,
                             env,
-                            key,
-                            secret,
-                            expected_revision=0,
+                            current,
                         )
-                    except CredentialConflictError:
-                        current = self.get(env)
-                        staged.unlink(missing_ok=True)
-                        return MigrationResult(MigrationStatus.CONFLICT, env, current)
-                    current = created
-                if self.get(env) != current:
-                    raise MigrationError(
-                        "the migrated credential failed its final readback"
+
+                    expected_revision = current.revision if current is not None else 0
+                    state = (
+                        current.state
+                        if current is not None
+                        else CredentialState.UNVERIFIED
                     )
-                try:
-                    os.replace(staged, config_path)
-                except OSError as exc:
-                    raise MigrationError(
-                        f"could not publish the migrated {config_path}: {exc}"
-                    ) from exc
-                staged = None
-                _sync_directory(config_path.parent)
-                return MigrationResult(MigrationStatus.MIGRATED, env, current)
-            except Exception:
-                if created is not None:
-                    try:
-                        self.delete(env, expected_revision=created.revision)
-                    except Exception as rollback_exc:
-                        raise MigrationError(
-                            "migration failed and the new credential could not be rolled back"
-                        ) from rollback_exc
-                raise
+                    account_id = current.account_id if current is not None else ""
+
+                    def publish_config(_credential: Credential) -> None:
+                        nonlocal staged
+                        try:
+                            os.replace(staged, config_path)
+                        except OSError as exc:
+                            raise MigrationError(
+                                f"could not publish the migrated {config_path}: {exc}"
+                            ) from exc
+                        staged = None
+                        _sync_after_publication(config_path.parent)
+
+                    migrated = self._replace_locked(
+                        values,
+                        env,
+                        key,
+                        secret,
+                        state=state,
+                        account_id=account_id,
+                        expected_revision=expected_revision,
+                        publish=publish_config,
+                        keep_active_on_retirement_failure=True,
+                    )
+                    return MigrationResult(MigrationStatus.MIGRATED, env, migrated)
             finally:
                 if staged is not None:
                     staged.unlink(missing_ok=True)
+
+    def _get_locked(
+        self,
+        environment: str,
+        values: dict[str, _EnvironmentState],
+    ) -> Credential | None:
+        return self._credential(
+            environment,
+            values.get(environment, _EnvironmentState()),
+        )
+
+    def _replace_locked(
+        self,
+        values: dict[str, _EnvironmentState],
+        environment: str,
+        api_key: str,
+        api_secret: str,
+        *,
+        state: CredentialState,
+        account_id: str,
+        expected_revision: int | None,
+        activate: Callable[[Credential | None], None] | None = None,
+        publish: Callable[[Credential], None] | None = None,
+        keep_active_on_retirement_failure: bool = False,
+    ) -> Credential:
+        had_previous = environment in values
+        previous = values.get(environment, _EnvironmentState())
+        _check_revision(previous, expected_revision)
+        previous_credential = self._credential(environment, previous)
+        previous_payload = None
+        if previous.active_revision is not None:
+            previous_payload = self._backend.get(
+                _record_name(environment, previous.active_revision)
+            )
+            if previous_payload is None:
+                raise CredentialCorruptError(
+                    f"credential metadata points to missing revision "
+                    f"{previous.active_revision} for {environment}"
+                )
+
+        revision = previous.next_revision
+        now = _now()
+        current = _EnvironmentState(
+            active_revision=revision,
+            next_revision=revision + 1,
+            generation=previous.generation + 1,
+            state=state,
+            account_id=account_id.strip(),
+            created_at=now,
+            updated_at=now,
+            validated_at=now if state is CredentialState.VERIFIED else "",
+        )
+        name = _record_name(environment, revision)
+        payload = _encode_secret(api_key, api_secret)
+        self._backend.set(name, payload)
+        if self._backend.get(name) != payload:
+            self._delete_new(name)
+            raise BackendOperationError(
+                f"the system store did not return credential revision {revision} after writing it"
+            )
+
+        values[environment] = current
+        try:
+            self._metadata.write(values)
+        except Exception:
+            self._delete_new(name)
+            raise
+
+        try:
+            credential = self._credential(environment, current)
+            if credential is None:
+                raise CredentialCorruptError("the new credential has no active revision")
+            if activate is not None:
+                activate(credential)
+        except Exception as exc:
+            self._rollback_replace(
+                values,
+                environment,
+                previous,
+                had_previous,
+                name,
+                activate,
+                previous_credential,
+            )
+            if isinstance(exc, CredentialStoreError):
+                raise
+            raise CredentialActivationError(
+                f"could not activate credential revision {revision}"
+            ) from exc
+
+        try:
+            if publish is not None:
+                publish(credential)
+        except Exception:
+            self._rollback_replace(
+                values,
+                environment,
+                previous,
+                had_previous,
+                name,
+                activate,
+                previous_credential,
+            )
+            raise
+
+        if previous.active_revision is not None:
+            old_name = _record_name(environment, previous.active_revision)
+            try:
+                self._backend.delete(old_name)
+            except Exception as exc:
+                if keep_active_on_retirement_failure:
+                    logger.warning(
+                        "could not retire inactive credential revision %s for %s "
+                        "after migration publication: %s",
+                        previous.active_revision,
+                        environment,
+                        exc,
+                    )
+                    return credential
+                restored = self._backend.get(old_name)
+                if restored != previous_payload:
+                    if previous_payload is None:
+                        raise CredentialStoreError(
+                            "credential retirement failed after removing the old record"
+                        ) from exc
+                    self._backend.set(old_name, previous_payload)
+                    if self._backend.get(old_name) != previous_payload:
+                        raise CredentialStoreError(
+                            "credential retirement failed and the old record could not be restored"
+                        ) from exc
+                try:
+                    self._rollback_replace(
+                        values,
+                        environment,
+                        previous,
+                        had_previous,
+                        name,
+                        activate,
+                        previous_credential,
+                    )
+                except Exception as rollback_exc:
+                    raise CredentialStoreError(
+                        "credential retirement failed and its transaction rollback also failed"
+                    ) from rollback_exc
+                raise BackendOperationError(
+                    f"could not retire credential revision {previous.active_revision}"
+                ) from exc
+        return credential
+
+    def _delete_locked(
+        self,
+        values: dict[str, _EnvironmentState],
+        environment: str,
+        expected_revision: int | None,
+    ) -> bool:
+        previous = values.get(environment, _EnvironmentState())
+        _check_revision(previous, expected_revision)
+        if previous.active_revision is None:
+            return False
+        name = _record_name(environment, previous.active_revision)
+        payload = self._backend.get(name)
+        self._backend.delete(name)
+        now = _now()
+        values[environment] = _EnvironmentState(
+            active_revision=None,
+            next_revision=previous.next_revision,
+            generation=previous.generation + 1,
+            state=None,
+            account_id="",
+            created_at="",
+            updated_at=now,
+            validated_at="",
+        )
+        try:
+            self._metadata.write(values)
+        except Exception:
+            if payload is not None:
+                self._backend.set(name, payload)
+                if self._backend.get(name) != payload:
+                    raise CredentialStoreError(
+                        "credential deletion failed and its system-store rollback did not verify"
+                    )
+            raise
+        return True
+
+    def _observe_process_pair(
+        self,
+        environment: str,
+        api_key: str,
+        api_secret: str,
+    ) -> int:
+        pair = (api_key, api_secret)
+        with self._process_lock:
+            if self._process_pairs.get(environment) != pair:
+                self._process_pairs[environment] = pair
+                self._process_generations[environment] = (
+                    self._process_generations.get(environment, 0) + 1
+                )
+            return self._process_generations[environment]
+
+    def _clear_process_pair(self, environment: str) -> None:
+        with self._process_lock:
+            if self._process_pairs.pop(environment, None) is not None:
+                self._process_generations[environment] = (
+                    self._process_generations.get(environment, 0) + 1
+                )
 
     def _credential(
         self, environment: str, state: _EnvironmentState
@@ -898,7 +1000,7 @@ def _atomic_replace(path: Path, body: str, mode: int) -> None:
         os.chmod(staged, mode)
         os.replace(staged, path)
         staged = None
-        _sync_directory(path.parent)
+        _sync_after_publication(path.parent)
     except OSError as exc:
         raise MetadataError(f"could not write {path}: {exc}") from exc
     finally:
@@ -947,3 +1049,12 @@ def _sync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _sync_after_publication(path: Path) -> None:
+    try:
+        _sync_directory(path)
+    except OSError as exc:
+        # The replacement is already visible. A durability warning must not make
+        # callers delete the secret that the published pointer now names.
+        logger.warning("could not sync published directory %s: %s", path, exc)

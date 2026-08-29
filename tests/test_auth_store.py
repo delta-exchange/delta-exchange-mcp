@@ -105,6 +105,7 @@ def test_replace_publishes_one_active_revision_without_secrets_in_metadata(tmp_p
     assert saved.account_id == "account-123"
     assert saved.validated_at
     assert saved.source is CredentialSource.OS_STORE
+    assert saved.session_only is False
     assert credentials.get("india_prod") == saved
     assert set(backend.values) == {"credential:india_prod:1"}
 
@@ -132,6 +133,34 @@ def test_rotation_advances_revision_and_generation_then_deletes_the_old_record(
     assert (second.revision, second.generation) == (2, 2)
     assert (second.api_key, second.api_secret) == ("new-key", "new-secret")
     assert "credential:india_prod:1" not in backend.values
+    assert set(backend.values) == {"credential:india_prod:2"}
+
+
+def test_directory_sync_failure_after_metadata_publication_keeps_new_record_active(
+    tmp_path,
+    monkeypatch,
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    directory_sync_failed = False
+
+    def fail_directory_sync(path):
+        nonlocal directory_sync_failed
+        directory_sync_failed = True
+        raise OSError(f"could not sync {path}")
+
+    monkeypatch.setattr(auth_store, "_sync_directory", fail_directory_sync)
+
+    second = credentials.replace(
+        "india_prod",
+        "new-key",
+        "new-secret",
+        expected_revision=first.revision,
+    )
+
+    assert (second.revision, second.generation) == (2, 2)
+    assert directory_sync_failed is True
+    assert credentials.get("india_prod") == second
     assert set(backend.values) == {"credential:india_prod:2"}
 
 
@@ -352,10 +381,38 @@ def test_process_credentials_remain_external_and_have_no_persistent_revision(tmp
     assert resolved is not None
     assert resolved.source is CredentialSource.PROCESS
     assert resolved.externally_managed is True
+    assert resolved.session_only is True
+    assert resolved.session_generation == 1
     assert resolved.revision is None
     assert resolved.generation is None
     assert "process-key" not in repr(resolved)
     assert "process-secret" not in repr(resolved)
+
+
+def test_process_pair_changes_advance_a_process_only_generation(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    first_values = {
+        "DELTA_API_KEY": "process-key",
+        "DELTA_API_SECRET": "first-secret",
+    }
+    second_values = {
+        "DELTA_API_KEY": "process-key",
+        "DELTA_API_SECRET": "second-secret",
+    }
+
+    first = credentials.resolve("india_prod", first_values)
+    unchanged = credentials.resolve("india_prod", first_values)
+    changed = credentials.resolve("india_prod", second_values)
+    assert first is not None
+    assert unchanged is not None
+    assert changed is not None
+    assert unchanged.session_generation == first.session_generation
+    assert changed.session_generation == (first.session_generation or 0) + 1
+
+    assert credentials.resolve("india_prod", {}) is None
+    restored = credentials.resolve("india_prod", second_values)
+    assert restored is not None
+    assert (restored.session_generation or 0) > (changed.session_generation or 0)
 
 
 def test_a_partial_process_pair_fails_without_falling_through_to_the_store(tmp_path):
@@ -378,6 +435,7 @@ def test_no_approved_system_backend_uses_process_local_memory(monkeypatch, tmp_p
     assert credentials.persistent is False
     assert credentials.source is CredentialSource.MEMORY
     assert credentials.fallback_reason == "no secure backend"
+    assert saved.session_only is True
     assert credentials.get("india_prod") == saved
     assert not (tmp_path / "credentials.json").exists()
 
@@ -535,6 +593,223 @@ def test_migration_publish_failure_rolls_back_the_new_record(tmp_path, monkeypat
     assert backend.values == {}
 
 
+def test_migration_publish_failure_restores_the_prior_active_record(
+    tmp_path,
+    monkeypatch,
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "same-key", "same-secret")
+    config_path = tmp_path / "config.env"
+    original = (
+        "DELTA_API_KEY=same-key\n"
+        "DELTA_API_SECRET=same-secret\n"
+        "DELTA_MCP_MODE=trade\n"
+    )
+    config_path.write_text(original)
+    real_replace = os.replace
+
+    def fail_config_publish(source, target):
+        if target == config_path:
+            raise OSError("read-only config")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(auth_store.os, "replace", fail_config_publish)
+
+    with pytest.raises(auth_store.MigrationError, match="read-only config"):
+        credentials.migrate(config_path)
+
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") == first
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+def test_config_directory_sync_failure_does_not_rollback_published_migration(
+    tmp_path,
+    monkeypatch,
+):
+    backend = FakeSecretBackend()
+    credentials = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "metadata" / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    config_path = tmp_path / "config.env"
+    config_path.write_text(
+        "DELTA_API_KEY=key\nDELTA_API_SECRET=secret\nDELTA_MCP_MODE=trade\n"
+    )
+    real_sync = auth_store._sync_directory
+    config_sync_failed = False
+
+    def fail_config_directory_sync(path):
+        nonlocal config_sync_failed
+        if path == config_path.parent:
+            config_sync_failed = True
+            raise OSError("config directory sync failed")
+        real_sync(path)
+
+    monkeypatch.setattr(auth_store, "_sync_directory", fail_config_directory_sync)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.MIGRATED
+    assert config_sync_failed is True
+    assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
+    assert credentials.get("india_prod") == result.credential
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+def test_migration_of_the_active_pair_advances_revision_and_generation(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace(
+        "india_prod",
+        "same-key",
+        "same-secret",
+        state=CredentialState.VERIFIED,
+        account_id="account-123",
+    )
+    config_path = tmp_path / "config.env"
+    config_path.write_text(
+        "DELTA_API_KEY=same-key\n"
+        "DELTA_API_SECRET=same-secret\n"
+        "DELTA_MCP_MODE=trade\n"
+    )
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.MIGRATED
+    assert result.credential is not None
+    assert (result.credential.revision, result.credential.generation) == (2, 2)
+    assert result.credential.state is CredentialState.VERIFIED
+    assert result.credential.account_id == "account-123"
+    assert first.revision == 1
+    assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
+    assert set(backend.values) == {"credential:india_prod:2"}
+
+
+@pytest.mark.parametrize("failure_mode", ["before_delete", "after_delete"])
+def test_migration_stays_complete_when_inactive_record_retirement_fails(
+    tmp_path,
+    caplog,
+    failure_mode,
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "same-key", "same-secret")
+    old_name = "credential:india_prod:1"
+    if failure_mode == "before_delete":
+        backend.fail_delete.add(old_name)
+        expected_records = {old_name, "credential:india_prod:2"}
+    else:
+        backend.fail_delete_after.add(old_name)
+        expected_records = {"credential:india_prod:2"}
+    config_path = tmp_path / "config.env"
+    config_path.write_text(
+        "DELTA_API_KEY=same-key\n"
+        "DELTA_API_SECRET=same-secret\n"
+        "DELTA_MCP_MODE=trade\n"
+    )
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.MIGRATED
+    assert result.credential is not None
+    assert (result.credential.revision, result.credential.generation) == (2, 2)
+    assert credentials.get("india_prod") == result.credential
+    assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
+    assert set(backend.values) == expected_records
+    assert first.revision == 1
+    assert "could not retire inactive credential revision 1" in caplog.text
+    assert "same-key" not in caplog.text
+    assert "same-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["delete", "rotate"])
+def test_migration_serializes_concurrent_credential_changes(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "same-key", "same-secret")
+    other_process_view = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    config_path = tmp_path / "config.env"
+    config_path.write_text(
+        "DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\n"
+    )
+    config_publish_started = threading.Event()
+    release_config_publish = threading.Event()
+    credential_change_started = threading.Event()
+    migration_results = []
+    outcomes: list[str] = []
+    errors: list[Exception] = []
+    real_replace = os.replace
+
+    def pause_config_publish(source, target):
+        if target == config_path:
+            config_publish_started.set()
+            if not release_config_publish.wait(5):
+                raise OSError("timed out waiting to publish config")
+        return real_replace(source, target)
+
+    def run_migration():
+        try:
+            migration_results.append(credentials.migrate(config_path))
+        except Exception as exc:
+            errors.append(exc)
+
+    def change_credential():
+        credential_change_started.set()
+        try:
+            if operation == "delete":
+                other_process_view.delete(
+                    "india_prod",
+                    expected_revision=first.revision,
+                )
+            else:
+                other_process_view.replace(
+                    "india_prod",
+                    "rotated-key",
+                    "rotated-secret",
+                    expected_revision=first.revision,
+                )
+            outcomes.append("changed")
+        except CredentialConflictError:
+            outcomes.append("conflict")
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(auth_store.os, "replace", pause_config_publish)
+    migration_thread = threading.Thread(target=run_migration)
+    migration_thread.start()
+    assert config_publish_started.wait(2)
+
+    change_thread = threading.Thread(target=change_credential)
+    change_thread.start()
+    assert credential_change_started.wait(2)
+    change_thread.join(0.1)
+    try:
+        assert change_thread.is_alive()
+    finally:
+        release_config_publish.set()
+
+    migration_thread.join(2)
+    change_thread.join(2)
+    assert not migration_thread.is_alive()
+    assert not change_thread.is_alive()
+    assert errors == []
+    assert outcomes == ["conflict"]
+    assert len(migration_results) == 1
+    migrated = migration_results[0]
+    assert migrated.status is MigrationStatus.MIGRATED
+    assert migrated.credential is not None
+    assert (migrated.credential.revision, migrated.credential.generation) == (2, 2)
+    assert credentials.get("india_prod") == migrated.credential
+    assert set(backend.values) == {"credential:india_prod:2"}
+
+
 def test_migration_never_overwrites_a_different_active_credential(tmp_path):
     credentials, _ = make_store(tmp_path)
     active = credentials.replace("india_prod", "current-key", "current-secret")
@@ -550,7 +825,10 @@ def test_migration_never_overwrites_a_different_active_credential(tmp_path):
     assert credentials.get("india_prod") == active
 
 
-def test_migration_create_uses_compare_and_swap(tmp_path, monkeypatch):
+def test_migration_observes_a_concurrent_create_before_its_transaction(
+    tmp_path,
+    monkeypatch,
+):
     credentials, backend = make_store(tmp_path)
     other_process_view = CredentialStore(
         backend,
@@ -560,14 +838,14 @@ def test_migration_create_uses_compare_and_swap(tmp_path, monkeypatch):
     config_path = tmp_path / "config.env"
     original = "DELTA_API_KEY=file-key\nDELTA_API_SECRET=file-secret\n"
     config_path.write_text(original)
-    real_replace = credentials.replace
+    real_stage = auth_store._stage_replacement
 
-    def replace_after_browser_write(environment, key, secret, **kwargs):
-        assert kwargs["expected_revision"] == 0
-        other_process_view.replace(environment, "browser-key", "browser-secret")
-        return real_replace(environment, key, secret, **kwargs)
+    def stage_after_browser_write(path, body):
+        staged = real_stage(path, body)
+        other_process_view.replace("india_prod", "browser-key", "browser-secret")
+        return staged
 
-    monkeypatch.setattr(credentials, "replace", replace_after_browser_write)
+    monkeypatch.setattr(auth_store, "_stage_replacement", stage_after_browser_write)
 
     result = credentials.migrate(config_path)
 
