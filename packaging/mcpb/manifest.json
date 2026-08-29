@@ -156,10 +156,6 @@
       "description": "Configured order leverage for a product."
     },
     {
-      "name": "get_profile",
-      "description": "User profile."
-    },
-    {
       "name": "get_recent_trades",
       "description": "Recent public trades for a symbol."
     },
