@@ -20,9 +20,13 @@ Three constraints came out of that probe and are load-bearing here:
   external fetch, so a stylesheet, font or script from a CDN leaves the frame blank.
 * The handshake must complete. A view that does not answer `ui/initialize` and then send
   `ui/notifications/initialized` stays collapsed with nothing shown.
-* Host capabilities cannot be used as a feature test. Claude Desktop renders MCP Apps
-  without advertising the `io.modelcontextprotocol/ui` extension at all, so gating on
-  that capability would disable the form on a client that supports it.
+* Host capabilities cannot be used as a feature test. Claude Desktop 1.0.0, the build this
+  was first measured against, rendered MCP Apps without advertising the
+  `io.modelcontextprotocol/ui` extension at all. Build 1.30096.5 does advertise it, read
+  2026-08-16, so the declaration is no longer missing everywhere — but the rule stands,
+  because gating on it would still turn the form off for anyone on the older build, and
+  there is nothing to be gained by gating. A view that is asked for and cannot be shown
+  costs a collapsed frame; a view that is never asked for costs the whole feature.
 
 Not every client renders MCP Apps. `setup_credentials` therefore returns text that names
 the file and the `login` command as well, so on a client that shows nothing the model
@@ -87,11 +91,12 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from mcp.server.apps import APP_MIME_TYPE
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, TextContent
 
-from delta_exchange_mcp import credentials, request, store
+from delta_exchange_mcp import credentials, hints, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
     DASHBOARDS,
@@ -143,7 +148,9 @@ VIEW_URI = "ui://delta-exchange/credentials.html"
 
 # The profile parameter is what marks an HTML resource as an app view rather than a
 # document; a client renders it in a sandboxed frame instead of treating it as content.
-VIEW_MIME = "text/html;profile=mcp-app"
+# The SDK owns the exact string, so take it from there rather than restate it and let the
+# two drift.
+VIEW_MIME = APP_MIME_TYPE
 
 # Both spellings of the same association. The nested form is what SEP-1865 specifies and
 # the flat one is what earlier implementations read; sending both costs nothing and
@@ -916,7 +923,19 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             )
         return f"{reads} Trading stays off for {scope}."
 
-    @mcp.tool(meta=_OPENS_VIEW)
+    # Not read-only: opening mints a one-use grant, which is process state. Not idempotent
+    # either, and that one matters — a second call replaces the connection's outstanding
+    # grant, so a form already open on screen can no longer save. Telling a client this is
+    # safe to retry would invite exactly that.
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Connect your Delta account",
+            destructive=False,
+            idempotent=False,
+            external=False,
+        ),
+        meta=_OPENS_VIEW,
+    )
     async def setup_credentials(ctx: Context) -> CallToolResult:
         """Open a form for the user to enter their Delta API key, kept out of the chat.
 
@@ -940,7 +959,13 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             },
         )
 
-    @mcp.tool(meta=_APP_ONLY)
+    # External because saving verifies the candidate key against Delta before writing it.
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Save your Delta credentials", destructive=True, idempotent=True
+        ),
+        meta=_APP_ONLY,
+    )
     async def save_credentials(
         environment: str,
         api_key: str,
@@ -1102,7 +1127,15 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             "message": f"Connected{who}. Saved to {store.path()}. {follow_up}",
         }
 
-    @mcp.tool(meta=_APP_ONLY)
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Set what the assistant may do",
+            destructive=True,
+            idempotent=True,
+            external=False,
+        ),
+        meta=_APP_ONLY,
+    )
     async def save_mode(mode: str, grant: str, ctx: Context) -> dict[str, str]:
         """Change this client's access mode without reading or resubmitting its key."""
         claimed = begin_grant(ctx, grant)
