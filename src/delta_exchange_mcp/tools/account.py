@@ -74,7 +74,7 @@ def _safe_export_path(output_path: str) -> Path:
     home = Path.home().resolve()
     if not (resolved.is_relative_to(cwd) or resolved.is_relative_to(home)):
         raise ValueError(
-            f"output_path must be inside cwd ({cwd}) or home ({home}); got {resolved}"
+            "output_path must be inside the current working directory or home directory"
         )
     return resolved
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -26,8 +28,8 @@ _AUTH_HINTS: dict[str, str] = {
         "the key in Delta API management."
     ),
     "ip_not_whitelisted_for_api_key": (
-        "request IP not whitelisted for this API key. Add the IP shown in the error "
-        "context under Delta API management."
+        "request IP is not allowed for this API key. Update the IP allowlist in Delta "
+        "API management."
     ),
     "Signature Mismatch": (
         "signature mismatch — usually clock skew or a path/query encoding bug."
@@ -36,6 +38,19 @@ _AUTH_HINTS: dict[str, str] = {
         "signature mismatch — usually clock skew or a path/query encoding bug."
     ),
 }
+
+_OPERATION_HINTS: dict[str, str] = {
+    "credentials_missing": "Connect a Delta account in Manage Connection and retry.",
+    "execution_outcome_unknown": (
+        "Delta may have processed this mutation, but its response was lost. Check open "
+        "orders and current account state before you submit it again."
+    ),
+    "upstream_unreachable": (
+        "The mutation did not reach Delta. It is safe to retry after connectivity returns."
+    ),
+}
+
+_SAFE_CODE = re.compile(r"[A-Za-z0-9_. -]{1,128}\Z")
 
 # A response carrying one of these codes proves that the submitted credential pair
 # itself is unusable. Other API failures — especially a rate limit or service outage —
@@ -49,9 +64,18 @@ def extract_ip(context: Any) -> str | None:
         return None
     for key in ("ip", "client_ip", "whitelisted_ip", "request_ip"):
         v = context.get(key)
-        if isinstance(v, str) and v:
-            return v
+        if not isinstance(v, str):
+            continue
+        try:
+            return str(ipaddress.ip_address(v))
+        except ValueError:
+            continue
     return None
+
+
+def normalize_error_code(code: Any) -> str:
+    """Return one bounded, single-line error code safe for an MCP result."""
+    return code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else "unknown_error"
 
 
 class DeltaApiError(ToolError):
@@ -62,23 +86,25 @@ class DeltaApiError(ToolError):
     cross the MCP boundary.
     """
 
-    def __init__(self, code: str, context: Any = None, status: int | None = None):
-        self.code = code
+    def __init__(self, code: Any, context: Any = None, status: int | None = None):
+        self.code = normalize_error_code(code)
         self.context = context
-        self.status = status
-        self.hint = _AUTH_HINTS.get(code)
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.hint = _AUTH_HINTS.get(self.code) or _OPERATION_HINTS.get(self.code)
         # Kept as a field, not only interpolated into the message, so a caller writing its
         # own copy can use it without parsing the sentence back apart.
         self.ip = extract_ip(context)
 
-        msg = f"delta api error: {code}"
+        msg = f"delta api error: {self.code}"
         if self.hint:
-            extra_ip = self.ip if code == "ip_not_whitelisted_for_api_key" else None
+            extra_ip = (
+                self.ip if self.code == "ip_not_whitelisted_for_api_key" else None
+            )
             msg += f" — {self.hint}"
             if extra_ip:
                 msg += f" (request IP: {extra_ip})"
-        if status:
-            msg += f" [http {status}]"
+        if self.status:
+            msg += f" [http {self.status}]"
         super().__init__(msg)
 
 
