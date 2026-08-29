@@ -29,7 +29,7 @@ Three constraints came out of that probe and are load-bearing here:
   costs a collapsed frame; a view that is never asked for costs the whole feature.
 
 Not every client renders MCP Apps. `setup_credentials` therefore returns text that names
-the file and the `login` command as well, so on a client that shows nothing the model
+the file and the `setup` command as well, so on a client that shows nothing the model
 still has something correct to say.
 
 Two later facts come from the spec itself (`src/spec.types.ts` in
@@ -198,8 +198,8 @@ _TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Connect your Delta Exchange account</title>
-<style id="host-fonts"></style>
-<style>
+<style id="host-fonts"__NONCE_ATTR__></style>
+<style__NONCE_ATTR__>
   /* Nothing below names a type size or a width. Type comes from the host's typography
      tokens and both spacing steps are in em, so they track it. The controls stay native and
      take their colour, border and radius from the host's own field tokens. What is Delta's
@@ -208,14 +208,12 @@ _TEMPLATE = """<!DOCTYPE html>
   :root {
     color-scheme: light dark;
     /* Delta's own, always. These are the colours that make it Delta rather than a form.
-       Delta's orange is #fe6c02, and deliberately no variable holds it. WCAG exempts a logo
-       from contrast, so the mark keeps that hue in the four fills of its own inlined SVG,
-       and nothing else in the view may use it: measured against white it is 2.85:1, which
-       fails the 4.5:1 that text needs and also the 3:1 that a control edge needs. Every
-       interactive fill takes `--brand-strong` instead — the same hue walked toward black
-       until it clears 4.5:1 with white text at 4.58:1. Declaring the undarkened orange as a
-       variable is what would invite it back onto a control, which is why the value is
-       recorded in this sentence rather than on the next line. */
+       `--brand` is the mark, and only the mark: WCAG exempts a logo from contrast, which is
+       the only reason Delta's orange can stay exactly as the brand defines it. Measured
+       against white it is 2.85:1, which fails the 4.5:1 that text needs and also the 3:1
+       that a control edge needs, so every interactive use takes `--brand-strong` instead —
+       the same hue walked toward black until it clears 4.5:1 with white text at 4.58:1. */
+    --brand: #fe6c02;
     --brand-strong: #c45302;
     --brand-strong-hover: #ac4902;
     --on-brand: #ffffff;
@@ -263,6 +261,12 @@ _TEMPLATE = """<!DOCTYPE html>
      value that is deliberately too small for the host that needs it most, because the
      whole view has to fit inside 500px and a full gap top and bottom costs 32 of them. */
   .pad { padding: calc(var(--gap) / 2) var(--gap); }
+  /* A host draws this in a column it chose, which is why the view names no width of its
+     own. A browser window has no such column, so without this the fields stretch the full
+     monitor and the form reads as a web page that was never designed. The width is in em,
+     so it still follows the type rather than fixing a pixel measure, and the class is set
+     only when there is no host — inside one, nothing here applies. */
+  body.standalone .pad { max-width: 26em; margin: 0 auto; padding: 2em var(--gap); }
   p { margin: 0 0 var(--gap); }
 
   .head { display: flex; align-items: center; gap: .5em; margin-bottom: var(--gap-tight); }
@@ -283,8 +287,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
   fieldset { border: 0; padding: 0; margin: 0 0 var(--gap); }
   legend { padding: 0; margin-bottom: var(--gap-tight); }
-  /* The whole row is the click target, not just the words. Flex keeps the control
-     centred against a label that wraps to a second line. */
+  /* Block, so the whole row is a click target rather than just the words. */
   .choice { display: flex; align-items: center; cursor: pointer; }
   .choice + .choice { margin-top: var(--gap-tight); }
   .choice input { margin: 0 .45em 0 0; flex: none; }
@@ -396,7 +399,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <legend>Where was your key created?</legend>
     </fieldset>
 
-    <div class="field">
+    <div class="field" id="mode-field">
       <label class="lab" for="mode">What should the assistant be able to do?</label>
       <select id="mode">
         <option value="read">Read only &mdash; balances, positions and orders</option>
@@ -427,7 +430,7 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
   <div id="state" role="status" aria-live="polite"></div>
 </div>
-<script>
+<script__NONCE_ATTR__>
 (function () {
   var CONFIG = __CONFIG__;
   var PROTOCOL = "2026-01-26";
@@ -436,6 +439,8 @@ _TEMPLATE = """<!DOCTYPE html>
   var ready = false;
   var saving = false;
   var saveGrant = "";
+  var csrfToken = CONFIG.csrf_token || "";
+  var revision = CONFIG.revision === undefined ? 0 : CONFIG.revision;
   var configured = false;
   var currentEnvironment = "";
 
@@ -477,6 +482,38 @@ _TEMPLATE = """<!DOCTYPE html>
     return picked ? picked.value : CONFIG.default_environment;
   }
 
+  // A value the client passes in its own configuration wins on every launch, so what is
+  // saved here would never be read. Said only after saving, that costs someone the whole
+  // exercise: they type a key, the account comes back named, and the server goes on using
+  // a different one. Saying it before means nobody types into a field that cannot take.
+  var LOCKED_BY = {
+    "DELTA_API_KEY": "key",
+    "DELTA_API_SECRET": "secret",
+    "DELTA_MCP_ENV": "envs"
+  };
+
+  function lockOverridden(names) {
+    if (!names || !names.length) return;
+    var locked = [];
+    names.forEach(function (name) {
+      var id = LOCKED_BY[name];
+      if (!id) return;
+      var field = document.getElementById(id);
+      if (!field) return;
+      locked.push(name);
+      // `disabled` rather than aria-disabled here: unlike the buttons, these must not be
+      // submitted at all, and nothing below reads them once they are out of the form.
+      field.disabled = true;
+      field.querySelectorAll
+        ? field.querySelectorAll("input").forEach(function (el) { el.disabled = true; })
+        : null;
+      if (field.placeholder !== undefined) field.placeholder = "set by this app";
+    });
+    if (!locked.length) return;
+    say("This app sets " + locked.join(", ") + " in its own configuration, which wins over "
+        + "anything saved here. Change it there, or start this server without it.", "err");
+  }
+
   function selectEnv(value) {
     var radio = envsEl.querySelector('input[name="env"][value="' + value + '"]');
     if (radio) radio.checked = true;
@@ -488,9 +525,17 @@ _TEMPLATE = """<!DOCTYPE html>
     resize();
   }
 
+  // The one seam between the two surfaces this document serves. Inside a host it is an
+  // MCP App and everything travels by postMessage to the frame's parent; opened in a
+  // browser from `delta-exchange-mcp setup` there is no parent, and the same calls go to
+  // the loopback server over HTTP. Every caller below is written once and works either way.
+  var IN_APP = CONFIG.transport !== "page";
+  if (!IN_APP) document.body.classList.add("standalone");
+
   function post(msg) { window.parent.postMessage(msg, "*"); }
 
   function request(method, params, timeoutMs) {
+    if (!IN_APP) return httpRequest(method, params || {});
     var id = nextId++;
     post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
     return new Promise(function (resolve, reject) {
@@ -498,6 +543,53 @@ _TEMPLATE = """<!DOCTYPE html>
       setTimeout(function () {
         if (pending[id]) { delete pending[id]; reject(new Error(method + " timed out")); }
       }, timeoutMs || 30000);
+    });
+  }
+
+  // The browser sends direct setup actions. It does not expose an MCP tools/call endpoint,
+  // so the key and secret cannot become ordinary tool arguments in a host transcript.
+  function httpRequest(method, params) {
+    if (method === "ui/initialize") return Promise.resolve({});
+    if (method === "ui/open-link") {
+      window.open(params.url, "_blank", "noopener");
+      return Promise.resolve({});
+    }
+    if (method !== "tools/call") return Promise.reject(new Error("request not supported"));
+    var call = params || {};
+    if (call.name === "setup_credentials") {
+      return Promise.resolve({ _meta: { ui: { saveGrant: "browser-session" } } });
+    }
+    var actions = {
+      get_connection_status: "status",
+      save_credentials: "credentials",
+      save_mode: "consent"
+    };
+    var action = actions[call.name];
+    if (!action) return Promise.reject(new Error("action not supported"));
+    var arguments = {};
+    Object.keys(call.arguments || {}).forEach(function (name) {
+      if (name !== "grant") arguments[name] = call.arguments[name];
+    });
+    return fetch(CONFIG.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        action: action,
+        arguments: arguments,
+        csrf_token: csrfToken,
+        expected_revision: revision
+      })
+    }).then(function (response) {
+      var nextToken = response.headers.get("X-CSRF-Token");
+      if (nextToken) csrfToken = nextToken;
+      return response.json().then(function (body) {
+        if (body.revision !== undefined) revision = body.revision;
+        if (!response.ok || body.error) {
+          throw new Error((body.error && body.error.message) || "request failed");
+        }
+        return body.result;
+      });
     });
   }
 
@@ -531,6 +623,9 @@ _TEMPLATE = """<!DOCTYPE html>
   }
 
   window.addEventListener("message", function (event) {
+    // Unframed, `window.parent` is this window, so without this a page could be driven by
+    // a message it posted to itself.
+    if (!IN_APP) return;
     if (event.source !== window.parent) return;
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
@@ -561,6 +656,8 @@ _TEMPLATE = """<!DOCTYPE html>
   // only grow the frame: one long error message would leave it tall for the rest of the
   // conversation. Forcing intrinsic sizing for the measurement reports the content itself.
   function resize() {
+    // A browser window sizes itself. Only a host drawing this in a frame needs telling.
+    if (!IN_APP) return;
     var previous = root.style.height;
     root.style.height = "max-content";
     var height = Math.ceil(root.getBoundingClientRect().height);
@@ -719,6 +816,17 @@ _TEMPLATE = """<!DOCTYPE html>
     // The theme and the palette arrive here. Discarding this result is what left the view
     // styling itself off the operating system rather than off the client it renders in.
     applyHostContext(result && result.hostContext);
+    // In a client, the grant arrives on its own: the host runs `setup_credentials` to open
+    // this view and forwards that tool result as a notification. On the settings page there
+    // is no host and no such notification, so the view has to ask. Without this the save
+    // button never leaves its disabled state and the page cannot save anything at all —
+    // which every test missed, because they post to the endpoint directly and never run
+    // this file.
+    if (!IN_APP) {
+      request("tools/call", { name: "setup_credentials", arguments: {} }, 15000)
+        .then(captureGrant)
+        .catch(function (err) { say("Could not start the form: " + err.message, "err"); });
+    }
     // The mode already in force for this client. Without asking, the control would show
     // "Read only" to someone who had already enabled trading, and saving would quietly
     // take it away again.
@@ -733,7 +841,17 @@ _TEMPLATE = """<!DOCTYPE html>
           currentEnvironment = now.environment;
           selectEnv(now.environment);
         }
+        // Trading is turned on for one app at a time, and it is keyed on the name that
+        // app gives in the handshake. A page opened from a terminal has no such name, so
+        // the server refuses the choice — offering it anyway showed a control that reports
+        // a successful save and then discards what was picked. Only an explicit false
+        // hides it: the in-chat form sends no such field, and it is always able to set it.
+        if (now && now.mode_settable === false) {
+          var modeField = document.getElementById("mode-field");
+          if (modeField) modeField.parentNode.removeChild(modeField);
+        }
         configured = !!(now && now.credentials_configured);
+        lockOverridden(now && now.overridden_by_client);
         refreshSaveState();
       })
       .catch(function () {});
@@ -750,16 +868,45 @@ _TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
-VIEW_HTML = _TEMPLATE.replace(
-    "__CONFIG__",
-    json.dumps(
-        {
-            "environments": ENVIRONMENTS,
-            "dashboards": DASHBOARDS,
-            "default_environment": DEFAULT_ENV,
-        }
-    ),
-)
+def _rendered(*, nonce: str = "", **extra: object) -> str:
+    """The one document, configured for the surface it will be shown on.
+
+    Both surfaces ask the same four questions and must not drift into two answers, so there
+    is one template. What differs is only how the answers travel: inside a host, by
+    postMessage to the frame's parent; in a browser, by HTTP to the loopback server that
+    served the page. That difference is a single branch in the script, on `transport`.
+    """
+    settings = {
+        "environments": ENVIRONMENTS,
+        "dashboards": DASHBOARDS,
+        "default_environment": DEFAULT_ENV,
+    }
+    settings.update(extra)
+    nonce_attr = f' nonce="{nonce}"' if nonce else ""
+    return _TEMPLATE.replace("__CONFIG__", json.dumps(settings)).replace(
+        "__NONCE_ATTR__", nonce_attr
+    )
+
+
+# Shown by a host inside a frame, as an MCP App.
+VIEW_HTML = _rendered(transport="app")
+
+
+def page_html(
+    endpoint: str,
+    *,
+    csrf_token: str = "",
+    revision: int = 0,
+    nonce: str = "",
+) -> str:
+    """The same document for a browser, posting back to the address that served it."""
+    return _rendered(
+        transport="page",
+        endpoint=endpoint,
+        csrf_token=csrf_token,
+        revision=revision,
+        nonce=nonce,
+    )
 
 
 def build_id() -> str:
@@ -781,7 +928,7 @@ _NO_PERMISSION = {"UnauthorizedApiAccess", "unauthorized_api_access"}
 _IP_BLOCKED = {"ip_not_whitelisted_for_api_key"}
 
 
-def _rejection(env: str, result: credentials.Check) -> str:
+def rejection(env: str, result: credentials.Check) -> str:
     """What the form says when Delta turns the key down.
 
     Deliberately replaces the message from `errors.py` rather than adding to it. That one
@@ -862,24 +1009,39 @@ def _client_name(ctx: Context) -> str:
     return request.client(session).name
 
 
-def _opened_message() -> str:
+def _opened_message(url: str = "") -> str:
     """What the model is told after opening the form.
 
     Deliberately says what *not* to do first. Left to itself a model asked for help with
     an API key will offer to take it in the chat, which is the one outcome this whole
     module exists to prevent, and the offer sounds helpful enough that people accept it.
+
+    It used to promise a form and then, for a client that draws nothing, send the person to
+    a terminal — the very thing they were avoiding. Whether a client draws one turns out to
+    depend on which configuration file the server was registered in, so it cannot be
+    predicted from here. A link is given alongside it instead, which works on every client
+    including the ones that show nothing, so the message is true either way.
     """
+    reached_another_way = (
+        f"Give them this link — it opens the same page in their browser, on their own "
+        f"machine: {url}"
+        if url
+        else "Tell them to run `uvx delta-exchange-mcp setup`, which opens the same page "
+        "in their browser."
+    )
+    fallback = (
+        f"If no form appeared, this client cannot display one. {reached_another_way} "
+        f"They can also edit {store.path()} by hand, or run "
+        "`uvx delta-exchange-mcp setup --terminal` on a machine with no browser, but the "
+        "link needs neither."
+    )
     return (
         "A form is now open in this conversation. Tell the user to type their API key "
         "and secret into it — never ask them to send a key or secret as a chat message, "
         "because anything sent that way is stored in this conversation and visible to "
         "you. You will not see what they type or whether it saved: call "
         "get_connection_status once they say they are done, which reports whether a key "
-        "is configured and whether this client still has to be restarted. If no form "
-        "appeared, this client cannot display one — tell them to run "
-        "`uvx delta-exchange-mcp login` in a terminal, or to open "
-        f"{store.path()} and fill in DELTA_API_KEY and DELTA_API_SECRET, then to restart "
-        "this client."
+        f"is configured and whether this client still has to be restarted. {fallback}"
     )
 
 
@@ -980,6 +1142,32 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             )
         return f"{reads} Trading stays off for {scope}."
 
+    # One page for this server, not one per call. Someone who asks twice gets the address
+    # they already have rather than a second listener, and the old one is closed if it has
+    # already been used. Held in the closure rather than at module scope so two servers in
+    # one process cannot hand out each other's page.
+    opened_page: dict[str, object] = {"page": None}
+
+    def _open_page(client: str):
+        """Start, or reuse, the browser settings page this client can be sent to.
+
+        Deferred import: `setup` renders the same document this module builds, so importing
+        it at the top would be a cycle. Returns None when a listener cannot be bound, which
+        is not worth failing the tool over — the form may still draw, and the message falls
+        back to naming the command.
+        """
+        from delta_exchange_mcp import setup as setup_page
+
+        live = opened_page["page"]
+        if live is not None and live.running:
+            return live
+        try:
+            page = setup_page.serve(client=client, open_browser=False)
+        except OSError:
+            return None
+        opened_page["page"] = page
+        return page
+
     # Not read-only: opening mints a one-use grant, which is process state. Not idempotent
     # either, and that one matters — a second call replaces the connection's outstanding
     # grant, so a form already open on screen can no longer save. Telling a client this is
@@ -1003,11 +1191,20 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
         clients that cannot display a form, and whether this one can is reported back to
         you by this tool. Never ask for the key or secret in the conversation instead.
         """
-        message = _opened_message()
+        # Started every time, not only when the form fails to draw, because there is no way
+        # to find out from here whether it drew — the tool result is identical either way.
+        # A page nobody opens costs a listener that closes itself in ten minutes; a person
+        # with no way in costs the whole install.
+        page = _open_page(_client_name(ctx))
+        message = _opened_message(page.url if page else "")
         pending = issue_grant(ctx)
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
-            structuredContent={"status": "form_opened", "instructions": message},
+            structuredContent={
+                "status": "form_opened",
+                "instructions": message,
+                "settings_url": page.url if page else "",
+            },
             _meta={
                 "ui": {
                     "saveGrant": pending.token,
@@ -1094,7 +1291,7 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             raise
         if result.reachable and not result.ok:
             finish_grant(grant_key, pending, used=False)
-            return {"status": "rejected", "message": _rejection(env, result)}
+            return {"status": "rejected", "message": rejection(env, result)}
 
         problem = credentials.save(env, key, secret, client, wanted)
         if problem is not None:
