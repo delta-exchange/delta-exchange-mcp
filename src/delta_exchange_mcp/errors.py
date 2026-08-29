@@ -20,12 +20,14 @@ _AUTH_HINTS: dict[str, str] = {
         "matches the dashboard the key was created on."
     ),
     "UnauthorizedApiAccess": (
-        "API key lacks permission for this endpoint. Enable Read Data (or Trading) on "
-        "the key in Delta API management."
+        "API key lacks permission for trading preferences. Update its account-data "
+        "permissions in Delta API management. Current Delta documentation does not "
+        "establish whether Read Data alone is sufficient."
     ),
     "unauthorized_api_access": (
-        "API key lacks permission for this endpoint. Enable Read Data (or Trading) on "
-        "the key in Delta API management."
+        "API key lacks permission for trading preferences. Update its account-data "
+        "permissions in Delta API management. Current Delta documentation does not "
+        "establish whether Read Data alone is sufficient."
     ),
     "ip_not_whitelisted_for_api_key": (
         "request IP is not allowed for this API key. Update the IP allowlist in Delta "

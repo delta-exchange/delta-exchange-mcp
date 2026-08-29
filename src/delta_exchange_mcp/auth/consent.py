@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -22,6 +23,8 @@ SCHEMA_VERSION = 1
 SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
 _LOCK_TIMEOUT_SECONDS = 10.0
 _LOCK_POLL_SECONDS = 0.05
+
+logger = logging.getLogger(__name__)
 
 
 class ConsentError(RuntimeError):
@@ -184,7 +187,7 @@ def _record_key(binding: ConsentBinding) -> str:
         values.append(binding.credential_session_generation)
     encoded = json.dumps(
         values,
-        ensure_ascii=False,
+        ensure_ascii=True,
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -487,6 +490,14 @@ class ConsentStore:
                     os.fsync(handle.fileno())
                 os.chmod(staged, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(staged, self._path)
+                try:
+                    _sync_directory(self._path.parent)
+                except OSError as exc:
+                    logger.warning(
+                        "consent metadata was published but its directory sync "
+                        "failed: %s",
+                        type(exc).__name__,
+                    )
             finally:
                 staged.unlink(missing_ok=True)
         except OSError as exc:
@@ -539,3 +550,14 @@ class ConsentStore:
                 else:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+def _sync_directory(path: Path) -> None:
+    """Make a published consent update durable when the platform supports it."""
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from delta_exchange_mcp.auth import consent as consent_mod
 from delta_exchange_mcp.auth.consent import (
     ConsentBinding,
     ConsentStorageError,
@@ -389,3 +390,38 @@ def test_invalid_binding_values_are_rejected():
         binding(session_generation=1)
     with pytest.raises(ValueError, match="positive integer"):
         binding(revision=None, generation=None, session_generation=0)
+
+
+def test_unpaired_surrogate_in_exact_client_name_cannot_crash_authorization(
+    tmp_path,
+) -> None:
+    store = new_store(tmp_path / "consent.json")
+    malformed = binding("client-\ud800")
+
+    enabled = store.enable(malformed, expected_generation=0)
+
+    assert enabled.enabled is True
+    assert store.status(malformed) == enabled
+
+
+def test_directory_sync_failure_keeps_published_revocation(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    path = tmp_path / "consent.json"
+    store = new_store(path)
+    approved = store.enable(binding(), expected_generation=0)
+
+    def fail_sync(path: Path) -> None:
+        raise OSError("directory sync failed")
+
+    monkeypatch.setattr(consent_mod, "_sync_directory", fail_sync)
+    disabled = store.disable(
+        binding(),
+        expected_generation=approved.generation,
+    )
+
+    assert disabled.enabled is False
+    assert new_store(path).status(binding()).enabled is False
+    assert "directory sync failed: OSError" in caplog.text

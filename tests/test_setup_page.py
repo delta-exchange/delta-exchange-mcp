@@ -223,7 +223,7 @@ def test_the_locator_finds_the_flow_but_does_not_authorize_a_post(
     browser = Browser(page)
     opened = browser.open()
     assert opened.status == 200
-    assert "Connect your Delta Exchange account" in opened.text
+    assert "Manage Delta Exchange connection" in opened.text
     assert "HttpOnly" in opened.headers["Set-Cookie"]
     assert "SameSite=Strict" in opened.headers["Set-Cookie"]
     assert browser.cookie.partition("=")[2] not in page.url

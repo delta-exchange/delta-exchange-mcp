@@ -1,21 +1,4 @@
-"""Settings shared by every MCP client on this machine.
-
-An MCP client's own config is an awkward home for an API key. The shape differs per
-client, it is JSON or TOML that someone non-technical has to edit without breaking,
-the same key has to be pasted again for every client, and the project-scoped variants
-(`.cursor/mcp.json`, `.vscode/mcp.json`) are files people commit. This module offers
-one plain `KEY=value` file instead, read by whichever client launched the server.
-
-The client's own environment still wins, so the Claude Desktop bundle form and
-VS Code's masked prompts keep working exactly as they do today. See `config.setting`
-for the precedence rule.
-
-Parsing goes through `python-dotenv` rather than a hand-rolled split, because the
-mistakes a non-developer makes in this file are the ones that fail silently:
-`KEY="quoted"` keeping its quotes, `export KEY=v`, a trailing `# comment`, or CRLF
-line endings all corrupt a credential in ways that surface later as a signing error
-indistinguishable from a bad key.
-"""
+"""Non-secret settings shared by every MCP client on this machine."""
 
 from __future__ import annotations
 
@@ -39,32 +22,11 @@ DEFAULT_DIR = Path.home() / ".delta-exchange-mcp"
 DEFAULT_NAME = "config.env"
 
 TEMPLATE = """\
-# Delta Exchange MCP - settings shared by every MCP client on this machine.
+# Delta Exchange MCP settings shared by every MCP client on this machine.
 #
-# Market data works with this file empty. Fill these in to let an assistant read
-# your own account. Create a key under Account -> API Keys at
-# https://www.delta.exchange/app/account/manageapikeys with the "Read Data"
-# permission. Whitelisting an IP is not needed for that; Delta only requires it
-# on keys that also carry Trading permission.
-#
-# Match the environment to where the key came from: a key from delta.exchange
-# works only with india_prod, one from demo.delta.exchange only with
-# india_testnet. Mixing them returns InvalidApiKey.
-#
-# Your MCP client's own settings take precedence over this file.
-
-DELTA_API_KEY=
-DELTA_API_SECRET=
+# Manage API credentials and trading consent in the browser page that the MCP opens.
+# This file contains non-secret runtime settings only.
 DELTA_MCP_ENV=india_prod
-
-# Trading is stored per client, never under the shared name below, so switching it
-# on in one place cannot arm every assistant on this machine at once. The in-chat
-# form writes the scoped name for you; the client name comes from its handshake.
-# Ask get_connection_status for this client's exact mode_setting, or use the form.
-# DELTA_MCP_MODE_<READABLE>_<DIGEST>=trade
-#
-# This unscoped name is read only from a client's own environment, never from here:
-# DELTA_MCP_MODE=trade
 """
 
 
@@ -122,6 +84,7 @@ def ensure() -> Path | None:
 
 _LOCK_TIMEOUT_SECONDS = 10.0
 _LOCK_POLL_SECONDS = 0.05
+_LEGACY_CREDENTIAL_NAMES = frozenset({"DELTA_API_KEY", "DELTA_API_SECRET"})
 
 
 @contextmanager
@@ -171,20 +134,10 @@ def _write_lock(target: Path) -> Iterator[None]:
 
 
 def write(values: dict[str, str]) -> str | None:
-    """Set all of `values` in the shared file at once, or leave the file as it was.
+    """Set non-secret values atomically, or leave the shared file unchanged."""
+    if _LEGACY_CREDENTIAL_NAMES.intersection(values):
+        return "API credentials must be managed through Manage Connection"
 
-    The all-at-once part is the point. `set_key` rewrites the whole file and renames it
-    into place for every single key, so writing a credential one key at a time publishes
-    three successive versions of the file. A failure on the third leaves a new API key
-    sitting beside the previous secret — a pair that was never issued together, which
-    still reads as complete, still registers the account tools, and fails every signed
-    request. Staging every change on a copy and renaming once makes it all or nothing.
-
-    `set_key` still does the line editing rather than a hand-rolled rewrite, because it
-    already preserves the template's comments and quotes whatever someone can type:
-    spaces, quotes, or a stray `=` that a naive `NAME=value` append would turn into a
-    second setting.
-    """
     target = ensure()
     if target is None:
         return f"cannot write {path()}"
@@ -192,11 +145,8 @@ def write(values: dict[str, str]) -> str | None:
     staged = None
     try:
         with _write_lock(target):
-            # Owner bits are carried across, group and other are dropped. A write is the one
-            # moment a *new* secret enters this file, and publishing it into a group- or
-            # world-readable file would hand it to every other account on the machine — with
-            # nothing said, because the permission warning only runs at startup. Masking here
-            # rather than forcing 0600 leaves an owner who chose 0400 with the mode they chose.
+            # Carry the owner bits across and drop access for group and other users.
+            # This also protects a legacy file until automatic migration removes secrets.
             mode = stat.S_IMODE(target.stat().st_mode) & 0o700
             handle, name = tempfile.mkstemp(
                 dir=target.parent, prefix=".config-", suffix=".tmp"
@@ -236,6 +186,6 @@ def insecure_permissions() -> str | None:
     if not mode & (stat.S_IRGRP | stat.S_IROTH):
         return None
     return (
-        f"{target} can hold API credentials but is readable by other users on this "
-        f"machine. Restrict it with: chmod 600 {target}"
+        f"{target} may contain legacy API credentials until migration completes and is "
+        f"readable by other users on this machine. Restrict it with: chmod 600 {target}"
     )

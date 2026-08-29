@@ -1,9 +1,8 @@
 """Authenticated trading tools (mutations).
 
-Registered only when DELTA_API_KEY/SECRET are set AND DELTA_MCP_MODE=trade. Every tool
-takes a `dry_run` flag that validates and echoes the payload without sending it, and every
-call (dry-run or real) is recorded to the audit log. Mutations never auto-retry (see
-DeltaClient retry policy) — a timeout is surfaced, not silently re-sent.
+All tools remain discoverable. Call-time authorization requires a current credential and
+browser consent before a real mutation. A `dry_run` validates and echoes the payload
+without consent or an HTTP mutation. Mutations never retry automatically.
 """
 
 from __future__ import annotations
@@ -95,8 +94,10 @@ class TradeGate:
     def lease(self) -> TradeLease:
         if not self.armed:
             raise ToolError(_REVOKED_MESSAGE)
-        checker = self._final_check.get() or self._in_memory_check
+        checker = self._final_check.get()
         self._final_check.set(None)
+        if checker is None:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE)
         return TradeLease(generation=self.generation, final_check=checker)
 
     def revoke(self) -> None:
@@ -110,10 +111,6 @@ class TradeGate:
             return lease.final_check() is True
         except Exception as exc:
             raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE) from exc
-
-    def _in_memory_check(self) -> bool:
-        return self.armed
-
 
 def _bs(value: bool | None) -> str | None:
     """Delta's order-level flags are string enums "true"/"false", not JSON booleans."""
@@ -233,10 +230,14 @@ def register(
     active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
-    _uid_cache: dict[str, int] = {}
-    # tick_size keyed by both product id (int) and symbol (str); filled lazily.
-    _tick_cache: dict[int | str, Decimal] = {}
-    _tick_list_loaded = {"done": False}
+    active_audit: ContextVar[AuditLog | None] = ContextVar(
+        f"delta_trade_audit_{id(gate)}", default=None
+    )
+    _uid_cache: dict[int, int] = {}
+    # Each cache key includes the task-pinned HTTP identity. A rebind cannot reuse or
+    # repopulate product or account data under a different credential pair.
+    _tick_cache: dict[tuple[int, int | str], Decimal] = {}
+    _tick_list_loaded: set[int] = set()
 
     def current_audit() -> AuditLog | None:
         return audit() if callable(audit) else audit
@@ -259,12 +260,20 @@ def register(
             async def pinned(*args: Any, **kwargs: Any) -> Any:
                 if kwargs.get("dry_run") is True:
                     async with client.pin():
-                        return await function(*args, **kwargs)
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
                 lease = gate.lease()
                 token = active_lease.set(lease)
                 try:
                     async with client.pin():
-                        return await function(*args, **kwargs)
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
                 finally:
                     active_lease.reset(token)
 
@@ -278,6 +287,7 @@ def register(
         return decorate
 
     def _store_product(prod: dict[str, Any]) -> None:
+        generation = client.binding_generation
         tick = prod.get("tick_size")
         if tick is None:
             return
@@ -286,9 +296,9 @@ def register(
         except (InvalidOperation, ValueError):
             return
         if prod.get("id") is not None:
-            _tick_cache[int(prod["id"])] = dec
+            _tick_cache[(generation, int(prod["id"]))] = dec
         if prod.get("symbol"):
-            _tick_cache[str(prod["symbol"])] = dec
+            _tick_cache[(generation, str(prod["symbol"]))] = dec
 
     async def _tick_size(product_id: int | None, product_symbol: str | None) -> Decimal | None:
         """Resolve a product's tick_size (cached per process). Returns None if unresolvable.
@@ -298,7 +308,11 @@ def register(
         indexes every product. Never raises — price rounding must not block an order on a
         metadata-lookup failure.
         """
-        key: int | str | None = product_symbol if product_symbol is not None else product_id
+        generation = client.binding_generation
+        product_key: int | str | None = (
+            product_symbol if product_symbol is not None else product_id
+        )
+        key = (generation, product_key) if product_key is not None else None
         if key is not None and key in _tick_cache:
             return _tick_cache[key]
         try:
@@ -307,13 +321,13 @@ def register(
                 inner = resp.get("result", resp) if isinstance(resp, dict) else None
                 if isinstance(inner, dict):
                     _store_product(inner)
-            elif not _tick_list_loaded["done"]:
+            elif generation not in _tick_list_loaded:
                 resp = await client.get("/products")
                 products = resp.get("result", []) if isinstance(resp, dict) else []
                 for prod in products if isinstance(products, list) else []:
                     if isinstance(prod, dict):
                         _store_product(prod)
-                _tick_list_loaded["done"] = True
+                _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
             logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
             return None
@@ -342,20 +356,16 @@ def register(
         return adjustments
 
     async def _user_id() -> int:
-        if "id" not in _uid_cache:
-            prof = await client.get("/profile", auth=True)
-            inner = prof.get("result", prof) if isinstance(prof, dict) else {}
-            uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
-            if uid is None:
-                raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
+        generation = client.binding_generation
+        if generation not in _uid_cache:
+            _uid_cache[generation] = (await fetch_account_identity(client)).user_id
+        return _uid_cache[generation]
 
     async def _finish(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
     ) -> Any:
         payload = _clean(payload)
-        log = current_audit()
+        log = active_audit.get()
         if dry_run:
             if log:
                 log.record(tool, payload, dry_run=True)

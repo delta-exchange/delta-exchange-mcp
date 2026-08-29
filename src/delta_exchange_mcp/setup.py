@@ -1,6 +1,5 @@
 """Serve the account setup flow on a short-lived loopback listener."""
 
-import asyncio
 import hmac
 import json
 import logging
@@ -13,8 +12,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, form, store
+from delta_exchange_mcp import form
 
 LIFETIME_SECONDS = 10 * 60
 
@@ -354,126 +352,10 @@ def _copy_revision(value: Any) -> Revision:
     return dict(value) if isinstance(value, dict) else value
 
 
-def _status(client: str) -> dict[str, Any]:
-    shared = store.read()
-    live = config_mod.load(shared)
-    return {
-        "environment": live.env,
-        "credentials_configured": live.has_credentials,
-        "mode": config_mod.mode_for_client(client, shared) if client else "read",
-        "overridden_by_client": credentials.overridden_by_client(client, shared),
-        "path": str(store.path()),
-        "client_name": client,
-        "mode_settable": bool(client),
-    }
-
-
-def _legacy_actions(client: str) -> ActionHandler:
-    """Adapt the branch's file store until the secure store supplies this callback."""
-
-    current_revision = 0
-
-    def run(action: str, args: Mapping[str, Any], revision: Revision) -> ActionResult:
-        nonlocal current_revision
-        if action == "status":
-            return ActionResult(_status(client), revision=current_revision)
-        if revision != current_revision:
-            return ActionResult(
-                {"message": "the connection changed; reload the page and try again"},
-                revision=current_revision,
-                stale=True,
-            )
-        if action == "consent":
-            result = _legacy_consent(client, args, current_revision)
-        else:
-            result = _legacy_credentials(client, args, current_revision)
-        current_revision = result.revision
-        return result
-
-    return run
-
-
-def _legacy_consent(
-    client: str, args: Mapping[str, Any], revision: int
-) -> ActionResult:
-    if not client:
-        return ActionResult(
-            {"status": "rejected", "message": _NO_CLIENT}, revision=revision
-        )
-    failure = credentials.save_mode(client, str(args.get("mode") or "read"))
-    if failure:
-        return ActionResult(
-            {"status": "rejected", "message": failure}, revision=revision
-        )
-    return ActionResult(
-        {"status": "saved", "message": "Saved.", "mode_updated": True},
-        revision=revision + 1,
-        complete=True,
-    )
-
-
-def _legacy_credentials(
-    client: str, args: Mapping[str, Any], revision: int
-) -> ActionResult:
-    env = str(args.get("environment") or "")
-    key = str(args.get("api_key") or "")
-    secret = str(args.get("api_secret") or "")
-    if not (env and key and secret):
-        return ActionResult(
-            {"status": "rejected", "message": "Fill in every field."},
-            revision=revision,
-        )
-
-    checked = asyncio.run(credentials.check(env, key, secret))
-    if not checked.ok and checked.reachable:
-        return ActionResult(
-            {"status": "rejected", "message": form.rejection(env, checked)},
-            revision=revision,
-        )
-
-    mode = str(args.get("mode") or "")
-    failure = credentials.save(env, key, secret, client=client, mode=mode if client else "")
-    if failure:
-        return ActionResult(
-            {"status": "rejected", "message": failure}, revision=revision
-        )
-
-    common = {
-        "path": str(store.path()),
-        "next_step": "Restart your MCP client so it picks up the new settings.",
-        "overridden_by_client": credentials.overridden_by_client(client, store.read()),
-    }
-    if not checked.reachable:
-        return ActionResult(
-            common
-            | {
-                "status": "unverified",
-                "message": (
-                    f"Saved to {store.path()}, but Delta could not be reached to check it. "
-                    f"{checked.detail}"
-                ),
-            },
-            revision=revision + 1,
-            complete=True,
-        )
-    return ActionResult(
-        common | {"status": "saved", "account": checked.detail},
-        revision=revision + 1,
-        complete=True,
-    )
-
-
-_NO_CLIENT = (
-    "Trading is turned on for one app at a time, and this page was opened from a terminal "
-    "rather than from an app. Ask your assistant to connect your Delta account instead."
-)
-
-
 def serve(
-    client: str = "",
-    open_browser: bool = True,
     *,
-    actions: ActionHandler | None = None,
+    actions: ActionHandler,
+    open_browser: bool = True,
     revision: Revision = 0,
 ) -> Page:
     """Start a setup flow on an operating-system-selected loopback port.
@@ -486,7 +368,7 @@ def serve(
         raise ValueError("revision must contain non-negative integers")
     locator = secrets.token_urlsafe(24)
     completed = threading.Event()
-    flow = _Flow(actions=actions or _legacy_actions(client), revision=revision)
+    flow = _Flow(actions=actions, revision=revision)
     server = ThreadingHTTPServer((_LOOPBACK, 0), _Handler)
     server.daemon_threads = True
     origin = f"{_LOOPBACK}:{server.server_address[1]}"
