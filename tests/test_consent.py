@@ -1,4 +1,7 @@
+import hashlib
 import json
+from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +9,7 @@ from delta_exchange_mcp.auth.consent import (
     ConsentBinding,
     ConsentStorageError,
     ConsentStore,
+    MemoryConsentBackend,
     StaleConsentError,
 )
 
@@ -15,29 +19,70 @@ def binding(
     environment: str = "india_prod",
     revision: int | None = 1,
     generation: int | None = 1,
+    session_generation: int | None = None,
 ) -> ConsentBinding:
     return ConsentBinding(
         client_name=client_name,
         environment=environment,
         credential_revision=revision,
         credential_generation=generation,
+        credential_session_generation=session_generation,
     )
+
+
+def new_store(
+    path: Path,
+    *,
+    secure_backend_available: bool = True,
+    memory_backend: MemoryConsentBackend | None = None,
+) -> ConsentStore:
+    return ConsentStore(
+        path,
+        secure_backend_available=secure_backend_available,
+        memory_backend=memory_backend or MemoryConsentBackend(),
+    )
+
+
+class _CredentialStoreView:
+    """Simulate separate credential-store processes over authoritative metadata."""
+
+    def __init__(self, metadata: dict[str, int | None]) -> None:
+        self._metadata = metadata
+
+    def current(self) -> tuple[int | None, int | None, int | None]:
+        return (
+            self._metadata["revision"],
+            self._metadata["generation"],
+            self._metadata["session_generation"],
+        )
+
+    def rotate(self) -> None:
+        revision = self._metadata["revision"]
+        generation = self._metadata["generation"]
+        assert isinstance(revision, int)
+        assert isinstance(generation, int)
+        self._metadata.update(revision=revision + 1, generation=generation + 1)
+
+    def disconnect(self) -> None:
+        generation = self._metadata["generation"]
+        assert isinstance(generation, int)
+        self._metadata.update(revision=None, generation=generation + 1)
 
 
 def test_named_consent_persists_across_restart(tmp_path):
     path = tmp_path / "consent.json"
-    first = ConsentStore(path, secure_backend_available=True)
+    first = new_store(path)
 
     enabled = first.enable(binding(), expected_generation=0)
 
-    second = ConsentStore(path, secure_backend_available=True)
+    second = new_store(path)
     assert enabled.enabled is True
     assert enabled.persistent is True
     assert second.status(binding()) == enabled
 
 
 def test_client_name_is_an_exact_partition(tmp_path):
-    store = ConsentStore(tmp_path / "consent.json", secure_backend_available=True)
+    store = new_store(tmp_path / "consent.json")
     store.enable(binding("Claude Desktop"), expected_generation=0)
 
     assert store.status(binding("claude desktop")).enabled is False
@@ -45,7 +90,7 @@ def test_client_name_is_an_exact_partition(tmp_path):
 
 
 def test_environment_and_credential_revision_are_exact_partitions(tmp_path):
-    store = ConsentStore(tmp_path / "consent.json", secure_backend_available=True)
+    store = new_store(tmp_path / "consent.json")
     store.enable(binding(), expected_generation=0)
 
     assert store.status(binding(environment="india_testnet")).enabled is False
@@ -55,41 +100,101 @@ def test_environment_and_credential_revision_are_exact_partitions(tmp_path):
 
 def test_unnamed_client_consent_is_process_only(tmp_path):
     path = tmp_path / "consent.json"
-    first = ConsentStore(path, secure_backend_available=True)
+    first = new_store(path)
 
     state = first.enable(binding(""), expected_generation=0)
 
     assert state.enabled is True
     assert state.persistent is False
     assert not path.exists()
-    assert ConsentStore(path, secure_backend_available=True).status(binding("")).enabled is False
+    assert new_store(path).status(binding("")).enabled is False
 
 
 def test_no_secure_backend_keeps_all_consent_in_memory(tmp_path):
     path = tmp_path / "consent.json"
-    first = ConsentStore(path, secure_backend_available=False)
+    first = new_store(path, secure_backend_available=False)
 
     state = first.enable(binding(), expected_generation=0)
 
     assert state.persistent is False
     assert not path.exists()
-    assert ConsentStore(path, secure_backend_available=False).status(binding()).enabled is False
+    assert (
+        new_store(path, secure_backend_available=False).status(binding()).enabled
+        is False
+    )
 
 
 def test_process_environment_credentials_get_session_only_consent(tmp_path):
     path = tmp_path / "consent.json"
-    external = binding(revision=None, generation=None)
-    first = ConsentStore(path, secure_backend_available=True)
+    external = binding(revision=None, generation=None, session_generation=1)
+    first = new_store(path)
 
     state = first.enable(external, expected_generation=0)
+    lease = first.lease(external)
 
     assert state.persistent is False
     assert first.status(external).enabled is True
+    assert lease is not None
+    assert (
+        first.accepts(
+            lease,
+            current_credential_revision=None,
+            current_credential_generation=None,
+            current_credential_session_generation=1,
+        )
+        is True
+    )
+    assert (
+        first.accepts(
+            lease,
+            current_credential_revision=None,
+            current_credential_generation=None,
+            current_credential_session_generation=None,
+        )
+        is False
+    )
+    assert not path.exists()
+
+
+def test_process_pair_change_invalidates_old_lease_and_requires_new_consent(tmp_path):
+    path = tmp_path / "consent.json"
+    memory_backend = MemoryConsentBackend()
+    store = new_store(path, memory_backend=memory_backend)
+    pair_a = binding(revision=None, generation=None, session_generation=1)
+    pair_b = binding(revision=None, generation=None, session_generation=2)
+    state_a = store.enable(pair_a, expected_generation=0)
+    lease_a = store.lease(pair_a)
+    assert state_a.persistent is False
+    assert lease_a is not None
+
+    assert (
+        store.accepts(
+            lease_a,
+            current_credential_revision=None,
+            current_credential_generation=None,
+            current_credential_session_generation=2,
+        )
+        is False
+    )
+    assert store.status(pair_b).enabled is False
+
+    store.enable(pair_b, expected_generation=0)
+    lease_b = store.lease(pair_b)
+    assert lease_b is not None
+    assert (
+        store.accepts(
+            lease_b,
+            current_credential_revision=None,
+            current_credential_generation=None,
+            current_credential_session_generation=2,
+        )
+        is True
+    )
     assert not path.exists()
 
 
 def test_manual_disable_invalidates_an_in_flight_lease(tmp_path):
-    store = ConsentStore(tmp_path / "consent.json", secure_backend_available=True)
+    store = new_store(tmp_path / "consent.json")
     enabled = store.enable(binding(), expected_generation=0)
     lease = store.lease(binding())
     assert lease is not None
@@ -97,20 +202,109 @@ def test_manual_disable_invalidates_an_in_flight_lease(tmp_path):
     disabled = store.disable(binding(), expected_generation=enabled.generation)
 
     assert disabled.enabled is False
-    assert store.accepts(lease) is False
+    assert (
+        store.accepts(
+            lease,
+            current_credential_revision=1,
+            current_credential_generation=1,
+            current_credential_session_generation=None,
+        )
+        is False
+    )
+
+
+def test_current_credential_and_consent_accept_an_in_flight_lease(tmp_path):
+    store = new_store(tmp_path / "consent.json")
+    store.enable(binding(), expected_generation=0)
+    lease = store.lease(binding())
+    assert lease is not None
+
+    assert (
+        store.accepts(
+            lease,
+            current_credential_revision=1,
+            current_credential_generation=1,
+            current_credential_session_generation=None,
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [_CredentialStoreView.rotate, _CredentialStoreView.disconnect],
+    ids=["rotation", "disconnect"],
+)
+def test_another_credential_store_invalidates_an_old_lease(
+    tmp_path,
+    change: Callable[[_CredentialStoreView], None],
+):
+    metadata = {"revision": 1, "generation": 1, "session_generation": None}
+    reader = _CredentialStoreView(metadata)
+    writer = _CredentialStoreView(metadata)
+    store = new_store(tmp_path / "consent.json")
+    store.enable(binding(), expected_generation=0)
+    lease = store.lease(binding())
+    assert lease is not None
+
+    change(writer)
+    revision, generation, session_generation = reader.current()
+
+    assert (
+        store.accepts(
+            lease,
+            current_credential_revision=revision,
+            current_credential_generation=generation,
+            current_credential_session_generation=session_generation,
+        )
+        is False
+    )
+
+
+def test_process_memory_is_shared_by_all_consent_services(tmp_path):
+    path = tmp_path / "consent.json"
+    memory_backend = MemoryConsentBackend()
+    management = new_store(
+        path,
+        secure_backend_available=False,
+        memory_backend=memory_backend,
+    )
+    trading = new_store(
+        path,
+        secure_backend_available=False,
+        memory_backend=memory_backend,
+    )
+    enabled = management.enable(binding(), expected_generation=0)
+    lease = trading.lease(binding())
+    assert trading.status(binding()) == enabled
+    assert lease is not None
+
+    management.revoke_environment("india_prod")
+
+    assert (
+        trading.accepts(
+            lease,
+            current_credential_revision=1,
+            current_credential_generation=1,
+            current_credential_session_generation=None,
+        )
+        is False
+    )
 
 
 def test_stale_browser_cannot_restore_manually_disabled_consent(tmp_path):
-    store = ConsentStore(tmp_path / "consent.json", secure_backend_available=True)
+    store = new_store(tmp_path / "consent.json")
     first = store.enable(binding(), expected_generation=0)
     store.disable(binding(), expected_generation=first.generation)
 
-    with pytest.raises(StaleConsentError, match="expected consent generation 1, found 2"):
+    with pytest.raises(
+        StaleConsentError, match="expected consent generation 1, found 2"
+    ):
         store.enable(binding(), expected_generation=first.generation)
 
 
 def test_revoke_environment_invalidates_all_bound_clients(tmp_path):
-    store = ConsentStore(tmp_path / "consent.json", secure_backend_available=True)
+    store = new_store(tmp_path / "consent.json")
     first = binding("Claude Desktop")
     second = binding("Cursor")
     store.enable(first, expected_generation=0)
@@ -127,21 +321,23 @@ def test_revoke_environment_invalidates_all_bound_clients(tmp_path):
 
 def test_two_instances_reject_a_stale_concurrent_write(tmp_path):
     path = tmp_path / "consent.json"
-    first = ConsentStore(path, secure_backend_available=True)
-    second = ConsentStore(path, secure_backend_available=True)
+    first = new_store(path)
+    second = new_store(path)
     assert first.status(binding()).generation == 0
     assert second.status(binding()).generation == 0
 
     first.enable(binding(), expected_generation=0)
 
-    with pytest.raises(StaleConsentError, match="expected consent generation 0, found 1"):
+    with pytest.raises(
+        StaleConsentError, match="expected consent generation 0, found 1"
+    ):
         second.disable(binding(), expected_generation=0)
 
 
 def test_corrupt_metadata_fails_closed_and_is_not_replaced(tmp_path):
     path = tmp_path / "consent.json"
     path.write_text("not json")
-    store = ConsentStore(path, secure_backend_available=True)
+    store = new_store(path)
 
     with pytest.raises(ConsentStorageError, match="not valid JSON"):
         store.status(binding())
@@ -152,7 +348,7 @@ def test_corrupt_metadata_fails_closed_and_is_not_replaced(tmp_path):
 
 def test_record_binding_tamper_is_rejected(tmp_path):
     path = tmp_path / "consent.json"
-    store = ConsentStore(path, secure_backend_available=True)
+    store = new_store(path)
     store.enable(binding(), expected_generation=0)
     payload = json.loads(path.read_text())
     record = next(iter(payload["records"].values()))
@@ -163,6 +359,23 @@ def test_record_binding_tamper_is_rejected(tmp_path):
         store.status(binding())
 
 
+def test_existing_persistent_record_key_and_shape_remain_readable(tmp_path):
+    path = tmp_path / "consent.json"
+    store = new_store(path)
+    enabled = store.enable(binding(), expected_generation=0)
+    payload = json.loads(path.read_text())
+    expected_key = hashlib.sha256(
+        json.dumps(
+            ["Claude Desktop", "india_prod", 1, 1], separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    record = payload["records"][expected_key]
+    record.pop("credential_session_generation")
+    path.write_text(json.dumps(payload))
+
+    assert new_store(path).status(binding()) == enabled
+
+
 def test_invalid_binding_values_are_rejected():
     with pytest.raises(ValueError, match="environment"):
         binding(environment="india_devnet")
@@ -170,3 +383,9 @@ def test_invalid_binding_values_are_rejected():
         binding(revision=0)
     with pytest.raises(ValueError, match="both be set or absent"):
         binding(revision=None)
+    with pytest.raises(ValueError, match="requires a credential revision"):
+        binding(revision=None, generation=None)
+    with pytest.raises(ValueError, match="session_generation"):
+        binding(session_generation=1)
+    with pytest.raises(ValueError, match="positive integer"):
+        binding(revision=None, generation=None, session_generation=0)

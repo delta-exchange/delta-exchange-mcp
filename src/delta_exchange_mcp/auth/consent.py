@@ -1,4 +1,4 @@
-"""Persistent trading consent for one MCP client and credential revision."""
+"""Trading consent bound to one MCP client and credential identity."""
 
 import hashlib
 import json
@@ -44,6 +44,7 @@ class ConsentBinding:
     environment: str
     credential_revision: int | None
     credential_generation: int | None
+    credential_session_generation: int | None
 
     def __post_init__(self) -> None:
         if self.environment not in SUPPORTED_ENVIRONMENTS:
@@ -62,6 +63,20 @@ class ConsentBinding:
         ):
             raise ValueError(
                 "credential_revision and credential_generation must be positive integers"
+            )
+        if self.credential_session_generation is not None and (
+            not isinstance(self.credential_session_generation, int)
+            or isinstance(self.credential_session_generation, bool)
+            or self.credential_session_generation < 1
+        ):
+            raise ValueError("credential_session_generation must be a positive integer")
+        if versions[0] is not None and self.credential_session_generation is not None:
+            raise ValueError(
+                "credential_session_generation applies only to process credentials"
+            )
+        if versions[0] is None and self.credential_session_generation is None:
+            raise ValueError(
+                "a consent binding requires a credential revision or session generation"
             )
 
     @property
@@ -97,6 +112,7 @@ class _Record:
     environment: str
     credential_revision: int | None
     credential_generation: int | None
+    credential_session_generation: int | None
     enabled: bool
     generation: int
 
@@ -108,6 +124,7 @@ class _Record:
         environment = value.get("environment")
         credential_revision = value.get("credential_revision")
         credential_generation = value.get("credential_generation")
+        credential_session_generation = value.get("credential_session_generation")
         enabled = value.get("enabled")
         generation = value.get("generation")
         if not isinstance(client_name, str):
@@ -119,18 +136,27 @@ class _Record:
             ("credential_generation", credential_generation),
         ):
             if not isinstance(item, int) or isinstance(item, bool) or item < 1:
-                raise ConsentStorageError(
-                    f"consent {name} must be a positive integer"
-                )
+                raise ConsentStorageError(f"consent {name} must be a positive integer")
+        if credential_session_generation is not None:
+            raise ConsentStorageError(
+                "persistent consent cannot contain a credential session generation"
+            )
         if not isinstance(enabled, bool):
             raise ConsentStorageError("consent enabled must be a boolean")
-        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
-            raise ConsentStorageError("consent generation must be a non-negative integer")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+        ):
+            raise ConsentStorageError(
+                "consent generation must be a non-negative integer"
+            )
         return cls(
             client_name=client_name,
             environment=environment,
             credential_revision=credential_revision,
             credential_generation=credential_generation,
+            credential_session_generation=None,
             enabled=enabled,
             generation=generation,
         )
@@ -142,41 +168,164 @@ class _Record:
             environment=self.environment,
             credential_revision=self.credential_revision,
             credential_generation=self.credential_generation,
+            credential_session_generation=self.credential_session_generation,
         )
 
 
 def _record_key(binding: ConsentBinding) -> str:
     """Create a stable opaque key without normalizing the client-provided name."""
+    values: list[str | int | None] = [
+        binding.client_name,
+        binding.environment,
+        binding.credential_revision,
+        binding.credential_generation,
+    ]
+    if binding.credential_session_generation is not None:
+        values.append(binding.credential_session_generation)
     encoded = json.dumps(
-        [
-            binding.client_name,
-            binding.environment,
-            binding.credential_revision,
-            binding.credential_generation,
-        ],
+        values,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_current_credential(
+    revision: int | None,
+    generation: int | None,
+    session_generation: int | None,
+) -> None:
+    if revision is not None and (
+        not isinstance(revision, int) or isinstance(revision, bool) or revision < 1
+    ):
+        raise ValueError(
+            "current credential revision must be a positive integer or None"
+        )
+    if generation is not None and (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 0
+    ):
+        raise ValueError(
+            "current credential generation must be a non-negative integer or None"
+        )
+    if revision is not None and (generation is None or generation < 1):
+        raise ValueError(
+            "an active current credential must have a positive credential generation"
+        )
+    if session_generation is not None and (
+        not isinstance(session_generation, int)
+        or isinstance(session_generation, bool)
+        or session_generation < 1
+    ):
+        raise ValueError(
+            "current credential session generation must be a positive integer or None"
+        )
+    if session_generation is not None and (
+        revision is not None or generation is not None
+    ):
+        raise ValueError(
+            "a process credential cannot have a persistent revision or generation"
+        )
+
+
+def _state(record: _Record | None, *, persistent: bool) -> ConsentState:
+    return ConsentState(
+        enabled=record.enabled if record is not None else False,
+        generation=record.generation if record is not None else 0,
+        persistent=persistent,
+    )
+
+
+def _updated_record(
+    binding: ConsentBinding, *, enabled: bool, generation: int
+) -> _Record:
+    return _Record(
+        client_name=binding.client_name,
+        environment=binding.environment,
+        credential_revision=binding.credential_revision,
+        credential_generation=binding.credential_generation,
+        credential_session_generation=binding.credential_session_generation,
+        enabled=enabled,
+        generation=generation,
+    )
+
+
+def _revoked_record(record: _Record) -> _Record:
+    return _Record(
+        client_name=record.client_name,
+        environment=record.environment,
+        credential_revision=record.credential_revision,
+        credential_generation=record.credential_generation,
+        credential_session_generation=record.credential_session_generation,
+        enabled=False,
+        generation=record.generation + 1,
+    )
+
+
+class MemoryConsentBackend:
+    """Share process-only consent among services in one MCP server process."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, _Record] = {}
+        self._lock = threading.RLock()
+
+    def status(self, binding: ConsentBinding) -> ConsentState:
+        """Return process-only consent for one exact binding."""
+        with self._lock:
+            return _state(self._records.get(_record_key(binding)), persistent=False)
+
+    def update(
+        self,
+        binding: ConsentBinding,
+        *,
+        enabled: bool,
+        expected_generation: int,
+    ) -> ConsentState:
+        """Update process-only consent under one shared lock."""
+        with self._lock:
+            key = _record_key(binding)
+            current = self._records.get(key)
+            actual = current.generation if current is not None else 0
+            if actual != expected_generation:
+                raise StaleConsentError(
+                    f"expected consent generation {expected_generation}, found {actual}"
+                )
+            next_record = _updated_record(
+                binding,
+                enabled=enabled,
+                generation=actual + 1,
+            )
+            self._records[key] = next_record
+            return _state(next_record, persistent=False)
+
+    def revoke_environment(self, environment: str) -> None:
+        """Revoke all process-only approvals for an environment."""
+        with self._lock:
+            for key, record in list(self._records.items()):
+                if record.environment == environment:
+                    self._records[key] = _revoked_record(record)
+
+
 class ConsentStore:
     """Store trading consent in atomic non-secret metadata or process memory."""
 
-    def __init__(self, path: Path, *, secure_backend_available: bool) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        secure_backend_available: bool,
+        memory_backend: MemoryConsentBackend,
+    ) -> None:
         self._path = path
         self._secure_backend_available = secure_backend_available
-        self._memory: dict[str, _Record] = {}
-        self._memory_lock = threading.RLock()
+        self._memory_backend = memory_backend
 
     def status(self, binding: ConsentBinding) -> ConsentState:
         """Return current consent for the exact binding."""
-        record = self._record(binding)
-        return ConsentState(
-            enabled=record.enabled if record is not None else False,
-            generation=record.generation if record is not None else 0,
-            persistent=self._is_persistent(binding),
-        )
+        if not self._is_persistent(binding):
+            return self._memory_backend.status(binding)
+        return _state(self._read_file().get(_record_key(binding)), persistent=True)
 
     def enable(
         self, binding: ConsentBinding, *, expected_generation: int
@@ -188,7 +337,9 @@ class ConsentStore:
         self, binding: ConsentBinding, *, expected_generation: int
     ) -> ConsentState:
         """Disable trading if the browser still has current state."""
-        return self._set(binding, enabled=False, expected_generation=expected_generation)
+        return self._set(
+            binding, enabled=False, expected_generation=expected_generation
+        )
 
     def lease(self, binding: ConsentBinding) -> ConsentLease | None:
         """Capture current consent for a later point-of-use check."""
@@ -197,8 +348,27 @@ class ConsentStore:
             return None
         return ConsentLease(binding=binding, generation=state.generation)
 
-    def accepts(self, lease: ConsentLease) -> bool:
-        """Check consent again immediately before a real Delta mutation."""
+    def accepts(
+        self,
+        lease: ConsentLease,
+        *,
+        current_credential_revision: int | None,
+        current_credential_generation: int | None,
+        current_credential_session_generation: int | None,
+    ) -> bool:
+        """Require freshly read credential identity and consent for a real mutation."""
+        _validate_current_credential(
+            current_credential_revision,
+            current_credential_generation,
+            current_credential_session_generation,
+        )
+        if (
+            lease.binding.credential_revision != current_credential_revision
+            or lease.binding.credential_generation != current_credential_generation
+            or lease.binding.credential_session_generation
+            != current_credential_session_generation
+        ):
+            return False
         state = self.status(lease.binding)
         return state.enabled and state.generation == lease.generation
 
@@ -208,17 +378,7 @@ class ConsentStore:
             raise ValueError(
                 f"environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}"
             )
-        with self._memory_lock:
-            for key, record in list(self._memory.items()):
-                if record.environment == environment:
-                    self._memory[key] = _Record(
-                        client_name=record.client_name,
-                        environment=record.environment,
-                        credential_revision=record.credential_revision,
-                        credential_generation=record.credential_generation,
-                        enabled=False,
-                        generation=record.generation + 1,
-                    )
+        self._memory_backend.revoke_environment(environment)
         if not self._secure_backend_available:
             return
         with self._write_lock():
@@ -226,14 +386,7 @@ class ConsentStore:
             changed = False
             for key, record in list(records.items()):
                 if record.environment == environment:
-                    records[key] = _Record(
-                        client_name=record.client_name,
-                        environment=record.environment,
-                        credential_revision=record.credential_revision,
-                        credential_generation=record.credential_generation,
-                        enabled=False,
-                        generation=record.generation + 1,
-                    )
+                    records[key] = _revoked_record(record)
                     changed = True
             if changed:
                 self._write_file(records)
@@ -248,27 +401,10 @@ class ConsentStore:
         if expected_generation < 0:
             raise ValueError("expected_generation must be non-negative")
         if not self._is_persistent(binding):
-            with self._memory_lock:
-                key = _record_key(binding)
-                current = self._memory.get(key)
-                actual = current.generation if current is not None else 0
-                if actual != expected_generation:
-                    raise StaleConsentError(
-                        f"expected consent generation {expected_generation}, found {actual}"
-                    )
-                next_record = _Record(
-                    client_name=binding.client_name,
-                    environment=binding.environment,
-                    credential_revision=binding.credential_revision,
-                    credential_generation=binding.credential_generation,
-                    enabled=enabled,
-                    generation=actual + 1,
-                )
-                self._memory[key] = next_record
-            return ConsentState(
-                enabled=next_record.enabled,
-                generation=next_record.generation,
-                persistent=False,
+            return self._memory_backend.update(
+                binding,
+                enabled=enabled,
+                expected_generation=expected_generation,
             )
 
         with self._write_lock():
@@ -280,11 +416,8 @@ class ConsentStore:
                 raise StaleConsentError(
                     f"expected consent generation {expected_generation}, found {actual}"
                 )
-            next_record = _Record(
-                client_name=binding.client_name,
-                environment=binding.environment,
-                credential_revision=binding.credential_revision,
-                credential_generation=binding.credential_generation,
+            next_record = _updated_record(
+                binding,
                 enabled=enabled,
                 generation=actual + 1,
             )
@@ -295,13 +428,6 @@ class ConsentStore:
             generation=next_record.generation,
             persistent=True,
         )
-
-    def _record(self, binding: ConsentBinding) -> _Record | None:
-        key = _record_key(binding)
-        if not self._is_persistent(binding):
-            with self._memory_lock:
-                return self._memory.get(key)
-        return self._read_file().get(key)
 
     def _is_persistent(self, binding: ConsentBinding) -> bool:
         return self._secure_backend_available and binding.persistent
@@ -328,7 +454,9 @@ class ConsentStore:
                 raise ConsentStorageError("consent record key must be a string")
             record = _Record.from_value(value)
             if key != _record_key(record.binding):
-                raise ConsentStorageError("consent record key does not match its binding")
+                raise ConsentStorageError(
+                    "consent record key does not match its binding"
+                )
             records[key] = record
         return records
 
@@ -371,7 +499,9 @@ class ConsentStore:
             lock_path = self._path.with_name(f".{self._path.name}.lock")
             fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         except OSError as exc:
-            raise ConsentStorageError(f"cannot open consent metadata lock: {exc}") from exc
+            raise ConsentStorageError(
+                f"cannot open consent metadata lock: {exc}"
+            ) from exc
         deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
         locked = False
         try:
