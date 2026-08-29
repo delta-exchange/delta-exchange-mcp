@@ -306,6 +306,20 @@ def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
     assert backend.values == {}
 
 
+def test_delete_failure_after_removal_restores_the_active_record(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    backend.fail_delete_after.add("credential:india_prod:1")
+
+    with pytest.raises(BackendOperationError, match="could not delete credential"):
+        credentials.delete("india_prod", expected_revision=saved.revision)
+
+    assert credentials.get("india_prod") == saved
+    metadata = credentials.metadata("india_prod")
+    assert (metadata.revision, metadata.generation) == (1, 1)
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
 def test_a_metadata_failure_restores_a_deleted_secret():
     backend = FakeSecretBackend()
     metadata = FailingMetadata()

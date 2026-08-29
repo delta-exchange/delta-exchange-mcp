@@ -720,17 +720,16 @@ class CredentialStore:
                         exc,
                     )
                     return credential
-                restored = self._backend.get(old_name)
-                if restored != previous_payload:
-                    if previous_payload is None:
-                        raise CredentialStoreError(
-                            "credential retirement failed after removing the old record"
-                        ) from exc
-                    self._backend.set(old_name, previous_payload)
-                    if self._backend.get(old_name) != previous_payload:
-                        raise CredentialStoreError(
-                            "credential retirement failed and the old record could not be restored"
-                        ) from exc
+                if previous_payload is None:
+                    raise CredentialStoreError(
+                        "credential retirement failed after removing the old record"
+                    ) from exc
+                try:
+                    self._restore_record(old_name, previous_payload)
+                except Exception as restore_exc:
+                    raise CredentialStoreError(
+                        "credential retirement failed and the old record could not be restored"
+                    ) from restore_exc
                 try:
                     self._rollback_replace(
                         values,
@@ -762,7 +761,25 @@ class CredentialStore:
             return False
         name = _record_name(environment, previous.active_revision)
         payload = self._backend.get(name)
-        self._backend.delete(name)
+        if payload is None:
+            raise CredentialCorruptError(
+                f"credential metadata points to missing revision "
+                f"{previous.active_revision} for {environment}"
+            )
+        try:
+            self._backend.delete(name)
+        except Exception as exc:
+            try:
+                self._restore_record(name, payload)
+            except Exception as restore_exc:
+                raise CredentialStoreError(
+                    "credential deletion failed and its system-store record "
+                    "could not be restored"
+                ) from restore_exc
+            raise BackendOperationError(
+                f"could not delete credential revision "
+                f"{previous.active_revision} for {environment}"
+            ) from exc
         now = _now()
         values[environment] = _EnvironmentState(
             active_revision=None,
@@ -845,6 +862,15 @@ class CredentialStore:
             raise CredentialStoreError(
                 f"credential write failed and temporary record {name} could not be removed"
             ) from exc
+
+    def _restore_record(self, name: str, payload: str) -> None:
+        if self._backend.get(name) == payload:
+            return
+        self._backend.set(name, payload)
+        if self._backend.get(name) != payload:
+            raise CredentialStoreError(
+                f"credential record {name} could not be restored"
+            )
 
     def _rollback_replace(
         self,
