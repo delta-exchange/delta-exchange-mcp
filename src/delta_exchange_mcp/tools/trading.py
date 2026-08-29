@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any
@@ -49,6 +49,21 @@ _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
 _MUTATING_TOOL_META = {MUTATING_TOOL_META_KEY: True}
 _REVOKED_MESSAGE = "trading was disabled while this request was being prepared; no mutation was sent"
+_CHECK_FAILED_MESSAGE = "trading authorization could not be confirmed; no mutation was sent"
+
+FinalTradingCheck = Callable[[], bool]
+
+
+class FinalTradingCheckError(RuntimeError):
+    """The point-of-use authorization checker failed."""
+
+
+@dataclass(frozen=True)
+class TradeLease:
+    """The gate generation and final checker captured for one tool request."""
+
+    generation: int
+    final_check: FinalTradingCheck
 
 
 @dataclass
@@ -57,6 +72,18 @@ class TradeGate:
 
     generation: int = 0
     armed: bool = True
+    _final_check: ContextVar[FinalTradingCheck | None] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        self._final_check = ContextVar(
+            f"delta_trade_final_check_{id(self)}", default=None
+        )
+
+    def bind_final_check(self, checker: FinalTradingCheck | None) -> None:
+        """Bind a storage-backed checker to the current request task."""
+        self._final_check.set(checker)
 
     def arm(self) -> None:
         """Authorize future mutations after the request-scoped check succeeds."""
@@ -64,17 +91,27 @@ class TradeGate:
             self.generation += 1
         self.armed = True
 
-    def lease(self) -> int:
+    def lease(self) -> TradeLease:
         if not self.armed:
             raise RuntimeError(_REVOKED_MESSAGE)
-        return self.generation
+        checker = self._final_check.get() or self._in_memory_check
+        self._final_check.set(None)
+        return TradeLease(generation=self.generation, final_check=checker)
 
     def revoke(self) -> None:
         self.armed = False
         self.generation += 1
 
-    def accepts(self, lease: int | None) -> bool:
-        return self.armed and lease == self.generation
+    def accepts(self, lease: TradeLease | None) -> bool:
+        if not self.armed or lease is None or lease.generation != self.generation:
+            return False
+        try:
+            return lease.final_check() is True
+        except Exception as exc:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE) from exc
+
+    def _in_memory_check(self) -> bool:
+        return self.armed
 
 
 def _bs(value: bool | None) -> str | None:
@@ -188,7 +225,7 @@ def register(
     gate: TradeGate | None = None,
 ) -> None:
     gate = gate or TradeGate()
-    active_lease: ContextVar[int | None] = ContextVar(
+    active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
     _uid_cache: dict[str, int] = {}
@@ -318,11 +355,15 @@ def register(
             if log:
                 log.record(tool, payload, dry_run=True)
             return {"dry_run": True, "method": method, "path": path, "payload": payload}
-        if not gate.accepts(active_lease.get()):
+        sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
+        try:
+            accepted = gate.accepts(active_lease.get())
+        except FinalTradingCheckError:
+            raise RuntimeError(_CHECK_FAILED_MESSAGE) from None
+        if not accepted:
             if log:
                 log.record(tool, payload, error=_REVOKED_MESSAGE)
             raise RuntimeError(_REVOKED_MESSAGE)
-        sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
         try:
             result = await sender(path, payload, auth=True)
         except DeltaApiError as e:

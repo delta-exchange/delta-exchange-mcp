@@ -16,6 +16,7 @@ from delta_exchange_mcp.connection_app import VIEW_URI
 from delta_exchange_mcp.tools import account, trading
 
 Access = Literal["account", "trading"]
+FinalTradingCheck = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class AccessState:
     credentials_ready: bool
     trading_enabled: bool
     client_name: str
+    final_trading_check: FinalTradingCheck | None = None
 
 
 StateProvider = Callable[[Context], Awaitable[AccessState]]

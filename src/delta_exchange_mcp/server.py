@@ -198,6 +198,7 @@ def build_server(
             if access_state is not None
             else (await reconcile(session))[2]
         )
+        trade_gate.bind_final_check(current.final_trading_check)
         if current.credentials_ready and current.trading_enabled:
             trade_gate.arm()
             trade_audit = audit_log.configure(replace(client.config, mode="trade"))

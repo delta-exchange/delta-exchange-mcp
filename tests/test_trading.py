@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -201,6 +202,41 @@ async def test_trade_to_read_revokes_a_trade_still_in_preflight():
     assert [(request.method, str(request.url)) for request in requests] == [
         ("GET", f"{INDIA_TESTNET_REST}/products/BTCUSD"),
     ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_final_checker_error_fails_closed_without_audit_data():
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    )
+    client = _client()
+    audit = Mock(spec=audit_log.AuditLog)
+    gate = trading.TradeGate()
+
+    def failed_check() -> bool:
+        raise RuntimeError("private checker failure")
+
+    gate.bind_final_check(failed_check)
+    try:
+        with pytest.raises(
+            Exception, match="trading authorization could not be confirmed"
+        ):
+            await _call(
+                client,
+                "place_order",
+                audit=audit,
+                gate=gate,
+                product_id=27,
+                size=1,
+                side="buy",
+                order_type="market_order",
+            )
+    finally:
+        await client.aclose()
+
+    assert route.called is False
+    audit.record.assert_not_called()
 
 
 @pytest.mark.asyncio

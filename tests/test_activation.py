@@ -1,5 +1,6 @@
 """MCP 2026 discovery and request-scoped authorization behavior."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -257,6 +258,69 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
     assert second.structured_content["status"] == "authorization_complete"
     assert "pending trade was not sent" in second.content[0].text
     assert sent is False
+
+
+async def test_final_checker_blocks_a_mutation_when_consent_changes_during_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consent = True
+    state_checks: list[bool] = []
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    mutations: list[str] = []
+
+    async def access_state(ctx: Context) -> authorization.AccessState:
+        state_checks.append(consent)
+        return authorization.AccessState(
+            credentials_ready=True,
+            trading_enabled=True,
+            client_name=CLIENT_NAME,
+            final_trading_check=lambda: consent,
+        )
+
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    app = build_server(manage_url=manage_url, access_state=access_state)
+
+    async def get(
+        path: str, params: dict[str, Any] | None = None, *, auth: bool = False
+    ) -> dict[str, Any]:
+        assert path == "/products/BTCUSD"
+        lookup_started.set()
+        await release_lookup.wait()
+        return {"result": {"id": 27, "symbol": "BTCUSD", "tick_size": "0.1"}}
+
+    async def mutate(
+        path: str, payload: dict[str, Any], *, auth: bool = False
+    ) -> dict[str, Any]:
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(app.live_client, "get", get)
+    monkeypatch.setattr(app.live_client, "post", mutate)
+    monkeypatch.setattr(app.live_client, "put", mutate)
+    monkeypatch.setattr(app.live_client, "delete", mutate)
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "62000.07",
+    }
+
+    try:
+        async with connected(app, mode="2026-07-28") as client:
+            call = asyncio.create_task(client.call_tool("place_order", arguments))
+            await lookup_started.wait()
+            assert state_checks == [True]
+            consent = False
+            release_lookup.set()
+            result = await call
+    finally:
+        await app.close_live_client()
+
+    assert result.is_error is True
+    assert "trading was disabled" in result.content[0].text
+    assert mutations == []
 
 
 async def test_apps_result_opens_the_external_page_and_keeps_a_text_link() -> None:
