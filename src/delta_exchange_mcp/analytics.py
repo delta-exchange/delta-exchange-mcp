@@ -18,6 +18,7 @@ from mcp_types import (
 )
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
+from delta_exchange_mcp import request
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
 PREFIX = "X-Delta-MCP-"
@@ -137,14 +138,15 @@ def _legacy_models(
 
 
 def _snapshot(ctx: Context, tool: str) -> _Call:
+    reported = request.context_client(ctx)
     if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
         info, capabilities = _modern_models(ctx)
     else:
         info, capabilities = _legacy_models(ctx)
     return _Call(
-        client_name=info.name if info is not None else "",
-        client_version=info.version if info is not None else "",
-        title=(info.title or "")[:FIELD_LIMIT] if info is not None else "",
+        client_name=reported.name,
+        client_version=reported.version,
+        title=reported.title[:FIELD_LIMIT],
         description=(info.description or "")[:FIELD_LIMIT] if info is not None else "",
         website_url=(info.website_url or "")[:FIELD_LIMIT] if info is not None else "",
         icon_count=len(info.icons or ()) if info is not None else 0,

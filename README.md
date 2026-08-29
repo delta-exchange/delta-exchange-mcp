@@ -541,8 +541,8 @@ stay absent.
 
 Delta API requests carry a small set of headers that identify the MCP client and tool that
 caused the request. Delta uses these headers to measure client and tool usage. The client
-name is self-reported. It is an analytics label and never authorizes account access or
-trading.
+name is self-reported. The authorization layer uses its exact value to partition consent
+records, but the name is not proof of identity and cannot grant consent by itself.
 
 | Header | Value |
 |---|---|
