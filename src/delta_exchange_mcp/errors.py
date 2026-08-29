@@ -7,18 +7,18 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 # Documented in slate `_authentication.md`. Lookup of server error code → human hint.
+_INVALID_KEY_HINT = (
+    "API key not found. Prod and testnet keys are separate. Open Manage Connection and "
+    "select the environment where the key was created. If the status reports that the "
+    "environment is externally managed, correct the MCP launcher source."
+)
+
 _AUTH_HINTS: dict[str, str] = {
     "SignatureExpired": (
         "request signature expired (>5s drift). Sync your system clock via NTP."
     ),
-    "InvalidApiKey": (
-        "API key not found. Prod and testnet keys are separate — confirm DELTA_MCP_ENV "
-        "matches the dashboard the key was created on."
-    ),
-    "invalid_api_key": (
-        "API key not found. Prod and testnet keys are separate — confirm DELTA_MCP_ENV "
-        "matches the dashboard the key was created on."
-    ),
+    "InvalidApiKey": _INVALID_KEY_HINT,
+    "invalid_api_key": _INVALID_KEY_HINT,
     "UnauthorizedApiAccess": (
         "API key lacks permission for trading preferences. Update its account-data "
         "permissions in Delta API management. Current Delta documentation does not "

@@ -26,23 +26,33 @@ from delta_exchange_mcp.tools import account, market, trading
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
 _ENV_HELP = """\
-configuration (the non-secret settings below, from your MCP client or shared file):
-  DELTA_MCP_ENV         india_prod (default), india_testnet, india_devnet
+normal account setup:
+  Call setup_credentials from the MCP client. Manage Connection is the normal environment
+  selector and credential interface.
+
+advanced externally managed compatibility overrides:
+  DELTA_MCP_ENV         force india_prod, india_testnet, or india_devnet from the launcher
+  DELTA_API_KEY         externally managed process credential, used with DELTA_API_SECRET
+  DELTA_API_SECRET      externally managed process credential, used with DELTA_API_KEY
+  DELTA_MCP_MODE        ignored for authorization; browser trading consent is required
+
+non-secret diagnostics and paths:
   DELTA_MCP_DEBUG       1/true/yes/on to trace HTTP requests and responses to a file
   DELTA_MCP_DEBUG_FILE  override the debug log path
-  DELTA_MCP_AUDIT       off/false/0/no to disable the trade-mode audit log
+  DELTA_MCP_AUDIT       off/false/0/no to disable the trading audit log
   DELTA_MCP_AUDIT_FILE  override the audit log path
   DELTA_MCP_CONFIG_FILE override the shared settings file path
 
-API keys and secrets are managed in the browser and stored in the operating-system
-credential service. Existing complete DELTA_API_KEY and DELTA_API_SECRET process values
-remain supported as externally managed compatibility settings. DELTA_MCP_MODE never
-authorizes trading. Trading requires browser consent for the exact client name,
-environment, and credential revision.
+API keys and secrets are managed in the browser. The server uses the operating-system
+credential service when available. Otherwise it uses process memory and no plaintext
+fallback. Existing complete DELTA_API_KEY and DELTA_API_SECRET process values remain
+supported as externally managed compatibility settings. Manage Connection reports these
+overrides but cannot change their launcher source. Trading requires browser consent for the
+exact client name, environment, and credential revision.
 
-Prod and testnet API keys are separate; DELTA_MCP_ENV must match the dashboard the
-key was created on. The server speaks MCP over stdio and is normally launched by a
-client rather than by hand.
+Production and testnet API keys are separate. Select the environment where the key was
+created. The server speaks MCP over stdio and is normally launched by a client rather than
+by hand.
 """
 
 INSTRUCTIONS = """\

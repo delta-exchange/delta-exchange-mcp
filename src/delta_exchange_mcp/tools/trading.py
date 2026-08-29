@@ -772,10 +772,10 @@ def register(
         dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Close open positions in the scopes you set to true. Both flags default to false,
-        so you must explicitly opt into a scope — this never broadens beyond your request.
+        so you must explicitly select a scope. The tool does not broaden the scope.
 
-        Your user_id is required by the API and is resolved automatically from your profile
-        (fetched once and cached) — you do not pass it.
+        Your user_id is required by the API and is resolved automatically from your trading
+        preferences. The value is fetched once and cached, so you do not pass it.
         """
         if not (close_all_portfolio or close_all_isolated):
             raise ToolError(

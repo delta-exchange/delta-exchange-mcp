@@ -31,61 +31,20 @@ LONG_DESCRIPTION = (
     "Ask about Delta Exchange India in plain English: live prices, option chains, "
     "order books, funding and open-interest history, plus your own positions, orders, "
     "fills and balances.\n\n"
-    "**Read-only unless you change Mode.** Left at `read`, this cannot place, change or "
-    "cancel orders, and can never move funds. Set Mode to `trade` and it can place, edit "
-    "and cancel real orders on the environment you selected — there is no size limit, and "
-    "orders are sized in contracts rather than coins. Every mutation is written to an "
-    "audit log under `~/.delta-exchange-mcp/audit/`. Leave this at `read` unless you "
-    "specifically want an assistant trading your account.\n\n"
-    "**Both credential fields or neither.** A key without its matching secret is ignored "
-    "and you get market data only — the two are always used together. Trading additionally "
-    "needs a key with trading permission, not just Read Data.\n\n"
-    "**Market data needs no setup** — leave the API key and secret empty and everything "
-    "except your own account still works.\n\n"
-    "**To see your account**, create a key at delta.exchange under Account → API Keys with "
-    "the **Read Data** permission. Both halves are shown only once, at creation. Paste them "
-    "into Configure. Your key is stored by this app and is sent only to Delta's API, from "
-    "your own machine.\n\n"
-    "**Environment** must be `india_prod` for the real exchange, or `india_testnet` for the "
-    "practice site at demo.delta.exchange. A key only works against the site it was made on."
+    "**Market data needs no account connection.** Account calls open a short-lived browser "
+    "page when a connection is missing. Enter the API key and secret there. They do not pass "
+    "through the conversation or an MCP tool call. When available, the server stores them "
+    "in macOS Keychain, Windows Credential Manager, or Linux Secret Service. Otherwise it "
+    "keeps the connection and trading consent in process memory for that process. The server "
+    "does not use a plaintext fallback.\n\n"
+    "**Trading needs separate browser approval.** Trading tools stay visible so clients keep "
+    "one stable tool list. A dry run sends no mutation and needs no trading approval. A real "
+    "trading call opens the approval page when approval is missing. Approval does not execute "
+    "the pending trade. Submit a new call if the trade is still wanted.\n\n"
+    "Production trading can place real orders with no size cap. Orders are sized in contracts, "
+    "not coins. The approval page requires a separate production acknowledgement. By default, "
+    "every real mutation is written to an owner-only audit log."
 )
-
-# Claude Desktop renders each description twice: as help text under the label AND as the
-# input placeholder, where anything past ~60 characters is truncated mid-word. Keep these
-# short enough to read cleanly in both roles; the detail lives in LONG_DESCRIPTION.
-USER_CONFIG = {
-    "api_key": {
-        "type": "string",
-        "title": "API key",
-        "description": "Optional — leave empty for market data only.",
-        "sensitive": True,
-        "required": False,
-    },
-    "api_secret": {
-        "type": "string",
-        "title": "API secret",
-        "description": "Required if you filled in the key above.",
-        "sensitive": True,
-        "required": False,
-    },
-    "environment": {
-        "type": "string",
-        "title": "Environment",
-        "description": "india_prod (real) or india_testnet (practice).",
-        "default": "india_prod",
-        "required": True,
-    },
-    # There is no enum type in user_config — only string, number, boolean, directory and
-    # file — so this is a string the user edits, exactly like environment above. It
-    # defaults to read: arming order placement has to be a thing someone chose to type.
-    "mode": {
-        "type": "string",
-        "title": "Mode",
-        "description": "read (default), or trade to allow placing orders.",
-        "default": "read",
-        "required": True,
-    },
-}
 
 
 def project() -> dict:
@@ -130,66 +89,50 @@ def render_pyproject(proj: dict) -> str:
 
 
 async def tool_entries() -> list[dict[str, str]]:
-    """Introspect the server to list every tool the bundle can register.
+    """Introspect the server to list its stable tool registry.
 
-    Every DELTA_ variable is cleared before the ones that matter are set, so the manifest
-    depends only on the source being packaged and never on the shell the build ran in.
-    Forcing a named few was not enough: a developer with DELTA_MCP_DEBUG=1 exported got a
-    different manifest than CI produced, and CI then rejected it as stale. DELTA_MCP_ENV
-    leaked the same way, where an invalid value in the shell failed the build inside `load()`.
-
-    Every optional surface is then forced ON, because the declared list has to be the
-    *superset*. `tools_generated` is false, which promises the runtime never exposes anything
-    beyond this list, so anything a user can switch on has to already be in it:
-
-    * Trade mode, reached through the install form's Mode field.
-    * Debug, which registers `get_debug_status`. Nothing in the manifest declares
-      DELTA_MCP_DEBUG, and the manifest env is applied *over* the user's environment, so an
-      exported DELTA_MCP_DEBUG=1 reaches an installed bundle untouched — measured: 28 tools
-      registered against 41 declared, with `get_debug_status` registered but undeclared.
-
-    Declaring DELTA_MCP_DEBUG="" in the manifest would also stop that, but it would take
-    away the only way a bundle user can turn debug logging on at all — and that log is how
-    they capture wire-level evidence for a bug report, since a bundle has no config file to
-    edit. Listing the tool costs nothing by comparison: `tools_generated: false` promises a
-    ceiling, not an exact set, which is already how the 13 mutating tools are handled.
+    The manifest must not depend on credentials, trading consent, a developer's keyring, or
+    DELTA_ values inherited from the build shell. The in-memory stores below make the build
+    independent of all four. Runtime authorization happens when a tool is called and never
+    changes this list.
     """
     for name in [name for name in os.environ if name.startswith("DELTA_")]:
         del os.environ[name]
 
-    # One scratch directory for everything the introspection writes, removed on the way out.
-    # A bare mkdtemp is removed by nobody, so every build would leave a directory behind for
-    # the operating system to reap eventually — trading files left in the home directory for
-    # files left in /tmp, which is not the fix it looks like.
     with tempfile.TemporaryDirectory(prefix="mcpb-manifest-") as scratch:
         os.environ.update({
-            "DELTA_MCP_MODE": "trade",
-            "DELTA_MCP_ENV": "india_prod",
-            "DELTA_MCP_DEBUG": "1",
-            "DELTA_MCP_DEBUG_FILE": str(pathlib.Path(scratch) / "debug.log"),
-            "DELTA_API_KEY": "placeholder",
-            "DELTA_API_SECRET": "placeholder",
-            # Trade mode plus credentials is what opens the audit log, and listing tool
-            # names mutates nothing worth auditing. Left on, every manifest build dropped
-            # another empty file into ~/.delta-exchange-mcp/audit/, which is where 4,493
-            # of them came from.
             "DELTA_MCP_AUDIT": "off",
-            # Clearing the variables above is not enough for this one: cleared, it falls
-            # back to ~/.delta-exchange-mcp/config.env and the build reads the developer's
-            # own settings. Measured: a DELTA_MCP_DEBUG=1 line in that file put
-            # get_debug_status into the manifest by a second route, before this listed it.
-            # It also stops a build creating a file in a home directory it has no business
-            # touching.
             "DELTA_MCP_CONFIG_FILE": str(pathlib.Path(scratch) / "config.env"),
         })
         from delta_exchange_mcp import debug_log
+        from delta_exchange_mcp import store
+        from delta_exchange_mcp.auth.connection import ConnectionService
+        from delta_exchange_mcp.auth.consent import ConsentStore, MemoryConsentBackend
+        from delta_exchange_mcp.auth.store import (
+            CredentialSource,
+            CredentialStore,
+            MemoryMetadata,
+            MemorySecretBackend,
+        )
         from delta_exchange_mcp.server import build_server
 
+        service = ConnectionService.open(
+            credentials=CredentialStore(
+                MemorySecretBackend(),
+                MemoryMetadata(),
+                CredentialSource.MEMORY,
+            ),
+            consent=ConsentStore(
+                store.path().with_name("consent.json"),
+                secure_backend_available=False,
+                memory_backend=MemoryConsentBackend(),
+            ),
+        )
+        server = build_server(connection_service=service)
         try:
-            tools = await build_server().list_tools()
+            tools = await server.list_tools()
         finally:
-            # Debug is intentionally on for manifest introspection. Its FileHandler points
-            # inside scratch and must be closed before TemporaryDirectory removes it.
+            await server.close_live_client()
             debug_log.shutdown()
 
     return [
@@ -235,20 +178,10 @@ def render_manifest(proj: dict, tools: list[dict[str, str]]) -> dict:
                     "python",
                     "server/main.py",
                 ],
-                "env": {
-                    # Declared, not omitted. The host substitutes this from the form, whose
-                    # default is read, so an ambient DELTA_MCP_MODE=trade in the environment
-                    # the app was launched with cannot arm trading behind the user's back.
-                    "DELTA_MCP_MODE": "${user_config.mode}",
-                    "DELTA_MCP_ENV": "${user_config.environment}",
-                    "DELTA_API_KEY": "${user_config.api_key}",
-                    "DELTA_API_SECRET": "${user_config.api_secret}",
-                },
             },
         },
         "tools": tools,
         "tools_generated": False,
-        "user_config": USER_CONFIG,
         "compatibility": {
             "claude_desktop": ">=0.10.0",
             "platforms": ["darwin", "win32", "linux"],
