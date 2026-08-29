@@ -8,11 +8,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from mcp.server.mcpserver import Context
-from mcp_types import CLIENT_INFO_META_KEY, Implementation
-from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials as credential_check
+from delta_exchange_mcp import request
 from delta_exchange_mcp import setup
 from delta_exchange_mcp import store as legacy_store
 from delta_exchange_mcp.auth.consent import (
@@ -765,24 +764,8 @@ def _bind_config(
 
 def _client_identity(ctx: Context) -> tuple[str, str]:
     """Read the exact client-provided 2026 request identity from Context."""
-    try:
-        meta = ctx.request_context.meta
-    except ValueError:
-        return "", ""
-    raw = meta.get(CLIENT_INFO_META_KEY) if meta is not None else None
-    try:
-        info = raw if isinstance(raw, Implementation) else Implementation.model_validate(raw)
-    except (TypeError, ValueError):
-        if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
-            return "", ""
-        try:
-            params = ctx.session.client_params
-        except ValueError:
-            return "", ""
-        if params is None:
-            return "", ""
-        info = params.client_info
-    return info.name, info.version
+    client = request.context_client(ctx)
+    return client.name, client.version
 
 
 def _source_name(source: CredentialSource | None) -> str:
