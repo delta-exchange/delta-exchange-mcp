@@ -1,0 +1,471 @@
+import json
+import os
+import threading
+from contextlib import contextmanager
+
+import pytest
+from keyring.backend import KeyringBackend
+
+from delta_exchange_mcp.auth import store as auth_store
+from delta_exchange_mcp.auth.store import (
+    BackendOperationError,
+    BackendUnavailableError,
+    CredentialConflictError,
+    CredentialCorruptError,
+    CredentialSource,
+    CredentialState,
+    CredentialStore,
+    FileMetadata,
+    IncompleteCredentialError,
+    MemoryMetadata,
+    MigrationStatus,
+    SystemKeyringBackend,
+)
+
+
+class FakeSecretBackend:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+        self.deleted: list[str] = []
+        self.mismatch: set[str] = set()
+        self.fail_delete: set[str] = set()
+        self._lock = threading.RLock()
+
+    def get(self, name):
+        with self._lock:
+            if name in self.mismatch and name in self.values:
+                return "wrong readback"
+            return self.values.get(name)
+
+    def set(self, name, value):
+        with self._lock:
+            self.values[name] = value
+
+    def delete(self, name):
+        with self._lock:
+            if name in self.fail_delete:
+                self.fail_delete.remove(name)
+                raise BackendOperationError("delete failed")
+            self.values.pop(name, None)
+            self.deleted.append(name)
+
+
+class FailingMetadata:
+    def __init__(self):
+        self.inner = MemoryMetadata()
+        self.fail_next_write = False
+
+    @contextmanager
+    def lock(self):
+        with self.inner.lock():
+            yield
+
+    def read(self):
+        return self.inner.read()
+
+    def write(self, values):
+        if self.fail_next_write:
+            self.fail_next_write = False
+            raise auth_store.MetadataError("metadata write failed")
+        self.inner.write(values)
+
+
+def make_store(tmp_path, backend=None):
+    secret_backend = backend or FakeSecretBackend()
+    return (
+        CredentialStore(
+            secret_backend,
+            FileMetadata(tmp_path / "credentials.json"),
+            CredentialSource.OS_STORE,
+        ),
+        secret_backend,
+    )
+
+
+def test_replace_publishes_one_active_revision_without_secrets_in_metadata(tmp_path):
+    credentials, backend = make_store(tmp_path)
+
+    saved = credentials.replace(
+        "india_prod",
+        "the-api-key",
+        "the-api-secret",
+        state=CredentialState.VERIFIED,
+        account_id="account-123",
+        expected_revision=0,
+    )
+
+    assert saved.revision == 1
+    assert saved.generation == 1
+    assert saved.state is CredentialState.VERIFIED
+    assert saved.account_id == "account-123"
+    assert saved.validated_at
+    assert saved.source is CredentialSource.OS_STORE
+    assert credentials.get("india_prod") == saved
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+    body = (tmp_path / "credentials.json").read_text()
+    assert "the-api-key" not in body
+    assert "the-api-secret" not in body
+    metadata = json.loads(body)["environments"]["india_prod"]
+    assert metadata["active_revision"] == 1
+    assert metadata["generation"] == 1
+
+
+def test_rotation_advances_revision_and_generation_then_deletes_the_old_record(
+    tmp_path,
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+
+    second = credentials.replace(
+        "india_prod",
+        "new-key",
+        "new-secret",
+        expected_revision=first.revision,
+    )
+
+    assert (second.revision, second.generation) == (2, 2)
+    assert (second.api_key, second.api_secret) == ("new-key", "new-secret")
+    assert "credential:india_prod:1" not in backend.values
+    assert set(backend.values) == {"credential:india_prod:2"}
+
+
+def test_each_environment_has_its_own_active_record(tmp_path):
+    credentials, backend = make_store(tmp_path)
+
+    prod = credentials.replace("india_prod", "prod-key", "prod-secret")
+    testnet = credentials.replace("india_testnet", "test-key", "test-secret")
+
+    assert (prod.revision, testnet.revision) == (1, 1)
+    assert set(backend.values) == {
+        "credential:india_prod:1",
+        "credential:india_testnet:1",
+    }
+
+
+def test_a_stale_replace_never_writes_a_new_secret(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    credentials.replace("india_prod", "key", "secret")
+
+    with pytest.raises(CredentialConflictError):
+        credentials.replace(
+            "india_prod", "stale-key", "stale-secret", expected_revision=0
+        )
+
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+def test_a_failed_readback_removes_the_new_record_and_keeps_metadata_empty(tmp_path):
+    backend = FakeSecretBackend()
+    backend.mismatch.add("credential:india_prod:1")
+    credentials, _ = make_store(tmp_path, backend)
+
+    with pytest.raises(BackendOperationError, match="did not return"):
+        credentials.replace("india_prod", "key", "secret")
+
+    assert backend.values == {}
+    assert credentials.metadata("india_prod").revision is None
+
+
+def test_old_record_delete_failure_rolls_the_rotation_back(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    backend.fail_delete.add("credential:india_prod:1")
+
+    with pytest.raises(BackendOperationError, match="could not retire"):
+        credentials.replace(
+            "india_prod", "new-key", "new-secret", expected_revision=first.revision
+        )
+
+    current = credentials.get("india_prod")
+    assert current is not None
+    assert (current.revision, current.generation) == (1, 1)
+    assert (current.api_key, current.api_secret) == ("old-key", "old-secret")
+    assert set(backend.values) == {"credential:india_prod:1"}
+
+
+def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+
+    assert credentials.delete("india_prod", expected_revision=saved.revision) is True
+
+    metadata = credentials.metadata("india_prod")
+    assert credentials.get("india_prod") is None
+    assert metadata.revision is None
+    assert metadata.generation == 2
+    assert metadata.state is None
+    assert backend.values == {}
+
+
+def test_a_metadata_failure_restores_a_deleted_secret():
+    backend = FakeSecretBackend()
+    metadata = FailingMetadata()
+    credentials = CredentialStore(backend, metadata, CredentialSource.OS_STORE)
+    saved = credentials.replace("india_prod", "key", "secret")
+    metadata.fail_next_write = True
+
+    with pytest.raises(auth_store.MetadataError, match="metadata write failed"):
+        credentials.delete("india_prod", expected_revision=saved.revision)
+
+    current = credentials.get("india_prod")
+    assert current is not None
+    assert current.revision == 1
+    assert (current.api_key, current.api_secret) == ("key", "secret")
+
+
+def test_expected_revision_serializes_concurrent_rotations(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "first", "secret")
+    other_process_view = CredentialStore(
+        backend,
+        FileMetadata(tmp_path / "credentials.json"),
+        CredentialSource.OS_STORE,
+    )
+    barrier = threading.Barrier(3)
+    outcomes: list[int | str] = []
+
+    writers = (credentials, other_process_view)
+
+    def rotate_from(writer, key):
+        barrier.wait()
+        try:
+            saved = writer.replace(
+                "india_prod", key, "secret", expected_revision=first.revision
+            )
+            outcomes.append(saved.revision or 0)
+        except CredentialConflictError:
+            outcomes.append("conflict")
+
+    threads = [
+        threading.Thread(target=rotate_from, args=(writer, key))
+        for writer, key in zip(writers, ("a", "b"), strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcomes, key=str) == [2, "conflict"]
+    assert credentials.metadata("india_prod").generation == 2
+
+
+def test_missing_keyring_record_is_reported_as_corrupt_metadata(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    credentials.replace("india_prod", "key", "secret")
+    backend.values.clear()
+
+    with pytest.raises(CredentialCorruptError, match="missing revision 1"):
+        credentials.get("india_prod")
+
+
+def test_process_credentials_remain_external_and_have_no_persistent_revision(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    credentials.replace("india_prod", "stored-key", "stored-secret")
+
+    resolved = credentials.resolve(
+        "india_prod",
+        {"DELTA_API_KEY": "process-key", "DELTA_API_SECRET": "process-secret"},
+    )
+
+    assert resolved is not None
+    assert resolved.source is CredentialSource.PROCESS
+    assert resolved.externally_managed is True
+    assert resolved.revision is None
+    assert resolved.generation is None
+    assert "process-key" not in repr(resolved)
+    assert "process-secret" not in repr(resolved)
+
+
+def test_a_partial_process_pair_fails_without_falling_through_to_the_store(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    credentials.replace("india_prod", "stored-key", "stored-secret")
+
+    with pytest.raises(IncompleteCredentialError, match="must supply"):
+        credentials.resolve("india_prod", {"DELTA_API_KEY": "only-a-key"})
+
+
+def test_no_approved_system_backend_uses_process_local_memory(monkeypatch, tmp_path):
+    def unavailable():
+        raise BackendUnavailableError("no secure backend")
+
+    monkeypatch.setattr(auth_store, "SystemKeyringBackend", unavailable)
+    credentials = CredentialStore.open(tmp_path / "credentials.json")
+
+    saved = credentials.replace("india_prod", "key", "secret")
+
+    assert credentials.persistent is False
+    assert credentials.source is CredentialSource.MEMORY
+    assert credentials.fallback_reason == "no secure backend"
+    assert credentials.get("india_prod") == saved
+    assert not (tmp_path / "credentials.json").exists()
+
+
+def test_memory_fallback_never_removes_the_only_persistent_copy(tmp_path):
+    credentials = CredentialStore(
+        auth_store.MemorySecretBackend(),
+        MemoryMetadata(),
+        CredentialSource.MEMORY,
+    )
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=key\nDELTA_API_SECRET=secret\n"
+    config_path.write_text(original)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.UNAVAILABLE
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") is None
+
+
+class NullKeyring(KeyringBackend):
+    priority = 0
+
+    def get_password(self, service, username):
+        return None
+
+    def set_password(self, service, username, password):
+        return None
+
+    def delete_password(self, service, username):
+        return None
+
+
+class PlaintextKeyring(NullKeyring):
+    __module__ = "keyrings.alt.file"
+    priority = 1
+
+
+@pytest.mark.parametrize("backend", [NullKeyring(), PlaintextKeyring()])
+def test_null_and_plaintext_keyrings_are_rejected(backend):
+    with pytest.raises(BackendUnavailableError, match="not an approved"):
+        SystemKeyringBackend(backend)
+
+
+def test_successful_migration_removes_only_credential_lines(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    config_path = tmp_path / "config.env"
+    original = (
+        "# keep this comment\n"
+        'export DELTA_API_KEY = "legacy-key"\n'
+        "DELTA_API_SECRET='legacy-secret'\n"
+        "DELTA_MCP_ENV=india_testnet\n"
+        "DELTA_MCP_MODE=trade\n"
+        "UNRELATED=value\n"
+    )
+    config_path.write_text(original)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.MIGRATED
+    assert result.environment == "india_testnet"
+    assert result.credential is not None
+    assert result.credential.state is CredentialState.UNVERIFIED
+    assert (result.credential.api_key, result.credential.api_secret) == (
+        "legacy-key",
+        "legacy-secret",
+    )
+    assert config_path.read_text() == (
+        "# keep this comment\n"
+        "DELTA_MCP_ENV=india_testnet\n"
+        "DELTA_MCP_MODE=trade\n"
+        "UNRELATED=value\n"
+    )
+
+
+def test_migration_removes_a_multiline_quoted_secret_as_one_setting(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    config_path = tmp_path / "config.env"
+    config_path.write_text(
+        "DELTA_API_KEY=key\n"
+        "DELTA_API_SECRET='first line\nsecond line'\n"
+        "UNRELATED=value\n"
+    )
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.MIGRATED
+    assert config_path.read_text() == "UNRELATED=value\n"
+    saved = credentials.get("india_prod")
+    assert saved is not None
+    assert saved.api_secret == "first line\nsecond line"
+
+
+def test_migration_of_an_incomplete_pair_leaves_the_file_unchanged(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=only-a-key\nDELTA_MCP_MODE=trade\n"
+    config_path.write_text(original)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.INCOMPLETE
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") is None
+
+
+def test_migration_readback_failure_leaves_the_file_unchanged(tmp_path):
+    backend = FakeSecretBackend()
+    backend.mismatch.add("credential:india_prod:1")
+    credentials, _ = make_store(tmp_path, backend)
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=key\nDELTA_API_SECRET=secret\nDELTA_MCP_MODE=trade\n"
+    config_path.write_text(original)
+
+    with pytest.raises(BackendOperationError, match="did not return"):
+        credentials.migrate(config_path)
+
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") is None
+
+
+def test_migration_publish_failure_rolls_back_the_new_record(tmp_path, monkeypatch):
+    credentials, backend = make_store(tmp_path)
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=key\nDELTA_API_SECRET=secret\nDELTA_MCP_MODE=trade\n"
+    config_path.write_text(original)
+    real_replace = os.replace
+
+    def fail_config_publish(source, target):
+        if target == config_path:
+            raise OSError("read-only config")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(auth_store.os, "replace", fail_config_publish)
+
+    with pytest.raises(auth_store.MigrationError, match="read-only config"):
+        credentials.migrate(config_path)
+
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") is None
+    assert backend.values == {}
+
+
+def test_migration_never_overwrites_a_different_active_credential(tmp_path):
+    credentials, _ = make_store(tmp_path)
+    active = credentials.replace("india_prod", "current-key", "current-secret")
+    config_path = tmp_path / "config.env"
+    original = "DELTA_API_KEY=old-key\nDELTA_API_SECRET=old-secret\n"
+    config_path.write_text(original)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.CONFLICT
+    assert result.credential == active
+    assert config_path.read_text() == original
+    assert credentials.get("india_prod") == active
+
+
+def test_generation_is_a_metadata_only_read(tmp_path, monkeypatch):
+    credentials, backend = make_store(tmp_path)
+    credentials.replace("india_prod", "key", "secret")
+
+    monkeypatch.setattr(
+        backend,
+        "get",
+        lambda name: pytest.fail(f"generation read touched secret {name}"),
+    )
+
+    assert credentials.generation("india_prod") == 1
