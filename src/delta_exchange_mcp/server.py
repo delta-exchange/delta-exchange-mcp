@@ -9,6 +9,8 @@ from typing import Any
 import anyio
 from mcp.server.apps import Apps
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
 from delta_exchange_mcp import audit_log
@@ -127,11 +129,19 @@ class DeltaMCP(MCPServer):
         """Authorize through the public SDK call path before dispatching a tool."""
         if context is None:
             context = Context(mcp_server=self, subscriptions=self._subscriptions)
-        if self._before_tool_call is not None:
-            blocked = await self._before_tool_call(name, arguments, context)
-            if blocked is not None:
-                return blocked
-        return await super().call_tool(name, arguments, context)
+        try:
+            if self._before_tool_call is not None:
+                blocked = await self._before_tool_call(name, arguments, context)
+                if blocked is not None:
+                    return blocked
+            return await super().call_tool(name, arguments, context)
+        except (MCPError, ToolError):
+            raise
+        except Exception as exc:
+            # MCPServer.call_tool normally converts a tool crash to this safe wrapper.
+            # Our authorization hook runs before that SDK boundary, so preserve the same
+            # masking contract for failures in the hook.
+            raise UnexpectedToolError(f"Error executing tool {name}") from exc
 
     async def close_live_client(self) -> None:
         if self.live_client is not None:
