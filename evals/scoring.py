@@ -34,7 +34,9 @@ def _args_match(expected: dict, actual: dict) -> bool:
 def _fmt(exp: Expect) -> str:
     if not exp.args:
         return exp.name
-    args = ", ".join(f"{k}=<any>" if v is ANY else f"{k}={v!r}" for k, v in exp.args.items())
+    args = ", ".join(
+        f"{k}=<any>" if v is ANY else f"{k}={v!r}" for k, v in exp.args.items()
+    )
     return f"{exp.name}({args})"
 
 
@@ -61,9 +63,15 @@ def check(case: Case, transcript: Transcript) -> tuple[bool, list[str]]:
     return not failures, failures
 
 
-def judge(case: Case, transcript: Transcript, judge_model: str) -> dict[str, tuple[float | None, str]]:
+def judge(
+    case: Case, transcript: Transcript, judge_model: str
+) -> dict[str, tuple[float | None, str]]:
     os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "YES")
-    from deepeval.metrics import MCPTaskCompletionMetric, MCPUseMetric, MultiTurnMCPUseMetric
+    from deepeval.metrics import (
+        MCPTaskCompletionMetric,
+        MCPUseMetric,
+        MultiTurnMCPUseMetric,
+    )
     from deepeval.models import AnthropicModel
     from deepeval.test_case import ConversationalTestCase, LLMTestCase, Turn
     from deepeval.test_case.mcp import MCPServer, MCPToolCall
@@ -89,9 +97,9 @@ def judge(case: Case, transcript: Transcript, judge_model: str) -> dict[str, tup
                     result=CallToolResult(
                         content=[TextContent(type="text", text=text)],
                         # deepeval's multi-turn text builder reads
-                        # result.structuredContent["result"] unguarded
-                        structuredContent={"result": text},
-                        isError=c.raw.isError,
+                        # result.structured_content["result"] unguarded
+                        structured_content={"result": text},
+                        is_error=c.raw.is_error,
                     ),
                 )
             )
@@ -122,7 +130,10 @@ def judge(case: Case, transcript: Transcript, judge_model: str) -> dict[str, tup
                 )
             turns.append(Turn(role="assistant", content=rec.reply or "(no reply)"))
         test_case = ConversationalTestCase(turns=turns, mcp_servers=[server])
-        metrics = [MultiTurnMCPUseMetric(model=model), MCPTaskCompletionMetric(model=model)]
+        metrics = [
+            MultiTurnMCPUseMetric(model=model),
+            MCPTaskCompletionMetric(model=model),
+        ]
 
     scores: dict[str, tuple[float | None, str]] = {}
     for metric in metrics:
@@ -130,6 +141,6 @@ def judge(case: Case, transcript: Transcript, judge_model: str) -> dict[str, tup
         try:
             metric.measure(test_case)
             scores[name] = (metric.score, metric.reason or "")
-        except Exception as exc:  # judge errors are advisory, never fail the case
+        except Exception as exc:  # noqa: BLE001 - external judge errors are advisory
             scores[name] = (None, f"judge error: {exc}")
     return scores

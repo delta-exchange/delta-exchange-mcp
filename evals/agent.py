@@ -8,16 +8,17 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 # type-only so the dry-run boundary stays importable (and testable) from the
 # plain dev environment, which doesn't install the evals group
 if TYPE_CHECKING:
     import anthropic
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import get_default_environment, stdio_client
-from mcp.types import CallToolResult, Tool
+from mcp import StdioServerParameters
+from mcp.client import Client
+from mcp.client.stdio import get_default_environment
+from mcp.types import CallToolResult, Implementation, Tool
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,6 +37,16 @@ _SYSTEM = (
 )
 
 _RESULT_CHAR_CAP = 8000
+_CLIENT_INFO = Implementation(name="delta-mcp-evals", version="1")
+_MODERN_PROTOCOL = "2026-07-28"
+
+
+class ToolCaller(Protocol):
+    """The one MCP client operation used by the dry-run boundary."""
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> CallToolResult: ...
 
 
 def resolve_env() -> str:
@@ -46,7 +57,11 @@ def resolve_env() -> str:
 
 
 def mutating_tools(tools: Sequence[Tool]) -> frozenset[str]:
-    return frozenset(t.name for t in tools if "dry_run" in (t.inputSchema.get("properties") or {}))
+    return frozenset(
+        tool.name
+        for tool in tools
+        if "dry_run" in (tool.input_schema.get("properties") or {})
+    )
 
 
 @dataclass(frozen=True)
@@ -79,30 +94,46 @@ class Transcript:
         return self.turns[-1].reply if self.turns else ""
 
 
-@asynccontextmanager
-async def mcp_session(mode: str) -> AsyncIterator[ClientSession]:
+def server_environment() -> dict[str, str]:
+    """Build the safe child environment without legacy trading authorization."""
     # stdio_client replaces the child env wholesale when env= is given, so PATH/HOME
     # must be merged back in or `uv` won't resolve.
     env = {
         **get_default_environment(),
         "DELTA_MCP_ENV": resolve_env(),
-        "DELTA_MCP_MODE": mode,
     }
+    env.pop("DELTA_MCP_MODE", None)
     for key in ("DELTA_API_KEY", "DELTA_API_SECRET"):
         if os.environ.get(key):
             env[key] = os.environ[key]
+    return env
+
+
+@asynccontextmanager
+async def mcp_session() -> AsyncIterator[Client]:
+    """Connect through server/discover and require the current MCP protocol."""
     params = StdioServerParameters(
-        command="uv", args=["run", "delta-exchange-mcp"], env=env, cwd=str(REPO_ROOT)
+        command="uv",
+        args=["run", "delta-exchange-mcp"],
+        env=server_environment(),
+        cwd=str(REPO_ROOT),
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+    async with Client(
+        params,
+        mode="auto",
+        client_info=_CLIENT_INFO,
+    ) as client:
+        if client.protocol_version != _MODERN_PROTOCOL:
+            raise RuntimeError(
+                "evals require MCP 2026 server/discover; "
+                f"negotiated {client.protocol_version}"
+            )
+        yield client
 
 
 def _parse_result(res: CallToolResult) -> Any:
-    if res.structuredContent is not None:
-        return res.structuredContent
+    if res.structured_content is not None:
+        return res.structured_content
     text = "\n".join(c.text for c in res.content if getattr(c, "text", None))
     try:
         return json.loads(text)
@@ -110,21 +141,39 @@ def _parse_result(res: CallToolResult) -> Any:
         return text
 
 
-async def _call(session: ClientSession, mutating: frozenset[str], name: str, args: dict) -> ToolCall:
+async def _call(
+    session: ToolCaller,
+    mutating: frozenset[str],
+    name: str,
+    args: dict[str, Any],
+) -> ToolCall:
     wire_args = {**args, "dry_run": True} if name in mutating else args
     res = await session.call_tool(name, wire_args)
     parsed = _parse_result(res)
-    if name in mutating and not res.isError:
-        if not (isinstance(parsed, dict) and parsed.get("dry_run") is True):
-            raise RuntimeError(f"{name} did not honour dry_run, refusing to continue: {parsed!r}")
+    if (
+        name in mutating
+        and not res.is_error
+        and not (isinstance(parsed, dict) and parsed.get("dry_run") is True)
+    ):
+        raise RuntimeError(
+            f"{name} did not honour dry_run, refusing to continue: {parsed!r}"
+        )
     # Recorded args are the model's own (pre-forcing) — asserts and the judge
     # should score its intent, not the harness's safety override.
-    recorded = {k: v for k, v in args.items() if k != "dry_run"} if name in mutating else args
-    return ToolCall(name=name, args=recorded, result=parsed, raw=res, is_error=bool(res.isError))
+    recorded = (
+        {k: v for k, v in args.items() if k != "dry_run"} if name in mutating else args
+    )
+    return ToolCall(
+        name=name,
+        args=recorded,
+        result=parsed,
+        raw=res,
+        is_error=bool(res.is_error),
+    )
 
 
 async def run_case(
-    session: ClientSession,
+    session: Client,
     llm: anthropic.AsyncAnthropic,
     prompts: Sequence[str],
     *,
@@ -134,8 +183,12 @@ async def run_case(
     tool_list = (await session.list_tools()).tools
     mutating = mutating_tools(tool_list)
     anthropic_tools = [
-        {"name": t.name, "description": t.description or "", "input_schema": t.inputSchema}
-        for t in tool_list
+        {
+            "name": tool.name,
+            "description": tool.description or "",
+            "input_schema": tool.input_schema,
+        }
+        for tool in tool_list
     ]
 
     messages: list[dict] = []
@@ -165,7 +218,9 @@ async def run_case(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(call.result, default=str)[:_RESULT_CHAR_CAP],
+                        "content": json.dumps(call.result, default=str)[
+                            :_RESULT_CHAR_CAP
+                        ],
                         "is_error": call.is_error,
                     }
                 )

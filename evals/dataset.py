@@ -46,7 +46,12 @@ CASES: tuple[Case, ...] = (
         id="candles_basic",
         mode="read",
         prompts=("Give me 15-minute candles for BTCUSD covering the last day.",),
-        expect=(Expect("get_candles", {"symbol": "BTCUSD", "resolution": ANY, "start": ANY, "end": ANY}),),
+        expect=(
+            Expect(
+                "get_candles",
+                {"symbol": "BTCUSD", "resolution": ANY, "start": ANY, "end": ANY},
+            ),
+        ),
         forbid=frozenset({"get_mark_price_history"}),
     ),
     Case(
@@ -181,8 +186,10 @@ CASES: tuple[Case, ...] = (
         id="post_only_limit",
         mode="trade",
         prompts=(
-            "Place a limit buy for 1 contract of BTCUSD at 50000, "
-            "and make sure it never takes liquidity.",
+            (
+                "Place a limit buy for 1 contract of BTCUSD at 50000, "
+                "and make sure it never takes liquidity."
+            ),
         ),
         expect=(
             Expect(
@@ -202,8 +209,10 @@ CASES: tuple[Case, ...] = (
         id="bracket_on_position",
         mode="trade",
         prompts=(
-            "I'm long 5 contracts of ETHUSD. Protect the position with "
-            "a take-profit at 3000 and a stop-loss at 2000.",
+            (
+                "I'm long 5 contracts of ETHUSD. Protect the position with "
+                "a take-profit at 3000 and a stop-loss at 2000."
+            ),
         ),
         expect=(
             Expect(
@@ -218,8 +227,10 @@ CASES: tuple[Case, ...] = (
         id="entry_with_bracket",
         mode="trade",
         prompts=(
-            "Buy 1 contract of BTCUSD at market and attach a stop-loss at 60000 "
-            "and a take-profit at 70000 to the entry.",
+            (
+                "Buy 1 contract of BTCUSD at market and attach a stop-loss at 60000 "
+                "and a take-profit at 70000 to the entry."
+            ),
         ),
         expect=(
             Expect(
@@ -260,22 +271,28 @@ CASES: tuple[Case, ...] = (
         id="margin_add",
         mode="trade",
         prompts=("Add 5 USD of margin to my position on product 27.",),
-        expect=(Expect("adjust_position_margin", {"product_id": 27, "delta_margin": ANY}),),
+        expect=(
+            Expect("adjust_position_margin", {"product_id": 27, "delta_margin": ANY}),
+        ),
         forbid=frozenset({"set_product_leverage"}),
     ),
     Case(
         id="auto_topup_on",
         mode="trade",
         prompts=("Turn on auto top-up for my position on product 27.",),
-        expect=(Expect("configure_auto_topup", {"product_id": 27, "auto_topup": True}),),
+        expect=(
+            Expect("configure_auto_topup", {"product_id": 27, "auto_topup": True}),
+        ),
         forbid=frozenset({"adjust_position_margin"}),
     ),
     Case(
         id="batch_not_single",
         mode="trade",
         prompts=(
-            "Place two limit buys on BTCUSD in one shot: "
-            "1 contract at 50000 and 1 contract at 49000.",
+            (
+                "Place two limit buys on BTCUSD in one shot: "
+                "1 contract at 50000 and 1 contract at 49000."
+            ),
         ),
         expect=(Expect("place_batch_orders"),),
         forbid=frozenset({"place_order"}),
@@ -300,7 +317,12 @@ CASES: tuple[Case, ...] = (
             Expect("get_ticker", {"symbol": "BTCUSD"}),
             Expect(
                 "place_order",
-                {"side": "sell", "order_type": "market_order", "size": 2, "reduce_only": True},
+                {
+                    "side": "sell",
+                    "order_type": "market_order",
+                    "size": 2,
+                    "reduce_only": True,
+                },
             ),
         ),
         judge=True,
@@ -312,8 +334,10 @@ CASES: tuple[Case, ...] = (
             "Do I have an open ETHUSD position?",
             # unconditional instruction: devnet accounts are usually flat, and a
             # correct agent refuses to protect a position that doesn't exist
-            "Either way, set the protection up now: place a stop-loss bracket "
-            "at 2000 on ETHUSD.",
+            (
+                "Either way, set the protection up now: place a stop-loss bracket "
+                "at 2000 on ETHUSD."
+            ),
         ),
         expect=(Expect("place_bracket_order", {"stop_loss_order": ANY}),),
         forbid=frozenset({"place_order"}),

@@ -2,9 +2,13 @@
 call_tool boundary and the dry-run echo is verified."""
 
 import pytest
-from mcp.types import CallToolResult, TextContent, Tool
-
-from evals.agent import _call, mutating_tools
+from delta_exchange_mcp.client import DeltaClient
+from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.server import DeltaMCP
+from delta_exchange_mcp.tools import trading
+from evals.agent import _call, mutating_tools, server_environment
+from mcp.client import Client
+from mcp.types import CallToolResult, Implementation, TextContent, Tool
 
 
 class FakeSession:
@@ -18,11 +22,11 @@ class FakeSession:
 
 
 def _tool(name, properties):
-    return Tool(name=name, inputSchema={"type": "object", "properties": properties})
+    return Tool(name=name, input_schema={"type": "object", "properties": properties})
 
 
 def _echo(payload):
-    return CallToolResult(content=[], structuredContent=payload, isError=False)
+    return CallToolResult(content=[], structured_content=payload, is_error=False)
 
 
 MUTATING = frozenset({"place_order"})
@@ -34,6 +38,50 @@ def test_mutating_set_derived_from_dry_run_property():
         _tool("get_ticker", {"symbol": {}}),
     ]
     assert mutating_tools(tools) == {"place_order"}
+
+
+def test_child_environment_does_not_export_legacy_trading_mode(monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_testnet")
+    monkeypatch.setenv("DELTA_MCP_MODE", "trade")
+
+    assert "DELTA_MCP_MODE" not in server_environment()
+
+
+async def test_modern_discovery_lists_every_trade_tool_without_consent(
+    monkeypatch,
+):
+    app = DeltaMCP()
+    delta = DeltaClient(Config(env="india_testnet", base_url=INDIA_TESTNET_REST))
+    trading.register(app, delta, gate=trading.TradeGate(armed=False))
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("dry-run evaluation sent a mutation request")
+
+    monkeypatch.setattr(delta, "post", fail_if_called)
+    try:
+        async with Client(
+            app,
+            mode="auto",
+            client_info=Implementation(name="delta-mcp-evals", version="1"),
+        ) as client:
+            tools = (await client.list_tools(cache_mode="refresh")).tools
+            result = await client.call_tool(
+                "place_order",
+                {
+                    "product_symbol": "BTCUSD",
+                    "size": 1,
+                    "side": "buy",
+                    "order_type": "market_order",
+                    "dry_run": True,
+                },
+            )
+            protocol_version = client.protocol_version
+    finally:
+        await delta.aclose()
+
+    assert protocol_version == "2026-07-28"
+    assert mutating_tools(tools) == trading.TOOL_NAMES
+    assert result.structured_content["dry_run"] is True
 
 
 async def test_explicit_dry_run_false_is_overridden():
@@ -54,8 +102,10 @@ async def test_success_without_dry_run_echo_is_rejected():
 async def test_error_results_skip_the_echo_check():
     session = FakeSession(
         CallToolResult(
-            content=[TextContent(type="text", text="delta api error: insufficient_margin")],
-            isError=True,
+            content=[
+                TextContent(type="text", text="delta api error: insufficient_margin")
+            ],
+            is_error=True,
         )
     )
     call = await _call(session, MUTATING, "place_order", {"size": 1})

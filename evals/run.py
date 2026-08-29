@@ -5,8 +5,9 @@ Usage:
     uv run --group evals python -m evals.run --case ticker_basic --no-judge
     uv run --group evals python -m evals.run                    # full run, costs tokens
 
-Requires ANTHROPIC_API_KEY; account/trade cases additionally need testnet
-DELTA_API_KEY/DELTA_API_SECRET. Never run in CI.
+Requires ANTHROPIC_API_KEY. Account-data cases can use a complete testnet
+DELTA_API_KEY/DELTA_API_SECRET process pair. Trading calls are always dry runs and do not
+need trading consent. Never run in CI.
 """
 
 import argparse
@@ -14,7 +15,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anthropic
@@ -29,14 +30,37 @@ REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--case", action="append", dest="cases", metavar="ID", help="run only this case (repeatable)")
-    p.add_argument("--mode", choices=["read", "trade"], help="run only cases of this mode")
-    p.add_argument("--no-judge", action="store_true", help="skip DeepEval LLM-judge scoring")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--case",
+        action="append",
+        dest="cases",
+        metavar="ID",
+        help="run only this case (repeatable)",
+    )
+    p.add_argument(
+        "--mode", choices=["read", "trade"], help="run only cases of this mode"
+    )
+    p.add_argument(
+        "--no-judge", action="store_true", help="skip DeepEval LLM-judge scoring"
+    )
     p.add_argument("--list", action="store_true", help="list case ids and exit")
-    p.add_argument("--model", default=DEFAULT_MODEL, help=f"agent model (default {DEFAULT_MODEL})")
-    p.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL, help=f"judge model (default {DEFAULT_JUDGE_MODEL})")
-    p.add_argument("--json", dest="json_path", metavar="PATH", help="report path (default evals/reports/eval-<ts>.json)")
+    p.add_argument(
+        "--model", default=DEFAULT_MODEL, help=f"agent model (default {DEFAULT_MODEL})"
+    )
+    p.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help=f"judge model (default {DEFAULT_JUDGE_MODEL})",
+    )
+    p.add_argument(
+        "--json",
+        dest="json_path",
+        metavar="PATH",
+        help="report path (default evals/reports/eval-<ts>.json)",
+    )
     p.add_argument("--no-report", action="store_true", help="don't write a JSON report")
     return p.parse_args()
 
@@ -55,27 +79,45 @@ def select_cases(args: argparse.Namespace) -> list[Case]:
 
 
 async def run_mode_group(
-    mode: str, cases: list[Case], llm: anthropic.AsyncAnthropic, args: argparse.Namespace
+    mode: str,
+    cases: list[Case],
+    llm: anthropic.AsyncAnthropic,
+    args: argparse.Namespace,
 ) -> list[CaseResult]:
     results = []
-    async with agent_mod.mcp_session(mode) as session:
-        available = {t.name for t in (await session.list_tools()).tools}
+    async with agent_mod.mcp_session() as session:
+        available = {
+            tool.name for tool in (await session.list_tools(cache_mode="refresh")).tools
+        }
         for case in cases:
             missing = {e.name for e in case.expect} - available
             if missing:
                 results.append(
                     CaseResult(
-                        case_id=case.id, mode=mode, passed=False,
-                        skipped=f"tools unavailable (creds/mode?): {', '.join(sorted(missing))}",
+                        case_id=case.id,
+                        mode=mode,
+                        passed=False,
+                        failures=[
+                            (
+                                "stable discovery omitted required tool(s): "
+                                f"{', '.join(sorted(missing))}"
+                            )
+                        ],
                     )
                 )
                 continue
             print(f"  running {case.id} ...", flush=True)
-            transcript = await agent_mod.run_case(session, llm, case.prompts, model=args.model)
+            transcript = await agent_mod.run_case(
+                session, llm, case.prompts, model=args.model
+            )
             passed, failures = check(case, transcript)
             result = CaseResult(
-                case_id=case.id, mode=mode, passed=passed, failures=failures,
-                calls=transcript.calls, final_text=transcript.final_text,
+                case_id=case.id,
+                mode=mode,
+                passed=passed,
+                failures=failures,
+                calls=transcript.calls,
+                final_text=transcript.final_text,
             )
             if case.judge and not args.no_judge:
                 result.judge_scores = judge(case, transcript, args.judge_model)
@@ -110,10 +152,14 @@ def print_table(results: list[CaseResult]) -> None:
 
 
 def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
-    path = Path(args.json_path) if args.json_path else REPORTS_DIR / f"eval-{datetime.now():%Y%m%d-%H%M%S}.json"
+    path = (
+        Path(args.json_path)
+        if args.json_path
+        else REPORTS_DIR / f"eval-{datetime.now(UTC):%Y%m%d-%H%M%S}.json"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "env": agent_mod.resolve_env(),
         "agent_model": args.model,
         "judge_model": None if args.no_judge else args.judge_model,
@@ -124,7 +170,10 @@ def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
                 "passed": r.passed,
                 "skipped": r.skipped,
                 "failures": r.failures,
-                "judge_scores": {k: {"score": s, "reason": why} for k, (s, why) in r.judge_scores.items()},
+                "judge_scores": {
+                    k: {"score": s, "reason": why}
+                    for k, (s, why) in r.judge_scores.items()
+                },
                 "calls": [
                     {
                         "name": c.name,
