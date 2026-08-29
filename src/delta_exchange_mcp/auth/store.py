@@ -555,6 +555,8 @@ class CredentialStore:
     def migrate(self, config_path: Path) -> MigrationResult:
         """Move one complete legacy file credential into this store."""
         with _file_lock(config_path):
+            if config_path.is_symlink():
+                return MigrationResult(MigrationStatus.UNAVAILABLE, "")
             try:
                 original = config_path.read_text()
             except FileNotFoundError:
@@ -817,11 +819,6 @@ class CredentialStore:
         revision = previous.active_revision
         name = _record_name(environment, revision)
         payload = self._backend.get(name)
-        if payload is None:
-            raise CredentialCorruptError(
-                f"credential metadata points to missing revision "
-                f"{revision} for {environment}"
-            )
 
         tombstone = _EnvironmentState(
             active_revision=None,
@@ -832,10 +829,17 @@ class CredentialStore:
             created_at="",
             updated_at=_now(),
             validated_at="",
-            pending_revisions=(*previous.pending_revisions, revision),
+            pending_revisions=(
+                previous.pending_revisions
+                if payload is None
+                else (*previous.pending_revisions, revision)
+            ),
         )
         values[environment] = tombstone
         self._metadata.write(values)
+
+        if payload is None:
+            return True
 
         try:
             self._backend.delete(name)

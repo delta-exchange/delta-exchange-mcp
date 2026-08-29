@@ -532,6 +532,24 @@ def test_missing_keyring_record_is_reported_as_corrupt_metadata(tmp_path):
         credentials.get("india_prod")
 
 
+def test_disconnect_repairs_metadata_for_an_already_missing_keyring_record(tmp_path):
+    credentials, backend = make_store(tmp_path)
+    saved = credentials.replace("india_prod", "key", "secret")
+    backend.values.clear()
+
+    deleted = credentials.delete(
+        "india_prod",
+        expected_revision=saved.revision,
+        expected_generation=saved.generation,
+    )
+
+    assert deleted is True
+    assert credentials.get("india_prod") is None
+    metadata = credentials.metadata("india_prod")
+    assert (metadata.revision, metadata.generation) == (None, 2)
+    assert metadata.pending_revisions == ()
+
+
 def test_process_credentials_remain_external_and_have_no_persistent_revision(tmp_path):
     credentials, _ = make_store(tmp_path)
     credentials.replace("india_prod", "stored-key", "stored-secret")
@@ -686,6 +704,27 @@ def test_successful_migration_removes_only_credential_lines(tmp_path):
         "DELTA_MCP_MODE=trade\n"
         "UNRELATED=value\n"
     )
+
+
+def test_migration_rejects_a_symlink_without_leaving_secrets_in_its_target(
+    tmp_path,
+) -> None:
+    credentials, backend = make_store(tmp_path)
+    target = tmp_path / "real-config.env"
+    target.write_text(
+        "DELTA_API_KEY=legacy-key\n"
+        "DELTA_API_SECRET=legacy-secret\n"
+        "DELTA_MCP_ENV=india_prod\n"
+    )
+    config_path = tmp_path / "config.env"
+    config_path.symlink_to(target)
+
+    result = credentials.migrate(config_path)
+
+    assert result.status is MigrationStatus.UNAVAILABLE
+    assert "DELTA_API_KEY=legacy-key" in target.read_text()
+    assert "DELTA_API_SECRET=legacy-secret" in target.read_text()
+    assert backend.values == {}
 
 
 def test_migration_removes_a_multiline_quoted_secret_as_one_setting(tmp_path):
