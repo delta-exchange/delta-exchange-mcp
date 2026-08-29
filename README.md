@@ -123,7 +123,7 @@ of the one above it:
 | Tier | You set | Unlocks | Audit-logged |
 |---|---|---|---|
 | Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices | — |
-| Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, profile | — |
+| Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, preferences | — |
 | Trading | a key plus `DELTA_MCP_MODE=trade` in one client's config | Place / edit / cancel orders, brackets, leverage, margin, close-all | Yes |
 
 A key without its matching secret is ignored and you stay on market data — the two are

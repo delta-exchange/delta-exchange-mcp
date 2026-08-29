@@ -113,7 +113,7 @@ class DeltaClient:
     async def pin(self) -> AsyncIterator[None]:
         """Keep a multi-request operation on one destination and signing identity.
 
-        A trading tool may await a product or profile lookup before sending its mutation.
+        A trading tool may await a product or account lookup before sending its mutation.
         Reconciliation can happen during that await; task-local pinning prevents the later
         request from jumping to the newly rebound account.
         """

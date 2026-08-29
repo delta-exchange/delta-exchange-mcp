@@ -612,7 +612,7 @@ _TEMPLATE = """<!DOCTYPE html>
       // fields, because what they say is "saved, and here is what to fix".
       if (status === "saved" && (payload.account || payload.mode_updated)) {
         doneWho.textContent = payload.account
-          ? "Connected as " + payload.account
+          ? "Connected to account " + payload.account
           : "Access mode updated";
         doneWhere.textContent = "Saved to " + (payload.path || "this computer");
         doneNext.textContent = payload.next_step || "";
@@ -1084,15 +1084,14 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
             return common | {
                 "status": "unverified",
                 "message": (
-                    f"Saved to {store.path()}, but Delta could not be reached to check "
+                    f"Saved to {store.path()}, but Delta could not verify "
                     f"it. {result.detail} {follow_up}"
                 ),
             }
 
-        # The account email is included because it is the only signal that distinguishes
-        # "saved" from "saved the wrong account's key", and it is not a new disclosure:
-        # any assistant with these credentials can read it from the profile endpoint.
-        who = f" as {result.detail}" if result.detail else ""
+        # The account id is the only API-key identity Delta now exposes. Include it so the
+        # user can distinguish "saved" from "saved the wrong account's key".
+        who = f" to account {result.detail}" if result.detail else ""
         # The same facts twice: as fields, because the view renders them as its own
         # connected state rather than printing a paragraph, and as one sentence, because
         # that is what a client without a view has to show.

@@ -21,6 +21,7 @@ from pydantic import Field
 
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
+from delta_exchange_mcp.identity import fetch_account_identity
 from delta_exchange_mcp.errors import DeltaApiError
 
 logger = logging.getLogger("delta_exchange_mcp")
@@ -285,12 +286,7 @@ def register(
 
     async def _user_id() -> int:
         if "id" not in _uid_cache:
-            prof = await client.get("/profile", auth=True)
-            inner = prof.get("result", prof) if isinstance(prof, dict) else {}
-            uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
-            if uid is None:
-                raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
+            _uid_cache["id"] = (await fetch_account_identity(client)).user_id
         return _uid_cache["id"]
 
     async def _finish(
@@ -685,8 +681,8 @@ def register(
         """Close open positions in the scopes you set to true. Both flags default to false,
         so you must explicitly opt into a scope — this never broadens beyond your request.
 
-        Your user_id is required by the API and is resolved automatically from your profile
-        (fetched once and cached) — you do not pass it.
+        Your user_id is required by the API and is resolved automatically from your trading
+        preferences (fetched once and cached) — you do not pass it.
         """
         if not (close_all_portfolio or close_all_isolated):
             raise ValueError("set at least one of close_all_portfolio or close_all_isolated to true")

@@ -16,6 +16,7 @@ from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import BASE_URLS, DEFAULT_MODE, Config, load, mode_key
 from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure
+from delta_exchange_mcp.identity import InvalidIdentityResponse, fetch_account_identity
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ async def check(env: str, key: str, secret: str) -> Check:
     cfg = Config(env=env, base_url=BASE_URLS[env], api_key=key, api_secret=secret)  # type: ignore[arg-type]
     client = DeltaClient(cfg)
     try:
-        profile = await client.get("/profile", auth=True)
+        identity = await fetch_account_identity(client)
     except DeltaApiError as exc:
         return Check(
             ok=False,
@@ -96,14 +97,10 @@ async def check(env: str, key: str, secret: str) -> Check:
         )
     except httpx.HTTPError as exc:
         return Check(ok=False, reachable=False, detail=f"could not reach Delta: {exc}")
+    except InvalidIdentityResponse as exc:
+        return Check(ok=False, reachable=False, detail=f"invalid account response: {exc}")
     else:
-        # The client hands back Delta's envelope rather than unwrapping it, so the account
-        # lives under "result". Reading the top level instead silently yields no name at
-        # all, which is the one thing that distinguishes this from saving the wrong
-        # account's key.
-        body = profile.get("result") if isinstance(profile, dict) else None
-        who = str(body.get("email") or body.get("id") or "") if isinstance(body, dict) else ""
-        return Check(ok=True, reachable=True, detail=who)
+        return Check(ok=True, reachable=True, detail=str(identity.user_id))
     finally:
         await client.aclose()
 

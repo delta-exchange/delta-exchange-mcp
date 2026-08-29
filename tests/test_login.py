@@ -41,7 +41,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
         pass
 
     monkeypatch.setattr("delta_exchange_mcp.client.asyncio.sleep", no_sleep)
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             status,
             json={"success": False, "error": {"code": code}},
@@ -58,7 +58,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
 @respx.mock
 async def test_api_key_rejection_is_a_credential_rejection():
     """A documented authentication failure is decisive and must prevent a save."""
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             401,
             json={"success": False, "error": {"code": "InvalidApiKey"}},

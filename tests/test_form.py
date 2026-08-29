@@ -286,7 +286,7 @@ async def test_an_unknown_environment_is_refused(server, monkeypatch):
 async def test_a_verified_key_is_saved_with_its_environment(server, monkeypatch):
     """The environment is part of what makes the key work, so it is written with it."""
     monkeypatch.setattr(
-        credentials, "check", checking(ok=True, reachable=True, detail="someone@delta.exchange")
+        credentials, "check", checking(ok=True, reachable=True, detail="57354187")
     )
     structured, _ = await save(await opened(server))
     assert structured["status"] == "saved"
@@ -305,18 +305,18 @@ async def test_a_clean_save_reports_its_facts_as_fields_not_only_as_a_sentence(
     to show, and neither may ever carry the key or the secret.
     """
     monkeypatch.setattr(
-        credentials, "check", checking(ok=True, reachable=True, detail="someone@delta.exchange")
+        credentials, "check", checking(ok=True, reachable=True, detail="57354187")
     )
     structured, _ = await save(await opened(server))
 
-    assert structured["account"] == "someone@delta.exchange"
+    assert structured["account"] == "57354187"
     assert structured["path"] == str(store.path())
     # This fixture registers the form with no `activate`, which is the branch that still
     # needs a restart; `test_activation.py` covers the one that does not.
     assert structured["next_step"] == (
         "Restart this client to use your account. Trading stays off for this client."
     )
-    assert "someone@delta.exchange" in structured["message"]
+    assert "57354187" in structured["message"]
 
     blob = json.dumps(structured)
     assert KEY not in blob and SECRET not in blob
@@ -339,7 +339,7 @@ async def test_the_credentials_never_appear_in_anything_the_tool_returns(server,
     a frame rather than into the chat.
     """
     for check in (
-        checking(ok=True, reachable=True, detail="someone@delta.exchange"),
+        checking(ok=True, reachable=True, detail="57354187"),
         checking(ok=False, reachable=True, detail="delta api error: InvalidApiKey"),
         checking(ok=False, reachable=False, detail="timeout"),
     ):

@@ -312,8 +312,8 @@ async def test_batch_cap_enforced():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
+    preferences = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 999}})
     )
     close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -324,7 +324,7 @@ async def test_close_all_fetches_and_caches_user_id():
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
 
-    assert profile.call_count == 1  # cached after first fetch
+    assert preferences.call_count == 1  # cached after first fetch
     assert close.call_count == 2
     assert b'"user_id":999' in close.calls[0].request.content
 
@@ -548,8 +548,8 @@ async def test_close_all_requires_a_scope():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_explicit_scope_not_broadened():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 7}})
     )
     route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})

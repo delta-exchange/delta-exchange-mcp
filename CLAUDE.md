@@ -72,7 +72,7 @@ Three things here are load-bearing:
 
 ### Auth surface registration
 
-`tools/account.py` exposes the authenticated read-only tools (positions / margined-positions / wallet-balances / wallet-transactions / fills / bulk-fills-export / open-orders / order-history / order-by-id / product-leverage / trading-stats / trading-preferences / profile). All call `client.get(..., auth=True)`.
+`tools/account.py` exposes the authenticated read-only tools (positions / margined-positions / wallet-balances / wallet-transactions / fills / bulk-fills-export / open-orders / order-history / order-by-id / product-leverage / trading-stats / trading-preferences). All call `client.get(..., auth=True)`.
 
 `server.build_server()` registers them only when both creds are present. Without creds, the server runs in pure-public mode — same behaviour as before this surface existed.
 
@@ -81,7 +81,8 @@ Three things here are load-bearing:
 Three front-ends fill one file, `~/.delta-exchange-mcp/config.env`:
 
 - `store.py` owns the file — `path/read/ensure/write/insecure_permissions`. `ensure` creates it `0600` from a commented `TEMPLATE` on first run; `write` goes through dotenv's `set_key` so comments and unrelated settings survive. `config.setting(name)` resolves the process environment first and this file second, with empty meaning unanswered (a bundle substitutes every declared variable whether or not the field was filled).
-- `credentials.py` is the shared domain: `check(env, key, secret)` makes one `/profile` call, and `save(...)` writes the key, secret and environment together. Neither front-end owns these. `Check.code` carries Delta's own error code beside the rendered message so a caller can branch on which failure it was without matching on that message's text.
+- `identity.py` owns the API-key account identity: `fetch_account_identity(client)` validates `result.user_id` from `/users/trading_preferences`. Credential checks, the account tool, and close-all resolution share it so the endpoint and response contract cannot drift.
+- `credentials.py` is the shared domain: `check(env, key, secret)` verifies the key through the identity helper, and `save(...)` writes the key, secret and environment together. Neither front-end owns these. `Check.code` carries Delta's own error code beside the rendered message so a caller can branch on which failure it was without matching on that message's text.
 - `store.write()` holds an OS-backed advisory lock around its complete copy-modify-replace transaction. This matters now that different clients can save disjoint scoped mode keys: without serialization, a stale staging copy can undo another client's successful trade-to-read de-escalation. The hidden lock file is persistent by design and contains no settings; the kernel releases its lock after a crash.
 - `credentials.overridden_by_client()` names the settings in the shared file that the process environment is beating, and both front-ends report it — `login` as a note on stderr, the form as an `overridden` status. Without it a save is silently useless: `config` resolves the environment first, so a client passing its own key (the bundle's `user_config`, VS Code's `inputs`, an edited Cursor entry) wins on every launch, and the form would verify one account, name it, and leave the server signing with another. **It compares what `config` resolves against what the file holds, never mere presence** — the Cursor install link sets `DELTA_MCP_ENV` for everyone, so a presence test would tell every Cursor user their working key was ignored. Regression test: `test_a_client_pinning_the_same_environment_is_not_reported`.
 - `login.py` is the terminal front-end. It refuses a non-TTY stdin on purpose — `getpass` reads a pipe rather than rejecting it, so `echo $KEY | ... login` would put the secret in shell history.
@@ -126,7 +127,7 @@ Conventions in `trading.py`:
   inferring safety from tool-name prefixes.
 - Every mutating tool takes `dry_run: bool`. The shared `_finish(tool, method, path, payload, dry_run)` helper strips `None` keys, and when `dry_run` returns `{dry_run, method, path, payload}` **without** any HTTP call; otherwise it sends via `client.post/put/delete` and records to the audit log on both success and `DeltaApiError`.
 - Order-level boolean flags (`post_only`, `reduce_only`, `cancel_*`) are Delta **string enums** — convert with `_bs()` to `"true"`/`"false"`. Position-level flags (`auto_topup`, `close_all_*`) are real JSON booleans.
-- `close_all_positions` needs `user_id`; it is auto-resolved from `/profile` once and cached per-process in the `register` closure — never a tool param.
+- `close_all_positions` needs `user_id`; it is auto-resolved from `/users/trading_preferences` once and cached per-process in the `register` closure — never a tool param.
 - Batch tools cap at `_MAX_BATCH = 50`.
 
 ### Audit logging
