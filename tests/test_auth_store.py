@@ -31,6 +31,7 @@ class SimulatedProcessDeath(BaseException):
 class FakeSecretBackend:
     def __init__(self):
         self.values: dict[str, str] = {}
+        self.reads: list[str] = []
         self.deleted: list[str] = []
         self.mismatch: set[str] = set()
         self.fail_delete: set[str] = set()
@@ -41,6 +42,7 @@ class FakeSecretBackend:
 
     def get(self, name):
         with self._lock:
+            self.reads.append(name)
             if name in self.mismatch and name in self.values:
                 return "wrong readback"
             return self.values.get(name)
@@ -72,6 +74,10 @@ class FailingMetadata:
         self.inner = MemoryMetadata()
         self.fail_next_write = False
 
+    @property
+    def namespace(self):
+        return self.inner.namespace
+
     @contextmanager
     def lock(self):
         with self.inner.lock():
@@ -99,6 +105,35 @@ def make_store(tmp_path, backend=None):
     )
 
 
+def record_name(credentials, revision=1, environment="india_prod"):
+    return f"credential:{credentials._metadata.namespace}:{environment}:{revision}"
+
+
+def legacy_metadata(tmp_path, backend):
+    path = tmp_path / "credentials.json"
+    document = {
+        "version": 1,
+        "environments": {
+            "india_prod": {
+                "active_revision": 2,
+                "next_revision": 3,
+                "generation": 2,
+                "state": "verified",
+                "account_id": "old-account",
+                "created_at": "2026-08-01T00:00:00Z",
+                "updated_at": "2026-08-01T00:00:00Z",
+                "validated_at": "2026-08-01T00:00:00Z",
+                "pending_revisions": [1],
+            }
+        },
+    }
+    path.write_text(json.dumps(document))
+    for revision in (1, 2):
+        # These global records could belong to a different metadata folder.
+        backend.values[f"credential:india_prod:{revision}"] = "unowned secret record"
+    return path
+
+
 def test_replace_publishes_one_active_revision_without_secrets_in_metadata(tmp_path):
     credentials, backend = make_store(tmp_path)
 
@@ -119,7 +154,7 @@ def test_replace_publishes_one_active_revision_without_secrets_in_metadata(tmp_p
     assert saved.source is CredentialSource.OS_STORE
     assert saved.session_only is False
     assert credentials.get("india_prod") == saved
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
     body = (tmp_path / "credentials.json").read_text()
     assert "the-api-key" not in body
@@ -156,8 +191,8 @@ def test_rotation_advances_revision_and_generation_then_deletes_the_old_record(
 
     assert (second.revision, second.generation) == (2, 2)
     assert (second.api_key, second.api_secret) == ("new-key", "new-secret")
-    assert "credential:india_prod:1" not in backend.values
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert record_name(credentials, 1) not in backend.values
+    assert set(backend.values) == {record_name(credentials, 2)}
 
 
 def test_directory_sync_failure_after_metadata_publication_keeps_new_record_active(
@@ -185,7 +220,7 @@ def test_directory_sync_failure_after_metadata_publication_keeps_new_record_acti
     assert (second.revision, second.generation) == (2, 2)
     assert directory_sync_failed is True
     assert credentials.get("india_prod") == second
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert set(backend.values) == {record_name(credentials, 2)}
 
 
 def test_each_environment_has_its_own_active_record(tmp_path):
@@ -196,9 +231,227 @@ def test_each_environment_has_its_own_active_record(tmp_path):
 
     assert (prod.revision, testnet.revision) == (1, 1)
     assert set(backend.values) == {
-        "credential:india_prod:1",
-        "credential:india_testnet:1",
+        record_name(credentials, 1),
+        record_name(credentials, 1, "india_testnet"),
     }
+
+
+@pytest.mark.parametrize("environment", ["india_prod", "india_testnet"])
+def test_separate_metadata_folders_keep_their_own_credentials(tmp_path, environment):
+    backend = FakeSecretBackend()
+    first, _ = make_store(tmp_path / "first", backend)
+    second, _ = make_store(tmp_path / "second", backend)
+
+    first_saved = first.replace(
+        environment, "first-key", "first-secret", account_id="first"
+    )
+    second_saved = second.replace(
+        environment, "second-key", "second-secret", account_id="second"
+    )
+
+    assert first.get(environment) == first_saved
+    assert second.get(environment) == second_saved
+    assert len(backend.values) == 2
+
+
+@pytest.mark.parametrize("operation", ["rotate", "disconnect"])
+def test_other_metadata_folders_cannot_replace_or_delete_a_credential(
+    tmp_path, operation
+):
+    backend = FakeSecretBackend()
+    first, _ = make_store(tmp_path / "first", backend)
+    second, _ = make_store(tmp_path / "second", backend)
+    first_saved = first.replace("india_prod", "first-key", "first-secret")
+    second.replace("india_prod", "second-key", "second-secret")
+
+    if operation == "rotate":
+        second.replace("india_prod", "rotated-key", "rotated-secret")
+    else:
+        second.delete("india_prod")
+
+    assert first.get("india_prod") == first_saved
+
+
+def test_metadata_files_in_the_same_folder_have_separate_records(tmp_path):
+    backend = FakeSecretBackend()
+    first, _ = make_store(tmp_path, backend)
+    second = CredentialStore(
+        backend, FileMetadata(tmp_path / "other.json"), CredentialSource.OS_STORE
+    )
+    saved = first.replace("india_prod", "first-key", "first-secret")
+    second.replace("india_prod", "second-key", "second-secret")
+
+    assert first.get("india_prod") == saved
+    assert len(backend.values) == 2
+
+
+@pytest.mark.parametrize("alias_kind", ["relative", "symlink"])
+def test_metadata_path_aliases_share_one_record_and_revision_lock(tmp_path, alias_kind):
+    directory = tmp_path / "original"
+    directory.mkdir()
+    if alias_kind == "symlink":
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(directory, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks are unavailable on this system")
+    else:
+        alias = directory / ".." / "original"
+    backend = FakeSecretBackend()
+    first, _ = make_store(directory, backend)
+    second, _ = make_store(alias, backend)
+    saved = first.replace("india_prod", "key", "secret")
+
+    assert second.get("india_prod") == saved
+    updated = second.replace("india_prod", "new-key", "secret", expected_revision=1)
+    with pytest.raises(CredentialConflictError):
+        first.replace("india_prod", "stale-key", "secret", expected_revision=1)
+    assert first.get("india_prod") == updated
+    assert len(backend.values) == 1
+
+
+def test_memory_metadata_instances_do_not_share_secret_names():
+    backend = FakeSecretBackend()
+    first = CredentialStore(backend, MemoryMetadata(), CredentialSource.MEMORY)
+    second = CredentialStore(backend, MemoryMetadata(), CredentialSource.MEMORY)
+    saved = first.replace("india_prod", "first-key", "secret")
+    second.replace("india_prod", "second-key", "secret")
+    second.delete("india_prod")
+
+    assert first.get("india_prod") == saved
+
+
+def test_legacy_metadata_requires_reconnect_without_accessing_old_os_records(
+    tmp_path, monkeypatch
+):
+    backend = FakeSecretBackend()
+    path = legacy_metadata(tmp_path, backend)
+    original = path.read_bytes()
+    original_records = dict(backend.values)
+    monkeypatch.setattr(auth_store, "SystemKeyringBackend", lambda: backend)
+
+    for _ in range(2):
+        credentials = CredentialStore.open(path)
+        assert credentials.get("india_prod") is None
+        metadata = credentials.metadata("india_prod")
+        assert metadata.revision is None
+        assert metadata.generation == 3
+        assert metadata.reconnect_required is True
+        assert metadata.pending_revisions == ()
+        assert metadata.account_id == ""
+        assert credentials.delete("india_prod") is False
+
+    assert path.read_bytes() == original
+    assert backend.values == original_records
+    assert backend.reads == []
+    assert backend.deleted == []
+
+
+@pytest.mark.parametrize("operation", ["replace", "migrate"])
+def test_reconnect_keeps_unowned_records_out_of_rotation_and_cleanup(
+    tmp_path, operation
+):
+    backend = FakeSecretBackend()
+    path = legacy_metadata(tmp_path, backend)
+    original_records = dict(backend.values)
+    credentials, _ = make_store(tmp_path, backend)
+
+    if operation == "migrate":
+        config_path = tmp_path / "config.env"
+        config_path.write_text(
+            "DELTA_API_KEY=new-key\nDELTA_API_SECRET=new-secret\nDELTA_MCP_MODE=trade\n"
+        )
+        migrated = credentials.migrate(config_path)
+        assert migrated.status is MigrationStatus.MIGRATED
+        assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
+    else:
+        credentials.replace(
+            "india_prod",
+            "new-key",
+            "new-secret",
+            expected_revision=0,
+            expected_generation=3,
+        )
+    saved = credentials.get("india_prod")
+    assert saved is not None
+    assert (saved.api_key, saved.api_secret) == ("new-key", "new-secret")
+    assert (saved.revision, saved.generation) == (3, 4)
+    assert credentials.metadata("india_prod").reconnect_required is False
+    credentials.replace("india_prod", "rotated-key", "secret")
+    assert credentials.delete("india_prod") is True
+
+    assert backend.values == original_records
+    assert set(original_records).isdisjoint(backend.reads)
+    assert set(original_records).isdisjoint(backend.deleted)
+    document = json.loads(path.read_text())
+    assert document["version"] == 2
+    metadata = document["environments"]["india_prod"]
+    assert set(metadata["preserved_records"]) == set(original_records)
+    assert metadata["pending_revisions"] == []
+    assert metadata["reconnect_required"] is False
+
+
+def test_reconnect_activation_failure_preserves_recovery_metadata(tmp_path):
+    backend = FakeSecretBackend()
+    path = legacy_metadata(tmp_path, backend)
+    original_records = dict(backend.values)
+    credentials, _ = make_store(tmp_path, backend)
+
+    def fail_activation(credential):
+        if credential is not None:
+            raise RuntimeError("cannot activate")
+
+    with pytest.raises(CredentialActivationError):
+        credentials.replace("india_prod", "new-key", "secret", activate=fail_activation)
+
+    assert credentials.get("india_prod") is None
+    assert credentials.metadata("india_prod").reconnect_required is True
+    assert backend.values == original_records
+    metadata = json.loads(path.read_text())["environments"]["india_prod"]
+    assert set(metadata["preserved_records"]) == set(original_records)
+
+
+def test_copied_metadata_cannot_read_or_clean_the_original_records(tmp_path):
+    backend = FakeSecretBackend()
+    original, _ = make_store(tmp_path / "original", backend)
+    original.replace("india_prod", "old-key", "secret")
+    backend.crash_delete.add(record_name(original, 1))
+    with pytest.raises(SimulatedProcessDeath):
+        original.replace("india_prod", "current-key", "secret")
+    source_records = dict(backend.values)
+    copied_path = tmp_path / "copy" / "credentials.json"
+    copied_path.parent.mkdir()
+    copied_path.write_bytes((tmp_path / "original" / "credentials.json").read_bytes())
+    copied, _ = make_store(copied_path.parent, backend)
+    backend.reads.clear()
+
+    assert copied.get("india_prod") is None
+    assert copied.metadata("india_prod").reconnect_required is True
+    copied.replace("india_prod", "copy-key", "secret")
+    copied.delete("india_prod")
+
+    assert backend.values == source_records
+    assert not set(source_records).intersection(backend.reads)
+    preserved = json.loads(copied_path.read_text())["environments"]["india_prod"]
+    assert set(preserved["preserved_records"]) == set(source_records)
+    assert preserved["pending_revisions"] == []
+
+
+@pytest.mark.parametrize("namespace", [None, 42, "", "a" * 63, "A" * 64])
+def test_invalid_namespace_never_reads_or_deletes_credentials(tmp_path, namespace):
+    credentials, backend = make_store(tmp_path)
+    credentials.replace("india_prod", "key", "secret")
+    path = tmp_path / "credentials.json"
+    document = json.loads(path.read_text())
+    document["namespace"] = namespace
+    path.write_text(json.dumps(document))
+    backend.reads.clear()
+    backend.deleted.clear()
+
+    with pytest.raises(auth_store.MetadataError, match="namespace"):
+        credentials.get("india_prod")
+    assert backend.reads == []
+    assert backend.deleted == []
 
 
 def test_a_stale_replace_never_writes_a_new_secret(tmp_path):
@@ -210,13 +463,13 @@ def test_a_stale_replace_never_writes_a_new_secret(tmp_path):
             "india_prod", "stale-key", "stale-secret", expected_revision=0
         )
 
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_a_failed_readback_removes_the_new_record_and_keeps_metadata_empty(tmp_path):
     backend = FakeSecretBackend()
-    backend.mismatch.add("credential:india_prod:1")
     credentials, _ = make_store(tmp_path, backend)
+    backend.mismatch.add(record_name(credentials, 1))
 
     with pytest.raises(BackendOperationError, match="did not return"):
         credentials.replace("india_prod", "key", "secret")
@@ -228,7 +481,7 @@ def test_a_failed_readback_removes_the_new_record_and_keeps_metadata_empty(tmp_p
 def test_old_record_delete_failure_rolls_the_rotation_back(tmp_path):
     credentials, backend = make_store(tmp_path)
     first = credentials.replace("india_prod", "old-key", "old-secret")
-    backend.fail_delete.add("credential:india_prod:1")
+    backend.fail_delete.add(record_name(credentials, 1))
 
     with pytest.raises(BackendOperationError, match="could not retire"):
         credentials.replace(
@@ -239,7 +492,7 @@ def test_old_record_delete_failure_rolls_the_rotation_back(tmp_path):
     assert current is not None
     assert (current.revision, current.generation) == (1, 1)
     assert (current.api_key, current.api_secret) == ("old-key", "old-secret")
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_activation_runs_after_publication_and_before_old_record_retirement(tmp_path):
@@ -250,8 +503,8 @@ def test_activation_runs_after_publication_and_before_old_record_retirement(tmp_
     def activate(credential):
         assert credentials.metadata("india_prod").revision == 2
         assert set(backend.values) == {
-            "credential:india_prod:1",
-            "credential:india_prod:2",
+            record_name(credentials, 1),
+            record_name(credentials, 2),
         }
         observed.append(credential.revision if credential is not None else None)
 
@@ -265,7 +518,7 @@ def test_activation_runs_after_publication_and_before_old_record_retirement(tmp_
 
     assert second.revision == 2
     assert observed == [2]
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert set(backend.values) == {record_name(credentials, 2)}
 
 
 def test_activation_failure_restores_metadata_and_removes_the_new_record(tmp_path):
@@ -290,13 +543,13 @@ def test_activation_failure_restores_metadata_and_removes_the_new_record(tmp_pat
 
     assert observed == [2, 1]
     assert credentials.get("india_prod") == first
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_retirement_failure_restores_a_record_deleted_before_the_error(tmp_path):
     credentials, backend = make_store(tmp_path)
     first = credentials.replace("india_prod", "old-key", "old-secret")
-    backend.fail_delete_after.add("credential:india_prod:1")
+    backend.fail_delete_after.add(record_name(credentials, 1))
     observed: list[int | None] = []
 
     def activate(credential):
@@ -313,7 +566,7 @@ def test_retirement_failure_restores_a_record_deleted_before_the_error(tmp_path)
 
     assert observed == [2, 1]
     assert credentials.get("india_prod") == first
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
@@ -334,7 +587,7 @@ def test_delete_advances_the_generation_and_leaves_a_tombstone(tmp_path):
 def test_delete_failure_after_removal_restores_the_active_record(tmp_path):
     credentials, backend = make_store(tmp_path)
     saved = credentials.replace("india_prod", "key", "secret")
-    backend.fail_delete_after.add("credential:india_prod:1")
+    backend.fail_delete_after.add(record_name(credentials, 1))
 
     with pytest.raises(BackendOperationError, match="could not delete credential"):
         credentials.delete("india_prod", expected_revision=saved.revision)
@@ -342,7 +595,7 @@ def test_delete_failure_after_removal_restores_the_active_record(tmp_path):
     assert credentials.get("india_prod") == saved
     metadata = credentials.metadata("india_prod")
     assert (metadata.revision, metadata.generation) == (1, 1)
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 @pytest.mark.parametrize("crash_point", ["before_delete", "after_delete"])
@@ -352,7 +605,7 @@ def test_process_death_during_disconnect_leaves_a_retryable_tombstone(
 ):
     credentials, backend = make_store(tmp_path)
     saved = credentials.replace("india_prod", "key", "secret")
-    name = "credential:india_prod:1"
+    name = record_name(credentials, 1)
     if crash_point == "before_delete":
         backend.crash_delete.add(name)
     else:
@@ -385,7 +638,7 @@ def test_process_death_during_disconnect_leaves_a_retryable_tombstone(
 def test_startup_retries_pending_disconnect_cleanup(tmp_path, monkeypatch):
     credentials, backend = make_store(tmp_path)
     saved = credentials.replace("india_prod", "key", "secret")
-    backend.crash_delete.add("credential:india_prod:1")
+    backend.crash_delete.add(record_name(credentials, 1))
 
     with pytest.raises(SimulatedProcessDeath):
         credentials.delete(
@@ -405,7 +658,7 @@ def test_startup_retries_pending_disconnect_cleanup(tmp_path, monkeypatch):
 def test_failed_pending_cleanup_stays_disconnected_and_retries(tmp_path):
     credentials, backend = make_store(tmp_path)
     saved = credentials.replace("india_prod", "key", "secret")
-    name = "credential:india_prod:1"
+    name = record_name(credentials, 1)
     backend.crash_delete.add(name)
 
     with pytest.raises(SimulatedProcessDeath):
@@ -760,8 +1013,8 @@ def test_migration_of_an_incomplete_pair_leaves_the_file_unchanged(tmp_path):
 
 def test_migration_readback_failure_leaves_the_file_unchanged(tmp_path):
     backend = FakeSecretBackend()
-    backend.mismatch.add("credential:india_prod:1")
     credentials, _ = make_store(tmp_path, backend)
+    backend.mismatch.add(record_name(credentials, 1))
     config_path = tmp_path / "config.env"
     original = "DELTA_API_KEY=key\nDELTA_API_SECRET=secret\nDELTA_MCP_MODE=trade\n"
     config_path.write_text(original)
@@ -803,9 +1056,7 @@ def test_migration_publish_failure_restores_the_prior_active_record(
     first = credentials.replace("india_prod", "same-key", "same-secret")
     config_path = tmp_path / "config.env"
     original = (
-        "DELTA_API_KEY=same-key\n"
-        "DELTA_API_SECRET=same-secret\n"
-        "DELTA_MCP_MODE=trade\n"
+        "DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\nDELTA_MCP_MODE=trade\n"
     )
     config_path.write_text(original)
     real_replace = os.replace
@@ -822,7 +1073,7 @@ def test_migration_publish_failure_restores_the_prior_active_record(
 
     assert config_path.read_text() == original
     assert credentials.get("india_prod") == first
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_config_directory_sync_failure_does_not_rollback_published_migration(
@@ -857,7 +1108,7 @@ def test_config_directory_sync_failure_does_not_rollback_published_migration(
     assert config_sync_failed is True
     assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
     assert credentials.get("india_prod") == result.credential
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 def test_migration_of_the_active_pair_advances_revision_and_generation(tmp_path):
@@ -871,9 +1122,7 @@ def test_migration_of_the_active_pair_advances_revision_and_generation(tmp_path)
     )
     config_path = tmp_path / "config.env"
     config_path.write_text(
-        "DELTA_API_KEY=same-key\n"
-        "DELTA_API_SECRET=same-secret\n"
-        "DELTA_MCP_MODE=trade\n"
+        "DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\nDELTA_MCP_MODE=trade\n"
     )
 
     result = credentials.migrate(config_path)
@@ -885,7 +1134,7 @@ def test_migration_of_the_active_pair_advances_revision_and_generation(tmp_path)
     assert result.credential.account_id == "account-123"
     assert first.revision == 1
     assert config_path.read_text() == "DELTA_MCP_MODE=trade\n"
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert set(backend.values) == {record_name(credentials, 2)}
 
 
 @pytest.mark.parametrize("failure_mode", ["before_delete", "after_delete"])
@@ -896,18 +1145,16 @@ def test_migration_stays_complete_when_inactive_record_retirement_fails(
 ):
     credentials, backend = make_store(tmp_path)
     first = credentials.replace("india_prod", "same-key", "same-secret")
-    old_name = "credential:india_prod:1"
+    old_name = record_name(credentials, 1)
     if failure_mode == "before_delete":
         backend.fail_delete.add(old_name)
-        expected_records = {old_name, "credential:india_prod:2"}
+        expected_records = {old_name, record_name(credentials, 2)}
     else:
         backend.fail_delete_after.add(old_name)
-        expected_records = {"credential:india_prod:2"}
+        expected_records = {record_name(credentials, 2)}
     config_path = tmp_path / "config.env"
     config_path.write_text(
-        "DELTA_API_KEY=same-key\n"
-        "DELTA_API_SECRET=same-secret\n"
-        "DELTA_MCP_MODE=trade\n"
+        "DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\nDELTA_MCP_MODE=trade\n"
     )
 
     result = credentials.migrate(config_path)
@@ -920,7 +1167,7 @@ def test_migration_stays_complete_when_inactive_record_retirement_fails(
     assert credentials.metadata("india_prod").pending_revisions == (1,)
     assert credentials.get("india_prod") == result.credential
     assert credentials.metadata("india_prod").pending_revisions == ()
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert set(backend.values) == {record_name(credentials, 2)}
     assert first.revision == 1
     assert "could not retire inactive credential revision 1" in caplog.text
     assert "same-key" not in caplog.text
@@ -941,9 +1188,7 @@ def test_migration_serializes_concurrent_credential_changes(
         CredentialSource.OS_STORE,
     )
     config_path = tmp_path / "config.env"
-    config_path.write_text(
-        "DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\n"
-    )
+    config_path.write_text("DELTA_API_KEY=same-key\nDELTA_API_SECRET=same-secret\n")
     config_publish_started = threading.Event()
     release_config_publish = threading.Event()
     credential_change_started = threading.Event()
@@ -1012,7 +1257,7 @@ def test_migration_serializes_concurrent_credential_changes(
     assert migrated.credential is not None
     assert (migrated.credential.revision, migrated.credential.generation) == (2, 2)
     assert credentials.get("india_prod") == migrated.credential
-    assert set(backend.values) == {"credential:india_prod:2"}
+    assert set(backend.values) == {record_name(credentials, 2)}
 
 
 def test_migration_never_overwrites_a_different_active_credential(tmp_path):
@@ -1058,7 +1303,7 @@ def test_migration_observes_a_concurrent_create_before_its_transaction(
     assert result.credential is not None
     assert result.credential.api_key == "browser-key"
     assert config_path.read_text() == original
-    assert set(backend.values) == {"credential:india_prod:1"}
+    assert set(backend.values) == {record_name(credentials, 1)}
 
 
 @pytest.mark.parametrize("environment", ["india_devnet", "other", "../india_prod"])

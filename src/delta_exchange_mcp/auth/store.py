@@ -1,9 +1,12 @@
 """Versioned credentials backed by an operating-system credential store."""
 
+import hashlib
 import io
 import json
 import logging
 import os
+import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -23,7 +26,7 @@ from keyring.backend import KeyringBackend
 from keyring.errors import PasswordDeleteError
 
 SERVICE_NAME = "delta-exchange-mcp"
-METADATA_VERSION = 1
+METADATA_VERSION = 2
 SECRET_VERSION = 1
 DEFAULT_DIR = Path.home() / ".delta-exchange-mcp"
 DEFAULT_METADATA_NAME = "credentials.json"
@@ -115,6 +118,7 @@ class CredentialMetadata:
     updated_at: str
     validated_at: str
     pending_revisions: tuple[int, ...]
+    reconnect_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,8 @@ class _EnvironmentState:
     updated_at: str = ""
     validated_at: str = ""
     pending_revisions: tuple[int, ...] = ()
+    preserved_records: tuple[str, ...] = ()
+    reconnect_required: bool = False
 
     def metadata(self, environment: str) -> CredentialMetadata:
         return CredentialMetadata(
@@ -172,6 +178,7 @@ class _EnvironmentState:
             updated_at=self.updated_at,
             validated_at=self.validated_at,
             pending_revisions=self.pending_revisions,
+            reconnect_required=self.reconnect_required,
         )
 
 
@@ -184,6 +191,9 @@ class SecretBackend(Protocol):
 
 
 class MetadataBackend(Protocol):
+    @property
+    def namespace(self) -> str: ...
+
     def lock(self) -> AbstractContextManager[None]: ...
 
     def read(self) -> dict[str, _EnvironmentState]: ...
@@ -332,7 +342,10 @@ class FileMetadata:
     """Read and atomically replace the non-secret credential metadata file."""
 
     def __init__(self, path: Path):
-        self.path = path
+        self.path = path.resolve()
+        self.namespace = hashlib.sha256(
+            os.fsencode(os.path.normcase(self.path))
+        ).hexdigest()
         self._thread_lock = threading.RLock()
 
     @contextmanager
@@ -356,7 +369,8 @@ class FileMetadata:
             ) from exc
         if (
             not isinstance(document, dict)
-            or document.get("version") != METADATA_VERSION
+            or type(document.get("version")) is not int
+            or document["version"] not in (1, METADATA_VERSION)
         ):
             raise MetadataError(
                 f"credential metadata in {self.path} has an unsupported version"
@@ -366,14 +380,35 @@ class FileMetadata:
             raise MetadataError(
                 f"credential metadata in {self.path} has no environment map"
             )
-        return {
+        namespace = document.get("namespace")
+        if document["version"] == METADATA_VERSION and (
+            not isinstance(namespace, str)
+            or re.fullmatch(r"[0-9a-f]{64}", namespace) is None
+        ):
+            raise MetadataError(
+                f"credential metadata in {self.path} has an invalid namespace"
+            )
+        values = {
             _normalize_environment(name): _state_from_json(value, self.path)
             for name, value in environments.items()
         }
+        if document["version"] == 1 or namespace != self.namespace:
+            # Old global names and copied metadata cannot establish ownership.
+            # Retain their record names for recovery, never read or delete them.
+            return {
+                environment: _detach_records(
+                    environment,
+                    state,
+                    namespace if document["version"] == METADATA_VERSION else None,
+                )
+                for environment, state in values.items()
+            }
+        return values
 
     def write(self, values: dict[str, _EnvironmentState]) -> None:
         document = {
             "version": METADATA_VERSION,
+            "namespace": self.namespace,
             "environments": {
                 environment: _state_to_json(state)
                 for environment, state in sorted(values.items())
@@ -387,6 +422,7 @@ class MemoryMetadata:
     """Keep metadata in this process when no secure keyring is available."""
 
     def __init__(self):
+        self.namespace = secrets.token_hex(32)
         self._values: dict[str, _EnvironmentState] = {}
         self._lock = threading.RLock()
 
@@ -664,7 +700,7 @@ class CredentialStore:
         previous_payload = None
         if previous.active_revision is not None:
             previous_payload = self._backend.get(
-                _record_name(environment, previous.active_revision)
+                self._record_name(environment, previous.active_revision)
             )
             if previous_payload is None:
                 raise CredentialCorruptError(
@@ -691,8 +727,9 @@ class CredentialStore:
                     else ()
                 ),
             ),
+            preserved_records=previous.preserved_records,
         )
-        name = _record_name(environment, revision)
+        name = self._record_name(environment, revision)
         payload = _encode_secret(api_key, api_secret)
         self._backend.set(name, payload)
         if self._backend.get(name) != payload:
@@ -711,7 +748,9 @@ class CredentialStore:
         try:
             credential = self._credential(environment, current)
             if credential is None:
-                raise CredentialCorruptError("the new credential has no active revision")
+                raise CredentialCorruptError(
+                    "the new credential has no active revision"
+                )
             if activate is not None:
                 activate(credential)
         except Exception as exc:
@@ -746,7 +785,7 @@ class CredentialStore:
             raise
 
         if previous.active_revision is not None:
-            old_name = _record_name(environment, previous.active_revision)
+            old_name = self._record_name(environment, previous.active_revision)
             try:
                 self._backend.delete(old_name)
             except Exception as exc:
@@ -817,7 +856,7 @@ class CredentialStore:
         if previous.active_revision is None:
             return False
         revision = previous.active_revision
-        name = _record_name(environment, revision)
+        name = self._record_name(environment, revision)
         payload = self._backend.get(name)
 
         tombstone = _EnvironmentState(
@@ -834,6 +873,7 @@ class CredentialStore:
                 if payload is None
                 else (*previous.pending_revisions, revision)
             ),
+            preserved_records=previous.preserved_records,
         )
         values[environment] = tombstone
         self._metadata.write(values)
@@ -902,7 +942,7 @@ class CredentialStore:
 
         remaining: list[int] = []
         for revision in previous.pending_revisions:
-            name = _record_name(environment, revision)
+            name = self._record_name(environment, revision)
             try:
                 self._backend.delete(name)
             except Exception as exc:
@@ -973,7 +1013,7 @@ class CredentialStore:
         revision = state.active_revision
         if revision is None:
             return None
-        payload = self._backend.get(_record_name(environment, revision))
+        payload = self._backend.get(self._record_name(environment, revision))
         if payload is None:
             raise CredentialCorruptError(
                 f"credential metadata points to missing revision {revision} for {environment}"
@@ -996,6 +1036,9 @@ class CredentialStore:
             api_key=key,
             api_secret=secret,
         )
+
+    def _record_name(self, environment: str, revision: int) -> str:
+        return _record_name(self._metadata.namespace, environment, revision)
 
     def _delete_new(self, name: str) -> None:
         try:
@@ -1046,8 +1089,31 @@ def _normalize_environment(environment: str) -> str:
     return value
 
 
-def _record_name(environment: str, revision: int) -> str:
-    return f"credential:{environment}:{revision}"
+def _record_name(namespace: str, environment: str, revision: int) -> str:
+    return f"credential:{namespace}:{environment}:{revision}"
+
+
+def _detach_records(
+    environment: str, state: _EnvironmentState, namespace: str | None
+) -> _EnvironmentState:
+    revisions = (
+        *state.pending_revisions,
+        *((state.active_revision,) if state.active_revision is not None else ()),
+    )
+    records = tuple(
+        _record_name(namespace, environment, revision)
+        if namespace is not None
+        else f"credential:{environment}:{revision}"
+        for revision in revisions
+    )
+    return _EnvironmentState(
+        next_revision=state.next_revision,
+        generation=state.generation + 1,
+        updated_at=state.updated_at,
+        preserved_records=tuple(dict.fromkeys((*state.preserved_records, *records))),
+        reconnect_required=state.active_revision is not None
+        or state.reconnect_required,
+    )
 
 
 def _encode_secret(api_key: str, api_secret: str) -> str:
@@ -1110,6 +1176,8 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         updated_at = value["updated_at"]
         validated_at = value["validated_at"]
         raw_pending = value.get("pending_revisions", [])
+        raw_preserved = value.get("preserved_records", [])
+        reconnect_required = value.get("reconnect_required", False)
     except (KeyError, TypeError, ValueError) as exc:
         raise MetadataError(
             f"credential metadata in {path} has an invalid entry"
@@ -1124,6 +1192,23 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         )
     if type(generation) is not int or generation < 0:
         raise MetadataError(f"credential metadata in {path} has an invalid generation")
+    if type(reconnect_required) is not bool or (
+        reconnect_required and active is not None
+    ):
+        raise MetadataError(
+            f"credential metadata in {path} has an invalid reconnect state"
+        )
+    if not isinstance(raw_preserved, list) or any(
+        not isinstance(name, str)
+        or re.fullmatch(
+            r"credential:(?:[0-9a-f]{64}:)?india_(?:prod|testnet):[1-9][0-9]*", name
+        )
+        is None
+        for name in raw_preserved
+    ):
+        raise MetadataError(
+            f"credential metadata in {path} has invalid preserved records"
+        )
     if not isinstance(raw_pending, list) or any(
         type(revision) is not int or revision < 1 for revision in raw_pending
     ):
@@ -1164,12 +1249,14 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         updated_at=updated_at,
         validated_at=validated_at,
         pending_revisions=pending_revisions,
+        preserved_records=tuple(raw_preserved),
+        reconnect_required=reconnect_required,
     )
 
 
 def _state_to_json(
     state: _EnvironmentState,
-) -> dict[str, int | str | list[int] | None]:
+) -> dict[str, int | str | list[int] | list[str] | None]:
     return {
         "active_revision": state.active_revision,
         "next_revision": state.next_revision,
@@ -1180,6 +1267,8 @@ def _state_to_json(
         "updated_at": state.updated_at,
         "validated_at": state.validated_at,
         "pending_revisions": list(state.pending_revisions),
+        "preserved_records": list(state.preserved_records),
+        "reconnect_required": state.reconnect_required,
     }
 
 
