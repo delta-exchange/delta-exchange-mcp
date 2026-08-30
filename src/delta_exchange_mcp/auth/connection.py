@@ -107,9 +107,7 @@ class ConnectionService:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
-    _active_identity: tuple[str, str, int, int, int] | None = field(
-        default=None, repr=False
-    )
+    _active_binding: ConsentBinding | None = field(default=None, repr=False)
 
     @classmethod
     def open(
@@ -141,7 +139,13 @@ class ConnectionService:
             migration = MigrationResult(MigrationStatus.ABSENT, "")
             migration_error = type(exc).__name__
         if migration.status is MigrationStatus.MIGRATED and migration.environment:
-            consent_store.revoke_environment(migration.environment)
+            if migration.credential is None or migration.credential.generation is None:
+                raise CredentialStoreError(
+                    "migration did not publish a credential generation"
+                )
+            consent_store.revoke_before(
+                migration.environment, migration.credential.generation
+            )
 
         fixed = replace(cfg, mode="read") if cfg is not None else None
         environ: Mapping[str, str] | None = None
@@ -175,7 +179,7 @@ class ConnectionService:
             migration_error=migration_error,
             credential_error=credential_error,
         )
-        service._active_identity = service._identity(base.env, credential)
+        service._active_binding = service._binding("", credential)
         return service
 
     async def access_state(self, ctx: Context) -> AccessState:
@@ -329,7 +333,7 @@ class ConnectionService:
 
         status = "saved" if checked.ok else "unverified"
         try:
-            self.consent.revoke_environment(environment)
+            self.consent.revoke_before(environment, expected_generation + 1)
             environment_result = self._set_environment(environment, expected)
         except legacy_store.SettingsConflictError:
             self._reconcile()
@@ -399,12 +403,14 @@ class ConnectionService:
                 client_name,
                 "The secure credential service could not disconnect this account.",
             )
-        self.consent.revoke_environment(environment)
+        self.consent.revoke_before(environment, expected_generation + 1)
         self._reconcile()
         return setup.ActionResult(
             {
                 "status": "disconnected" if removed else "not_connected",
-                "message": "Disconnected." if removed else "No credential was connected.",
+                "message": "Disconnected."
+                if removed
+                else "No credential was connected.",
             },
             revision=self._revision(client_name),
         )
@@ -450,9 +456,7 @@ class ConnectionService:
             return self._rejected(
                 client_name, "Select this environment before changing trading consent."
             )
-        if not self._matches_expected_credential(
-            environment, credential, expected
-        ):
+        if not self._matches_expected_credential(environment, credential, expected):
             return setup.ActionResult(
                 {"message": "The credential changed. Reload this page."},
                 revision=self._revision(client_name),
@@ -460,21 +464,35 @@ class ConnectionService:
             )
         binding = self._binding(client_name, credential)
         if binding is None:
-            return self._rejected(client_name, "Connect an account before enabling trading.")
+            return self._rejected(
+                client_name, "Connect an account before enabling trading."
+            )
         enabled = arguments.get("enabled") is True
-        if enabled and environment == "india_prod" and arguments.get("acknowledged") is not True:
+        if (
+            enabled
+            and environment == "india_prod"
+            and arguments.get("acknowledged") is not True
+        ):
             return self._rejected(
                 client_name,
                 "Confirm that production trading can place real orders.",
             )
+
+        def check_current() -> bool:
+            return self._matches_expected_credential(environment, credential, expected)
+
         try:
             state = (
                 self.consent.enable(
-                    binding, expected_generation=expected["consent_generation"]
+                    binding,
+                    expected_generation=expected["consent_generation"],
+                    check_current=check_current,
                 )
                 if enabled
                 else self.consent.disable(
-                    binding, expected_generation=expected["consent_generation"]
+                    binding,
+                    expected_generation=expected["consent_generation"],
+                    check_current=check_current,
                 )
             )
         except StaleConsentError:
@@ -519,10 +537,20 @@ class ConnectionService:
                 or expected.get("active_environment_generation") != active_generation
             ):
                 return False
-        if credential is not None and credential.source is CredentialSource.PROCESS:
-            return expected.get("active_credential_session_generation") == (
-                credential.session_generation or 0
+        if self._process_credentials_present():
+            current, error = _resolve_credential(
+                self.credentials, environment, self.credential_environ
             )
+            return bool(
+                not error
+                and current is not None
+                and credential is not None
+                and credential.source is CredentialSource.PROCESS
+                and expected.get("active_credential_session_generation")
+                == current.session_generation
+            )
+        if credential is not None and credential.source is CredentialSource.PROCESS:
+            return False
         metadata = self._metadata(environment)
         if metadata is None:
             return False
@@ -576,7 +604,9 @@ class ConnectionService:
                 raise legacy_store.SettingsConflictError(
                     "the active environment changed"
                 )
-            return "The active environment is managed by this MCP client's configuration."
+            return (
+                "The active environment is managed by this MCP client's configuration."
+            )
 
         def revoke() -> None:
             self.consent.revoke_environment(expected_environment)
@@ -603,21 +633,19 @@ class ConnectionService:
                 self.credentials, base.env, self.credential_environ
             )
         self.client.rebind(_bind_config(base, active))
-        self._active_identity = self._identity(base.env, active)
+        self._active_binding = self._binding("", active)
 
     def _reconcile(self) -> tuple[config_mod.Config, Credential | None]:
         base = self._base_config()
         credential, error = _resolve_credential(
             self.credentials, base.env, self.credential_environ
         )
-        identity = self._identity(base.env, credential)
-        previous = self._active_identity
-        if previous is not None and previous != identity:
-            self.consent.revoke_environment(previous[0])
-            if previous[0] != base.env:
-                self.consent.revoke_environment(base.env)
+        binding = self._binding("", credential)
+        previous = self._active_binding
+        if previous is not None and previous != binding:
+            self.consent.revoke_identity(previous)
         self.client.rebind(_bind_config(base, credential))
-        self._active_identity = identity
+        self._active_binding = binding
         self.credential_error = error
         return base, credential
 
@@ -636,13 +664,25 @@ class ConnectionService:
     ) -> ConsentBinding | None:
         if credential is None:
             return None
+        environment, generation = self._environment_state()
+        if credential.environment != environment:
+            return None
         return ConsentBinding(
             client_name=client_name,
             environment=credential.environment,
             credential_revision=credential.revision,
             credential_generation=credential.generation,
             credential_session_generation=credential.session_generation,
+            environment_generation=generation,
         )
+
+    def _environment_state(self) -> tuple[str, int]:
+        if self.fixed_config is not None:
+            return self.fixed_config.env, 0
+        environment = _process_setting("DELTA_MCP_ENV")
+        if environment:
+            return environment.lower(), 0
+        return legacy_store.environment_state(config_mod.DEFAULT_ENV)
 
     def _final_checker(self, lease: ConsentLease | None) -> Callable[[], bool]:
         if lease is None:
@@ -652,6 +692,12 @@ class ConnectionService:
             try:
                 base = self._base_config()
                 if base.env != lease.binding.environment:
+                    return False
+                environment, generation = self._environment_state()
+                if (environment, generation) != (
+                    lease.binding.environment,
+                    lease.binding.environment_generation,
+                ):
                     return False
                 credential, _ = _resolve_credential(
                     self.credentials, base.env, self.credential_environ
@@ -663,14 +709,15 @@ class ConnectionService:
                     current_credential_revision=credential.revision,
                     current_credential_generation=credential.generation,
                     current_credential_session_generation=credential.session_generation,
+                    current_environment_generation=generation,
                 )
                 if not accepted:
                     return False
                 confirmed, _ = _resolve_credential(
                     self.credentials, base.env, self.credential_environ
                 )
-                return self._identity(base.env, credential) == self._identity(
-                    base.env, confirmed
+                return (
+                    self._binding(lease.binding.client_name, confirmed) == lease.binding
                 )
             except Exception:
                 return False
@@ -678,7 +725,7 @@ class ConnectionService:
         return current
 
     def _revision(self, client_name: str) -> RevisionToken:
-        base, credential = self._reconcile()
+        _, credential = self._reconcile()
         token: RevisionToken = {}
         for environment in SUPPORTED_ENVIRONMENTS:
             metadata = self._metadata(environment)
@@ -688,13 +735,7 @@ class ConnectionService:
             token[f"{environment}_credential_generation"] = (
                 metadata.generation if metadata is not None else 0
             )
-        if self.fixed_config is not None or _process_setting("DELTA_MCP_ENV"):
-            active_environment = base.env
-            environment_generation = 0
-        else:
-            active_environment, environment_generation = legacy_store.environment_state(
-                config_mod.DEFAULT_ENV
-            )
+        active_environment, environment_generation = self._environment_state()
         token["active_environment"] = _ENVIRONMENT_TOKEN.get(active_environment, 0)
         token["active_environment_generation"] = environment_generation
         token["active_credential_session_generation"] = (
@@ -772,7 +813,9 @@ class ConnectionService:
             client_version=client_version,
             environments=environments,
             trading={
-                "enabled": consent_state.enabled if consent_state is not None else False,
+                "enabled": consent_state.enabled
+                if consent_state is not None
+                else False,
                 "persistent": consent_state.persistent
                 if consent_state is not None
                 else False,
@@ -803,20 +846,6 @@ class ConnectionService:
         except CredentialStoreError:
             self.credential_error = "credential_store_unavailable"
             return None
-
-    @staticmethod
-    def _identity(
-        environment: str, credential: Credential | None
-    ) -> tuple[str, str, int, int, int]:
-        if credential is None:
-            return environment, "", 0, 0, 0
-        return (
-            environment,
-            credential.source.value,
-            credential.revision or 0,
-            credential.generation or 0,
-            credential.session_generation or 0,
-        )
 
 
 def _load_base_config() -> config_mod.Config:
@@ -882,7 +911,9 @@ def _validation_warning(result: credential_check.Check) -> str:
             "Saved as unverified because the system clock prevented validation. "
             "Trading remains off."
         )
-    return "Saved as unverified because Delta could not validate it. Trading remains off."
+    return (
+        "Saved as unverified because Delta could not validate it. Trading remains off."
+    )
 
 
 def _process_setting(name: str) -> str:

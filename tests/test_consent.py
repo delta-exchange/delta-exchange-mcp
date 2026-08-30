@@ -21,6 +21,7 @@ def binding(
     revision: int | None = 1,
     generation: int | None = 1,
     session_generation: int | None = None,
+    environment_generation: int = 0,
 ) -> ConsentBinding:
     return ConsentBinding(
         client_name=client_name,
@@ -28,6 +29,7 @@ def binding(
         credential_revision=revision,
         credential_generation=generation,
         credential_session_generation=session_generation,
+        environment_generation=environment_generation,
     )
 
 
@@ -97,6 +99,79 @@ def test_environment_and_credential_revision_are_exact_partitions(tmp_path):
     assert store.status(binding(environment="india_testnet")).enabled is False
     assert store.status(binding(revision=2)).enabled is False
     assert store.status(binding(generation=2)).enabled is False
+
+
+def test_environment_generation_partitions_consent_and_survives_restart(tmp_path):
+    path = tmp_path / "consent.json"
+    store = new_store(path)
+    earlier = binding()
+    current = binding(environment_generation=2)
+    store.enable(earlier, expected_generation=0)
+    lease = store.lease(earlier)
+    assert lease is not None
+
+    assert store.status(current).enabled is False
+    assert (
+        store.accepts(
+            lease,
+            current_credential_revision=1,
+            current_credential_generation=1,
+            current_credential_session_generation=None,
+            current_environment_generation=2,
+        )
+        is False
+    )
+
+    approved = store.enable(current, expected_generation=0)
+    assert new_store(path).status(current) == approved
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_a_current_state_check_rejects_stale_first_approval(tmp_path, persistent):
+    store = new_store(tmp_path / "consent.json", secure_backend_available=persistent)
+
+    with pytest.raises(StaleConsentError, match="connection changed"):
+        store.enable(binding(), expected_generation=0, check_current=lambda: False)
+
+    assert store.status(binding()).enabled is False
+    assert store.status(binding()).generation == 0
+    assert not (tmp_path / "consent.json").exists()
+    assert (
+        store.enable(
+            binding(), expected_generation=0, check_current=lambda: True
+        ).enabled
+        is True
+    )
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_delayed_identity_revocation_keeps_newer_environment_approval(
+    tmp_path, persistent
+):
+    store = new_store(tmp_path / "consent.json", secure_backend_available=persistent)
+    old = binding()
+    current = binding(environment_generation=2)
+    store.enable(old, expected_generation=0)
+    approved = store.enable(current, expected_generation=0)
+
+    store.revoke_identity(old)
+
+    assert store.status(old).enabled is False
+    assert store.status(current) == approved
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_delayed_credential_completion_keeps_newer_approval(tmp_path, persistent):
+    store = new_store(tmp_path / "consent.json", secure_backend_available=persistent)
+    old = binding()
+    current = binding(revision=2, generation=2)
+    store.enable(old, expected_generation=0)
+    approved = store.enable(current, expected_generation=0)
+
+    store.revoke_before("india_prod", 2)
+
+    assert store.status(old).enabled is False
+    assert store.status(current) == approved
 
 
 def test_unnamed_client_consent_is_process_only(tmp_path):
@@ -372,6 +447,7 @@ def test_existing_persistent_record_key_and_shape_remain_readable(tmp_path):
     ).hexdigest()
     record = payload["records"][expected_key]
     record.pop("credential_session_generation")
+    record.pop("environment_generation")
     path.write_text(json.dumps(payload))
 
     assert new_store(path).status(binding()) == enabled
@@ -390,6 +466,8 @@ def test_invalid_binding_values_are_rejected():
         binding(session_generation=1)
     with pytest.raises(ValueError, match="positive integer"):
         binding(revision=None, generation=None, session_generation=0)
+    with pytest.raises(ValueError, match="environment_generation"):
+        binding(environment_generation=-1)
 
 
 def test_unpaired_surrogate_in_exact_client_name_cannot_crash_authorization(

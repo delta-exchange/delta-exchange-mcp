@@ -8,7 +8,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -48,6 +48,7 @@ class ConsentBinding:
     credential_revision: int | None
     credential_generation: int | None
     credential_session_generation: int | None
+    environment_generation: int = 0
 
     def __post_init__(self) -> None:
         if self.environment not in SUPPORTED_ENVIRONMENTS:
@@ -81,6 +82,23 @@ class ConsentBinding:
             raise ValueError(
                 "a consent binding requires a credential revision or session generation"
             )
+        if (
+            not isinstance(self.environment_generation, int)
+            or isinstance(self.environment_generation, bool)
+            or self.environment_generation < 0
+        ):
+            raise ValueError("environment_generation must be a non-negative integer")
+
+    @property
+    def identity(self) -> tuple[str, int | None, int | None, int | None, int]:
+        """Credential and environment selection shared by client approvals."""
+        return (
+            self.environment,
+            self.credential_revision,
+            self.credential_generation,
+            self.credential_session_generation,
+            self.environment_generation,
+        )
 
     @property
     def persistent(self) -> bool:
@@ -118,6 +136,7 @@ class _Record:
     credential_session_generation: int | None
     enabled: bool
     generation: int
+    environment_generation: int = 0
 
     @classmethod
     def from_value(cls, value: object) -> "_Record":
@@ -130,6 +149,7 @@ class _Record:
         credential_session_generation = value.get("credential_session_generation")
         enabled = value.get("enabled")
         generation = value.get("generation")
+        environment_generation = value.get("environment_generation", 0)
         if not isinstance(client_name, str):
             raise ConsentStorageError("consent client_name must be a string")
         if environment not in SUPPORTED_ENVIRONMENTS:
@@ -154,6 +174,14 @@ class _Record:
             raise ConsentStorageError(
                 "consent generation must be a non-negative integer"
             )
+        if (
+            not isinstance(environment_generation, int)
+            or isinstance(environment_generation, bool)
+            or environment_generation < 0
+        ):
+            raise ConsentStorageError(
+                "consent environment_generation must be a non-negative integer"
+            )
         return cls(
             client_name=client_name,
             environment=environment,
@@ -162,6 +190,7 @@ class _Record:
             credential_session_generation=None,
             enabled=enabled,
             generation=generation,
+            environment_generation=environment_generation,
         )
 
     @property
@@ -172,6 +201,7 @@ class _Record:
             credential_revision=self.credential_revision,
             credential_generation=self.credential_generation,
             credential_session_generation=self.credential_session_generation,
+            environment_generation=self.environment_generation,
         )
 
 
@@ -185,6 +215,8 @@ def _record_key(binding: ConsentBinding) -> str:
     ]
     if binding.credential_session_generation is not None:
         values.append(binding.credential_session_generation)
+    if binding.environment_generation:
+        values.extend(("environment_generation", binding.environment_generation))
     encoded = json.dumps(
         values,
         ensure_ascii=True,
@@ -240,6 +272,11 @@ def _state(record: _Record | None, *, persistent: bool) -> ConsentState:
     )
 
 
+def _check_current(check: Callable[[], bool] | None) -> None:
+    if check is not None and not check():
+        raise StaleConsentError("the connection changed before consent was saved")
+
+
 def _updated_record(
     binding: ConsentBinding, *, enabled: bool, generation: int
 ) -> _Record:
@@ -251,6 +288,7 @@ def _updated_record(
         credential_session_generation=binding.credential_session_generation,
         enabled=enabled,
         generation=generation,
+        environment_generation=binding.environment_generation,
     )
 
 
@@ -263,6 +301,7 @@ def _revoked_record(record: _Record) -> _Record:
         credential_session_generation=record.credential_session_generation,
         enabled=False,
         generation=record.generation + 1,
+        environment_generation=record.environment_generation,
     )
 
 
@@ -284,9 +323,11 @@ class MemoryConsentBackend:
         *,
         enabled: bool,
         expected_generation: int,
+        check_current: Callable[[], bool] | None = None,
     ) -> ConsentState:
         """Update process-only consent under one shared lock."""
         with self._lock:
+            _check_current(check_current)
             key = _record_key(binding)
             current = self._records.get(key)
             actual = current.generation if current is not None else 0
@@ -304,9 +345,13 @@ class MemoryConsentBackend:
 
     def revoke_environment(self, environment: str) -> None:
         """Revoke all process-only approvals for an environment."""
+        self.revoke(lambda record: record.environment == environment)
+
+    def revoke(self, matches: Callable[[_Record], bool]) -> None:
+        """Invalidate only process-only records selected by the caller."""
         with self._lock:
             for key, record in list(self._records.items()):
-                if record.environment == environment:
+                if matches(record):
                     self._records[key] = _revoked_record(record)
 
 
@@ -331,17 +376,33 @@ class ConsentStore:
         return _state(self._read_file().get(_record_key(binding)), persistent=True)
 
     def enable(
-        self, binding: ConsentBinding, *, expected_generation: int
+        self,
+        binding: ConsentBinding,
+        *,
+        expected_generation: int,
+        check_current: Callable[[], bool] | None = None,
     ) -> ConsentState:
         """Enable all trading tools if the browser still has current state."""
-        return self._set(binding, enabled=True, expected_generation=expected_generation)
+        return self._set(
+            binding,
+            enabled=True,
+            expected_generation=expected_generation,
+            check_current=check_current,
+        )
 
     def disable(
-        self, binding: ConsentBinding, *, expected_generation: int
+        self,
+        binding: ConsentBinding,
+        *,
+        expected_generation: int,
+        check_current: Callable[[], bool] | None = None,
     ) -> ConsentState:
         """Disable trading if the browser still has current state."""
         return self._set(
-            binding, enabled=False, expected_generation=expected_generation
+            binding,
+            enabled=False,
+            expected_generation=expected_generation,
+            check_current=check_current,
         )
 
     def lease(self, binding: ConsentBinding) -> ConsentLease | None:
@@ -358,6 +419,7 @@ class ConsentStore:
         current_credential_revision: int | None,
         current_credential_generation: int | None,
         current_credential_session_generation: int | None,
+        current_environment_generation: int = 0,
     ) -> bool:
         """Require freshly read credential identity and consent for a real mutation."""
         _validate_current_credential(
@@ -370,6 +432,7 @@ class ConsentStore:
             or lease.binding.credential_generation != current_credential_generation
             or lease.binding.credential_session_generation
             != current_credential_session_generation
+            or lease.binding.environment_generation != current_environment_generation
         ):
             return False
         state = self.status(lease.binding)
@@ -381,14 +444,31 @@ class ConsentStore:
             raise ValueError(
                 f"environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}"
             )
-        self._memory_backend.revoke_environment(environment)
+        self._revoke(lambda record: record.environment == environment)
+
+    def revoke_identity(self, binding: ConsentBinding) -> None:
+        """Invalidate a superseded identity without changing newer approvals."""
+        self._revoke(lambda record: record.binding.identity == binding.identity)
+
+    def revoke_before(self, environment: str, credential_generation: int) -> None:
+        """Invalidate stored credentials older than a completed credential change."""
+        self._revoke(
+            lambda record: (
+                record.environment == environment
+                and record.credential_generation is not None
+                and record.credential_generation < credential_generation
+            )
+        )
+
+    def _revoke(self, matches: Callable[[_Record], bool]) -> None:
+        self._memory_backend.revoke(matches)
         if not self._secure_backend_available:
             return
         with self._write_lock():
             records = self._read_file()
             changed = False
             for key, record in list(records.items()):
-                if record.environment == environment:
+                if matches(record):
                     records[key] = _revoked_record(record)
                     changed = True
             if changed:
@@ -400,6 +480,7 @@ class ConsentStore:
         *,
         enabled: bool,
         expected_generation: int,
+        check_current: Callable[[], bool] | None,
     ) -> ConsentState:
         if expected_generation < 0:
             raise ValueError("expected_generation must be non-negative")
@@ -408,9 +489,11 @@ class ConsentStore:
                 binding,
                 enabled=enabled,
                 expected_generation=expected_generation,
+                check_current=check_current,
             )
 
         with self._write_lock():
+            _check_current(check_current)
             records = self._read_file()
             key = _record_key(binding)
             current = records.get(key)

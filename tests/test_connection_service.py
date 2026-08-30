@@ -310,6 +310,182 @@ def test_environment_generation_rejects_a_stale_page_after_an_aba_change() -> No
     assert store.environment_state("india_prod") == ("india_prod", 2)
 
 
+@pytest.mark.parametrize("persistent", [True, False])
+def test_first_approval_rejects_an_environment_round_trip_during_publication(
+    monkeypatch,
+    persistent: bool,
+) -> None:
+    first = service(verified, persistent=persistent)
+    first.credentials.replace("india_prod", "prod-key", "prod-secret")
+    first.credentials.replace("india_testnet", "test-key", "test-secret")
+    second = ConnectionService.open(
+        credentials=first.credentials,
+        consent=first.consent,
+        validator=verified,
+    )
+    expected = first._revision("Codex")
+    original = first.consent.enable
+
+    def change_environment_before_publication(
+        binding, *, expected_generation, check_current
+    ):
+        for environment in ("india_testnet", "india_prod"):
+            selected = action(
+                second,
+                "Another client",
+                "credentials",
+                {"operation": "activate", "environment": environment},
+            )
+            assert selected.content["status"] == "selected"
+        return original(
+            binding,
+            expected_generation=expected_generation,
+            check_current=check_current,
+        )
+
+    monkeypatch.setattr(first.consent, "enable", change_environment_before_publication)
+    result = action(
+        first,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+        expected,
+    )
+
+    assert result.stale is True
+    assert result.complete is False
+    assert first.status(context("Codex"))["trading"]["enabled"] is False
+    assert result.revision["active_environment_generation"] == (
+        expected["active_environment_generation"] + 2
+    )
+
+
+@pytest.mark.parametrize("read", ["status", "access"])
+def test_lagging_instance_does_not_revoke_fresh_consent_after_rotation(
+    read: str,
+) -> None:
+    first = service(verified)
+    first.credentials.replace("india_prod", "first-key", "first-secret")
+    second = ConnectionService.open(
+        credentials=first.credentials,
+        consent=ConsentStore(
+            store.path().with_name("consent.json"),
+            secure_backend_available=True,
+            memory_backend=MemoryConsentBackend(),
+        ),
+        validator=verified,
+    )
+    saved = action(
+        first,
+        "Codex",
+        "credentials",
+        {
+            "environment": "india_prod",
+            "api_key": "new-key",
+            "api_secret": "new-secret",
+        },
+    )
+    approved = action(
+        first,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+        saved.revision,
+    )
+    assert approved.content["status"] == "enabled"
+    access = asyncio.run(first.access_state(context("Codex")))
+    assert access.trading_enabled is True
+
+    if read == "status":
+        second.status(context("Another client"))
+    else:
+        asyncio.run(second.access_state(context("Another client")))
+
+    assert first.status(context("Codex"))["trading"]["enabled"] is True
+    assert access.final_trading_check() is True
+    assert second.client.config.api_key == "new-key"
+
+
+def test_a_shared_environment_round_trip_invalidates_existing_approval() -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+    )
+    approved = asyncio.run(connection.access_state(context("Codex")))
+    assert approved.trading_enabled is True
+
+    assert store.write({"DELTA_MCP_ENV": "india_testnet"}) is None
+    assert store.write({"DELTA_MCP_ENV": "india_prod"}) is None
+
+    assert approved.final_trading_check() is False
+    assert connection.status(context("Codex"))["trading"]["enabled"] is False
+
+
+def test_a_final_check_rejects_environment_changes_during_credential_resolution(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+    )
+    approved = asyncio.run(connection.access_state(context("Codex")))
+    original = connection.credentials.resolve
+    changed = False
+
+    def resolve_after_environment_change(environment, environ):
+        nonlocal changed
+        credential = original(environment, environ)
+        if not changed:
+            changed = True
+            assert store.write({"DELTA_MCP_ENV": "india_testnet"}) is None
+            assert store.write({"DELTA_MCP_ENV": "india_prod"}) is None
+        return credential
+
+    monkeypatch.setattr(
+        connection.credentials, "resolve", resolve_after_environment_change
+    )
+
+    assert approved.final_trading_check() is False
+    assert changed is True
+
+
+def test_returning_from_process_credentials_requires_fresh_stored_consent(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "stored-key", "stored-secret")
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+    )
+    assert connection.status(context("Codex"))["trading"]["enabled"] is True
+
+    monkeypatch.setenv("DELTA_API_KEY", "process-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "process-secret")
+    assert connection.status(context("Codex"))["trading"]["enabled"] is False
+    monkeypatch.delenv("DELTA_API_KEY")
+    monkeypatch.delenv("DELTA_API_SECRET")
+
+    assert connection.status(context("Codex"))["trading"]["enabled"] is False
+    approved = action(
+        connection,
+        "Codex",
+        "consent",
+        {"environment": "india_prod", "enabled": True, "acknowledged": True},
+    )
+    assert approved.content["status"] == "enabled"
+
+
 def test_inactive_environment_cannot_receive_trading_consent() -> None:
     connection = service(verified)
     connected = action(
@@ -536,7 +712,9 @@ def test_status_and_results_never_contain_credential_material() -> None:
             "api_secret": "visible-only-to-store-secret",
         },
     )
-    rendered = repr(result) + repr(connection.status(context("Codex"))) + repr(connection)
+    rendered = (
+        repr(result) + repr(connection.status(context("Codex"))) + repr(connection)
+    )
 
     assert "visible-only-to-store-key" not in rendered
     assert "visible-only-to-store-secret" not in rendered
