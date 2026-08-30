@@ -720,8 +720,10 @@ def test_status_and_results_never_contain_credential_material() -> None:
     assert "visible-only-to-store-secret" not in rendered
 
 
-def test_final_checker_rejects_cross_process_rotation_before_mutation(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("change", ["credential", "environment"])
+def test_final_checker_rejects_cross_process_changes_before_mutation(
+    monkeypatch,
+    change: str,
 ) -> None:
     connection = service(verified)
     connected = action(
@@ -802,14 +804,18 @@ def test_final_checker_rejects_cross_process_rotation_before_mutation(
     worker = threading.Thread(target=invoke)
     worker.start()
     assert entered.wait(5)
-    current = connection.credentials.metadata("india_prod")
-    connection.credentials.replace(
-        "india_prod",
-        "rotated-key",
-        "rotated-secret",
-        expected_revision=current.revision,
-        expected_generation=current.generation,
-    )
+    if change == "environment":
+        for environment in ("india_testnet", "india_prod"):
+            store.write({"DELTA_MCP_ENV": environment})
+    else:
+        current = connection.credentials.metadata("india_prod")
+        connection.credentials.replace(
+            "india_prod",
+            "rotated-key",
+            "rotated-secret",
+            expected_revision=current.revision,
+            expected_generation=current.generation,
+        )
     release.set()
     worker.join(5)
 

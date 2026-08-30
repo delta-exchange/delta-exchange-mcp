@@ -130,6 +130,9 @@ _TEMPLATE = """<!doctype html>
   <section aria-labelledby="credentials-title">
     <h2 id="credentials-title">API credentials</h2>
     <p class="note">Connect for the first time, or enter a new pair to rotate the current pair.</p>
+    <p id="reconnect-note" class="note" role="status" hidden>Reconnect once after this update.
+    The MCP cannot verify who owns the old OS credential record, so it leaves that record
+    unchanged. Enter your key and secret here, then approve trading again if needed.</p>
     <div class="field">
       <label class="label" for="key">API key</label>
       <input id="key" type="password" autocomplete="off" autocapitalize="none"
@@ -269,6 +272,7 @@ _TEMPLATE = """<!doctype html>
     document.getElementById("validation-state").textContent = selected.validation_state || "—";
     document.getElementById("account-state").textContent = selected.account_id || "—";
     document.getElementById("storage-state").textContent = selected.credential_source || "—";
+    document.getElementById("reconnect-note").hidden = selected.reconnect_required !== true;
     var trading = selectedIsActive ? (status.trading || {}) : {};
     document.getElementById("trading-state").textContent = selectedIsActive
       ? (trading.enabled

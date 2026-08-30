@@ -101,6 +101,11 @@ A replacement validates the candidate, writes a new version, reads it back, publ
 active pointer, rebinds the client, and then retires the old version. A crash or a missing
 keyring record must leave recoverable metadata.
 
+OS record names are scoped to the canonical metadata path. Metadata copied to a different
+path and records from the old draft format require a browser reconnect. Keep their record
+names in `preserved_records`, which is recovery information, not a cleanup queue. Never
+read, adopt, or delete a record whose metadata location cannot establish ownership.
+
 The first connection automatically migrates a complete legacy `config.env` credential
 pair. Migration writes and reads the OS record before it removes only the key and secret
 lines. A failure before publication leaves the file unchanged. Reject a symlink migration

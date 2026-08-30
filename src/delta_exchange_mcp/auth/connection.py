@@ -777,6 +777,11 @@ class ConnectionService:
                 "connected": connected,
                 "active": environment == base.env,
                 "credential_source": _source_name(source),
+                "reconnect_required": bool(
+                    not is_active_override
+                    and metadata is not None
+                    and metadata.reconnect_required
+                ),
                 "validation_state": (
                     active.state.value
                     if is_active_process and active is not None

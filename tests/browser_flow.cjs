@@ -26,8 +26,7 @@ class Element {
   }
 }
 
-async function main() {
-  const html = fs.readFileSync(0, "utf8");
+async function run(html, reconnect) {
   const script = html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)]
     .map((match) => [match[1], new Element()]));
@@ -48,13 +47,15 @@ async function main() {
       assert.fail(`Unexpected selector: ${selector}`);
     },
   };
+  let isConnected = !reconnect;
   const connection = (enabled) => ({
     environment: "india_prod",
     client_name: "Browser test",
     environments: {
       india_prod: {
-        active: true, connected: true, validation_state: "verified",
+        active: true, connected: isConnected, validation_state: "verified",
         account_id: "test-account", credential_source: "operating_system",
+        reconnect_required: !isConnected,
       },
     },
     trading: { enabled },
@@ -64,10 +65,17 @@ async function main() {
     assert.equal(endpoint, "/rpc");
     const payload = JSON.parse(options.body);
     calls.push(payload.action);
-    if (calls.length > 2) throw new Error("The loopback listener is closed");
+    if (calls.length > (reconnect ? 4 : 2)) throw new Error("The loopback listener is closed");
     const complete = payload.action === "consent";
+    if (payload.action === "credentials") {
+      assert.equal(payload.arguments.api_key, "synthetic-key");
+      assert.equal(payload.arguments.api_secret, "synthetic-secret");
+      isConnected = true;
+    }
     const content = complete
       ? { status: "enabled", message: "Trading enabled for this client.", connection: connection(true) }
+      : payload.action === "credentials"
+      ? { status: "saved", message: "Connected." }
       : connection(false);
     return {
       ok: true,
@@ -78,6 +86,18 @@ async function main() {
 
   vm.runInNewContext(script, { document, fetch });
   await new Promise(setImmediate);
+  assert.equal(elements.get("reconnect-note").hidden, !reconnect);
+  if (reconnect) {
+    assert.equal(elements.get("connection-state").textContent, "Not connected");
+    assert.equal(elements.get("enable-trading").disabled, true);
+    elements.get("key").value = "synthetic-key";
+    elements.get("secret").value = "synthetic-secret";
+    elements.get("connect").handlers.get("click")();
+    await new Promise(setImmediate);
+    assert.equal(elements.get("reconnect-note").hidden, true);
+    assert.equal(elements.get("key").value, "");
+    assert.equal(elements.get("secret").value, "");
+  }
   assert.equal(elements.get("connection-state").textContent, "Connected");
   assert.equal(elements.get("enable-trading").disabled, false);
   assert.equal(elements.get("acknowledge").checked, false);
@@ -86,12 +106,19 @@ async function main() {
   elements.get("enable-trading").handlers.get("click")();
   await new Promise(setImmediate);
 
-  assert.deepEqual(calls, ["status", "consent"], "Completion must not fetch the closed listener");
+  assert.deepEqual(calls, reconnect ? ["status", "credentials", "status", "consent"] : ["status", "consent"],
+    "Completion must not fetch the closed listener");
   assert.equal(elements.get("trading-state").textContent, "Trading is enabled for Browser test.");
   assert.match(elements.get("notice").textContent, /Return to your MCP client/);
   assert.equal(elements.get("notice").className, "good");
   assert.ok([...inputs, ...buttons].every((element) => element.disabled));
   assert.equal(elements.get("prod-ack").hidden, true);
+}
+
+async function main() {
+  const html = fs.readFileSync(0, "utf8");
+  await run(html, false);
+  await run(html, true);
 }
 
 main().catch((error) => {

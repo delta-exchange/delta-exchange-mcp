@@ -1,5 +1,6 @@
 """Exercise the browser setup boundary over a real loopback listener."""
 
+import asyncio
 import json
 import re
 import threading
@@ -8,12 +9,23 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from email.message import Message
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
 
+from delta_exchange_mcp import credentials as credential_check
 from delta_exchange_mcp import setup
+from delta_exchange_mcp.auth.connection import ConnectionService
+from delta_exchange_mcp.auth.consent import ConsentStore, MemoryConsentBackend
+from delta_exchange_mcp.auth.store import (
+    CredentialSource,
+    CredentialStore,
+    FileMetadata,
+    MemorySecretBackend,
+)
+from delta_exchange_mcp.config import Config
 
 
 @dataclass(frozen=True)
@@ -217,6 +229,153 @@ def assert_security_headers(response: Response) -> None:
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
 
 
+async def verified_candidate(
+    environment: str, api_key: str, api_secret: str
+) -> credential_check.Check:
+    return credential_check.Check(ok=True, reachable=True, detail=f"account-{api_key}")
+
+
+def connection_for(directory: Path, backend: MemorySecretBackend) -> ConnectionService:
+    return ConnectionService.open(
+        Config(env="india_prod", base_url="https://api.invalid/v2"),
+        credentials=CredentialStore(
+            backend,
+            FileMetadata(directory / "credentials.json"),
+            CredentialSource.OS_STORE,
+        ),
+        consent=ConsentStore(
+            directory / "consent.json",
+            secure_backend_available=True,
+            memory_backend=MemoryConsentBackend(),
+        ),
+        validator=verified_candidate,
+    )
+
+
+@pytest.mark.parametrize("other_action", ["replace", "rotate", "disconnect"])
+def test_browser_actions_in_another_folder_cannot_change_an_approved_account(
+    tmp_path, other_action
+) -> None:
+    backend = MemorySecretBackend()
+    first = connection_for(tmp_path / "first", backend)
+    second = connection_for(tmp_path / "second", backend)
+    try:
+        browser = Browser(first.open_page("Codex"))
+        assert browser.open().status == 200
+        saved = browser.post(
+            "credentials",
+            {
+                "environment": "india_prod",
+                "api_key": "first-key",
+                "api_secret": "first-secret",
+            },
+        )
+        assert saved.status == 200
+        approved = browser.post(
+            "consent",
+            {
+                "environment": "india_prod",
+                "enabled": True,
+                "acknowledged": True,
+            },
+        )
+        assert approved.status == 200
+        assert approved.body["complete"] is True
+
+        other = Browser(second.open_page("Codex"))
+        assert other.open().status == 200
+        changed = other.post(
+            "credentials",
+            {
+                "environment": "india_prod",
+                "api_key": "second-key",
+                "api_secret": "second-secret",
+            },
+        )
+        assert changed.status == 200
+        if other_action != "replace":
+            changed = other.post(
+                "credentials",
+                {
+                    "operation": "disconnect"
+                    if other_action == "disconnect"
+                    else "replace",
+                    "environment": "india_prod",
+                    "api_key": "rotated-key",
+                    "api_secret": "rotated-secret",
+                },
+            )
+            assert changed.status == 200
+
+        browser = Browser(first.open_page("Codex"))
+        assert browser.open().status == 200
+        status = browser.post("status").body["result"]["structuredContent"]
+        assert status["environments"]["india_prod"]["account_id"] == "account-first-key"
+        assert status["trading"]["enabled"] is True
+        assert first.client.config.api_key == "first-key"
+        assert first.client.config.api_secret == "first-secret"
+        assert first.credentials.get("india_prod").api_key == "first-key"
+    finally:
+        for connection in (first, second):
+            connection.close()
+            asyncio.run(connection.client.aclose())
+
+
+def test_old_draft_credentials_can_reconnect_through_the_browser(tmp_path) -> None:
+    backend = MemorySecretBackend()
+    old_name = "credential:india_prod:1"
+    backend.set(old_name, "unowned record that must not be read")
+    metadata_path = tmp_path / "credentials.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "india_prod": {
+                        "active_revision": 1,
+                        "next_revision": 2,
+                        "generation": 1,
+                        "state": "verified",
+                        "account_id": "old-account",
+                        "created_at": "",
+                        "updated_at": "",
+                        "validated_at": "",
+                    }
+                },
+            }
+        )
+    )
+    connection = connection_for(tmp_path, backend)
+    try:
+        browser = Browser(connection.open_page("Codex"))
+        opened = browser.open()
+        assert opened.status == 200
+        assert "Reconnect once after this update" in opened.text
+        status = browser.post("status").body["result"]["structuredContent"]
+        assert status["credentials_configured"] is False
+        assert status["environments"]["india_prod"]["reconnect_required"] is True
+        assert status["environments"]["india_prod"]["account_id"] == ""
+        assert status["trading"]["enabled"] is False
+        saved = browser.post(
+            "credentials",
+            {
+                "environment": "india_prod",
+                "api_key": "new-key",
+                "api_secret": "new-secret",
+            },
+        )
+        assert saved.status == 200
+        status = browser.post("status").body["result"]["structuredContent"]
+        assert status["credentials_configured"] is True
+        assert status["environments"]["india_prod"]["reconnect_required"] is False
+        assert status["environments"]["india_prod"]["account_id"] == "account-new-key"
+        assert status["trading"]["enabled"] is False
+        assert backend.get(old_name) == "unowned record that must not be read"
+    finally:
+        connection.close()
+        asyncio.run(connection.client.aclose())
+
+
 def test_the_locator_finds_the_flow_but_does_not_authorize_a_post(
     page: setup.Page,
 ) -> None:
@@ -311,9 +470,7 @@ def test_the_action_layer_rejects_stale_credential_and_consent_state_across_page
     actions: FakeActions,
 ) -> None:
     pages = [
-        setup.serve(
-            open_browser=False, actions=actions, revision=actions.snapshot()
-        )
+        setup.serve(open_browser=False, actions=actions, revision=actions.snapshot())
         for _ in range(2)
     ]
     try:
@@ -331,9 +488,7 @@ def test_the_action_layer_rejects_stale_credential_and_consent_state_across_page
             page.stop()
 
     pages = [
-        setup.serve(
-            open_browser=False, actions=actions, revision=actions.snapshot()
-        )
+        setup.serve(open_browser=False, actions=actions, revision=actions.snapshot())
         for _ in range(2)
     ]
     try:
@@ -374,9 +529,7 @@ def test_duplicate_tab_mutations_are_serialized_and_only_one_wins(
     release = threading.Event()
     actions = FakeActions(entered=entered, release=release)
     page.stop()
-    page = setup.serve(
-        open_browser=False, actions=actions, revision=actions.snapshot()
-    )
+    page = setup.serve(open_browser=False, actions=actions, revision=actions.snapshot())
     try:
         browser = Browser(page)
         assert browser.open().status == 200
@@ -452,10 +605,10 @@ def test_the_page_uses_direct_actions_instead_of_an_mcp_http_endpoint() -> None:
     served = setup.form.page_html(
         "/flow/rpc", csrf_token="csrf", revision=7, nonce="nonce"
     )
-    assert 'action: action' in served
-    assert 'csrf_token: csrfToken' in served
-    assert 'expected_revision: revision' in served
-    assert 'body: JSON.stringify({ method: method, params: params })' not in served
+    assert "action: action" in served
+    assert "csrf_token: csrfToken" in served
+    assert "expected_revision: revision" in served
+    assert "body: JSON.stringify({ method: method, params: params })" not in served
 
 
 def test_the_http_endpoint_rejects_mcp_tool_calls(browser: Browser) -> None:
@@ -490,7 +643,9 @@ def test_callback_failures_do_not_log_secret_arguments(
         page.stop()
 
 
-def test_an_expired_page_closes_and_wakes_waiters(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_expired_page_closes_and_wakes_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(setup, "LIFETIME_SECONDS", 0.2)
     page = setup.serve(open_browser=False, actions=FakeActions())
     started = time.monotonic()
