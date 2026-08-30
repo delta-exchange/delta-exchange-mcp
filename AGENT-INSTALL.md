@@ -60,6 +60,11 @@ After the user finishes, call `get_connection_status`. Report the environment, c
 source, validation state, account ID when present, client name, and trading state. Never ask
 the user to send a credential so you can diagnose the result.
 
+If the selected environment reports `reconnect_required`, open Manage Connection again.
+This means the OS record comes from the earlier draft or another metadata location. The
+server preserves that record but does not use it. Let the user enter the pair in the browser
+and approve trading again. Do not try to copy the old record or request the pair in chat.
+
 ## 4. Keep trading as a separate decision
 
 The browser page offers trading after account connection. A blocked real trading call can

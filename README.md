@@ -76,6 +76,10 @@ The server stores one credential record for production and one for testnet. It u
 The non-secret metadata file records the active revision, validation state, account ID,
 timestamps, and revocation generation. It never contains the API key or secret.
 
+Each metadata location uses separate OS credential records. Two clients that use the same
+metadata location share its records. Copying metadata to a different location does not
+connect that location to the existing account.
+
 If no approved credential service is available, the server keeps the credential in memory
 for that process. The connection and trading approval then end when the process stops. The
 server does not use a plaintext fallback.
@@ -87,6 +91,12 @@ On the first compatible start, the server checks the old
 the pair to the operating-system credential service and reads it back. It then removes only
 the two secret lines. A failed migration leaves the file unchanged. The old trade-mode value
 does not become trading approval.
+
+If you used the earlier browser-authorization draft, reconnect once through Manage
+Connection. The old OS record does not identify its metadata location, so the server cannot
+confirm that it belongs to this installation. The server leaves that record unchanged and
+saves the pair you enter as a separate OS record. Approve trading again if you need it.
+Moving a metadata file to a different location also requires this reconnect.
 
 A complete credential pair supplied by the MCP client's process environment remains
 supported for compatibility. The status tool reports it as externally managed. The browser
