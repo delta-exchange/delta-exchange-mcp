@@ -291,7 +291,7 @@ class MemorySecretBackend:
 
 
 @contextmanager
-def _file_lock(target: Path) -> Iterator[None]:
+def _file_lock(target: Path) -> Iterator[tuple[int, Path]]:
     lock_path = target.with_name(f".{target.name}.lock")
     try:
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -327,7 +327,7 @@ def _file_lock(target: Path) -> Iterator[None]:
                             f"timed out waiting for {lock_path}"
                         ) from exc
                     time.sleep(_LOCK_POLL_SECONDS)
-        yield
+        yield fd, lock_path
     finally:
         if locked:
             if os.name == "nt":
@@ -342,10 +342,18 @@ class FileMetadata:
     """Read and atomically replace the non-secret credential metadata file."""
 
     def __init__(self, path: Path):
-        self.path = path.resolve()
-        self.namespace = hashlib.sha256(
-            os.fsencode(os.path.normcase(self.path))
-        ).hexdigest()
+        # The persistent lock exists before the first metadata write. Resolve its
+        # filesystem spelling so case aliases use the same namespace from startup.
+        with _file_lock(path.resolve()) as (fd, lock_path):
+            if os.name != "nt" and hasattr(fcntl, "F_GETPATH"):
+                raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+                lock_path = Path(os.fsdecode(raw.split(b"\0", 1)[0]))
+            else:
+                lock_path = lock_path.resolve()
+            self.path = lock_path.with_name(
+                lock_path.name.removeprefix(".").removesuffix(".lock")
+            )
+        self.namespace = hashlib.sha256(os.fsencode(self.path)).hexdigest()
         self._thread_lock = threading.RLock()
 
     @contextmanager

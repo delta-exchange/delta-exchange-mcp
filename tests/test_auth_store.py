@@ -285,7 +285,7 @@ def test_metadata_files_in_the_same_folder_have_separate_records(tmp_path):
     assert len(backend.values) == 2
 
 
-@pytest.mark.parametrize("alias_kind", ["relative", "symlink"])
+@pytest.mark.parametrize("alias_kind", ["relative", "symlink", "case"])
 def test_metadata_path_aliases_share_one_record_and_revision_lock(tmp_path, alias_kind):
     directory = tmp_path / "original"
     directory.mkdir()
@@ -295,6 +295,10 @@ def test_metadata_path_aliases_share_one_record_and_revision_lock(tmp_path, alia
             alias.symlink_to(directory, target_is_directory=True)
         except OSError:
             pytest.skip("directory symlinks are unavailable on this system")
+    elif alias_kind == "case":
+        alias = tmp_path / "ORIGINAL"
+        if not alias.exists():
+            pytest.skip("this filesystem has case-sensitive directory names")
     else:
         alias = directory / ".." / "original"
     backend = FakeSecretBackend()
@@ -308,6 +312,32 @@ def test_metadata_path_aliases_share_one_record_and_revision_lock(tmp_path, alia
         first.replace("india_prod", "stale-key", "secret", expected_revision=1)
     assert first.get("india_prod") == updated
     assert len(backend.values) == 1
+
+
+def test_record_names_follow_filesystem_case_rules_before_the_first_save(tmp_path):
+    backend = FakeSecretBackend()
+    first_path = tmp_path / "credentials.json"
+    second_path = tmp_path / "CREDENTIALS.JSON"
+    first = CredentialStore(
+        backend, FileMetadata(first_path), CredentialSource.OS_STORE
+    )
+    second = CredentialStore(
+        backend, FileMetadata(second_path), CredentialSource.OS_STORE
+    )
+    saved = first.replace("india_prod", "first-key", "secret")
+
+    if second_path.exists() and first_path.samefile(second_path):
+        assert second.get("india_prod") == saved
+        updated = second.replace(
+            "india_prod", "second-key", "secret", expected_revision=1
+        )
+        assert first.get("india_prod") == updated
+        assert len(backend.values) == 1
+    else:
+        assert second.get("india_prod") is None
+        second.replace("india_prod", "second-key", "secret", expected_revision=0)
+        assert first.get("india_prod") == saved
+        assert len(backend.values) == 2
 
 
 def test_memory_metadata_instances_do_not_share_secret_names():
