@@ -2,8 +2,38 @@
 
 import json
 import re
+import subprocess
+from pathlib import Path
 
 from delta_exchange_mcp import config, form
+
+
+def test_browser_script_parses_in_strict_mode() -> None:
+    html = form.page_html("/rpc", nonce="test-nonce")
+    script = re.search(r"<script[^>]*>(.*?)</script>", html, re.DOTALL)
+    assert script is not None
+
+    result = subprocess.run(
+        ["node", "--check"],
+        input=script.group(1),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_browser_script_uses_the_final_response_after_listener_shutdown() -> None:
+    result = subprocess.run(
+        ["node", str(Path(__file__).with_name("browser_flow.cjs"))],
+        input=form.page_html("/rpc", nonce="test-nonce"),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_browser_page_posts_secrets_only_to_the_loopback_action_endpoint() -> None:

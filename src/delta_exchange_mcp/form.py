@@ -171,6 +171,7 @@ _TEMPLATE = """<!doctype html>
   var revision = CONFIG.revision === undefined ? 0 : CONFIG.revision;
   var current = null;
   var busy = false;
+  var complete = false;
 
   var envs = document.getElementById("envs");
   var key = document.getElementById("key");
@@ -227,14 +228,14 @@ _TEMPLATE = """<!doctype html>
     });
   }
 
-  function request(action, arguments) {
+  function request(action, args) {
     return fetch(CONFIG.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
       body: JSON.stringify({
         action: action,
-        arguments: arguments || {},
+        arguments: args || {},
         csrf_token: csrfToken,
         expected_revision: revision
       })
@@ -246,7 +247,10 @@ _TEMPLATE = """<!doctype html>
         if (!response.ok || body.error) {
           throw new Error((body.error && body.error.message) || "The action failed.");
         }
-        return body.result && body.result.structuredContent || {};
+        return {
+          content: body.result && body.result.structuredContent || {},
+          complete: body.complete === true
+        };
       });
     });
   }
@@ -279,23 +283,36 @@ _TEMPLATE = """<!doctype html>
   }
 
   function refresh() {
-    return request("status", {}).then(function (status) { render(status, true); });
+    return request("status", {}).then(function (response) { render(response.content, true); });
   }
 
-  function run(action, arguments, success) {
-    if (busy) return;
+  function run(action, args, success) {
+    if (busy || complete) return;
     setBusy(true);
     message("");
-    request(action, arguments).then(function (result) {
+    request(action, args).then(function (response) {
+      var result = response.content;
       key.value = "";
       secret.value = "";
       show.checked = false;
       key.type = secret.type = "password";
+      if (response.complete) {
+        complete = true;
+        render(result.connection, true);
+        prodAck.hidden = true;
+        document.querySelectorAll("input, button").forEach(function (control) {
+          control.disabled = true;
+        });
+        message(result.message + " Return to your MCP client and retry the request. " +
+          "To make more changes, open Manage Connection again.", "good");
+        return;
+      }
       message(result.message || success, result.status === "rejected" ? "bad" : "good");
       return refresh();
     }).catch(function (error) {
       message(error.message, "bad");
     }).finally(function () {
+      if (complete) return;
       setBusy(false);
       if (current) render(current, false);
     });

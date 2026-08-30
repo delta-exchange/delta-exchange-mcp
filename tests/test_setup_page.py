@@ -357,12 +357,13 @@ def test_credential_and_consent_actions_can_run_in_sequence(
     credential = browser.post("credentials", {"api_key": "key", "api_secret": "secret"})
     assert credential.status == 200
     assert credential.body["revision"] == {"credential": 1, "consent": 0}
+    assert credential.body["complete"] is False
     assert browser.page.running
 
     consent = browser.post("consent", {"enabled": True})
     assert consent.status == 200
     assert consent.body["revision"] == {"credential": 1, "consent": 1}
-    assert browser.page.saved.is_set()
+    assert browser.page.saved.wait(timeout=2)
     assert [call[0] for call in actions.calls] == ["credentials", "consent"]
 
 
@@ -426,7 +427,8 @@ def test_completion_is_signalled_after_the_full_response_reaches_the_browser(
     response = browser.post("consent", {"enabled": True})
     assert response.status == 200
     assert response.body["result"]["structuredContent"]["trading"] == "enabled"
-    assert browser.page.saved.is_set()
+    assert response.body["complete"] is True
+    assert browser.page.saved.wait(timeout=2)
 
 
 def test_html_and_json_responses_send_security_headers(browser: Browser) -> None:

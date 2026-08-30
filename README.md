@@ -703,6 +703,9 @@ Register the dev server under a separate name (e.g. `delta-exchange-mcp-dev`) so
 
 ## Development
 
+Use Python 3.12 or later and Node.js 22 or later for development. The test suite uses
+Node.js to parse the generated browser JavaScript. End users do not need Node.js.
+
 ```bash
 uv sync                       # install deps
 uv run pytest                 # run tests (no network, respx-mocked)

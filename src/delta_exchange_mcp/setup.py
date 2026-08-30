@@ -142,7 +142,10 @@ class _Flow:
                 )
             return _Reply(
                 200,
-                {"result": {"structuredContent": result.content}},
+                {
+                    "result": {"structuredContent": result.content},
+                    "complete": result.complete,
+                },
                 csrf_token=next_csrf,
                 revision=self.revision,
                 complete=result.complete,

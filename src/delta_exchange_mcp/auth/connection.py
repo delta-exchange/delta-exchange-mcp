@@ -492,6 +492,7 @@ class ConnectionService:
                     else "Trading disabled."
                 ),
                 "persistent": state.persistent,
+                "connection": self._status(client_name, "").as_dict(),
             },
             revision=self._revision(client_name),
             complete=state.enabled,

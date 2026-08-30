@@ -162,6 +162,11 @@ def test_rotation_disconnect_and_environment_round_trip_revoke_consent() -> None
         prod.revision,
     )
     assert consent.content["status"] == "enabled"
+    assert consent.complete is True
+    final_status = consent.content["connection"]
+    assert final_status["credentials_configured"] is True
+    assert final_status["trading"]["enabled"] is True
+    assert final_status["client_name"] == client_name
 
     testnet = action(
         connection,
