@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -109,6 +110,29 @@ def test_failed_report_replace_removes_private_temp_file(tmp_path, monkeypatch) 
         run_mod._write_private_report(path, "private account data")
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
+def test_successful_report_replace_preserves_reused_temp_path(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "report.json"
+    real_replace = run_mod.os.replace
+    recreated_paths = []
+
+    def replace_and_recreate(source, destination) -> None:
+        real_replace(source, destination)
+        recreated_path = Path(source)
+        recreated_path.write_text("unrelated concurrent file")
+        recreated_paths.append(recreated_path)
+
+    monkeypatch.setattr(run_mod.os, "replace", replace_and_recreate)
+
+    run_mod._write_private_report(path, "private account data")
+
+    assert path.read_text() == "private account data"
+    assert len(recreated_paths) == 1
+    assert recreated_paths[0].read_text() == "unrelated concurrent file"
 
 
 @pytest.mark.parametrize("writer", ["write_report", "_write_private_report"])

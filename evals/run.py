@@ -53,6 +53,7 @@ def _write_private_report(path: Path, contents: str) -> None:
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temp_name)
+    replace_succeeded = False
     try:
         os.fchmod(fd, 0o600)
         report = os.fdopen(fd, "w", encoding="utf-8")
@@ -60,12 +61,14 @@ def _write_private_report(path: Path, contents: str) -> None:
         with report:
             report.write(contents)
         os.replace(temp_path, path)
+        replace_succeeded = True
     finally:
         try:
             if fd != -1:
                 os.close(fd)
         finally:
-            temp_path.unlink(missing_ok=True)
+            if not replace_succeeded:
+                temp_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
