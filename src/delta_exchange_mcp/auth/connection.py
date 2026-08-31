@@ -15,6 +15,7 @@ from delta_exchange_mcp import request
 from delta_exchange_mcp import setup
 from delta_exchange_mcp import store as legacy_store
 from delta_exchange_mcp.auth.consent import (
+    ConsentBackend,
     ConsentBinding,
     ConsentLease,
     ConsentState,
@@ -117,7 +118,9 @@ class ConnectionService:
     credential_error: str = ""
     store_error: str = ""
     _consent_read_unavailable: bool = field(default=False, repr=False)
-    _consent_write_unavailable: bool = field(default=False, repr=False)
+    _consent_write_unavailable: set[ConsentBackend] = field(
+        default_factory=set, repr=False
+    )
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
@@ -160,7 +163,7 @@ class ConnectionService:
         except (CredentialStoreError, OSError, ValueError) as exc:
             migration = MigrationResult(MigrationStatus.ABSENT, "")
             migration_error = type(exc).__name__
-        consent_write_unavailable = False
+        consent_write_unavailable: set[ConsentBackend] = set()
         if migration.status is MigrationStatus.MIGRATED and migration.environment:
             if migration.credential is None or migration.credential.generation is None:
                 raise CredentialStoreError(
@@ -171,7 +174,7 @@ class ConnectionService:
                     migration.environment, migration.credential.generation
                 )
             except ConsentStorageError:
-                consent_write_unavailable = True
+                consent_write_unavailable.add(ConsentBackend.PERSISTENT)
 
         fixed = replace(cfg, mode="read") if cfg is not None else None
         environ: Mapping[str, str] | None = None
@@ -218,6 +221,19 @@ class ConnectionService:
             if self._consent_read_unavailable or self._consent_write_unavailable
             else ""
         )
+
+    def _consent_write_failed(self, backend: ConsentBackend) -> None:
+        self._consent_write_unavailable.add(backend)
+
+    def _consent_write_succeeded(self, *backends: ConsentBackend) -> None:
+        self._consent_write_unavailable.difference_update(backends)
+
+    def _consent_revocation_failed(self) -> None:
+        """Record failure in the persistent part of a broad revocation."""
+        self._consent_write_failed(ConsentBackend.PERSISTENT)
+
+    def _consent_revocation_succeeded(self, written: frozenset[ConsentBackend]) -> None:
+        self._consent_write_succeeded(*written)
 
     async def access_state(self, ctx: Context) -> AccessState:
         """Return authorization and a point-of-use checker for this request."""
@@ -424,8 +440,8 @@ class ConnectionService:
 
         status = "saved" if checked.ok else "unverified"
         try:
-            self.consent.revoke_before(environment, expected_generation + 1)
-            self._consent_write_unavailable = False
+            written = self.consent.revoke_before(environment, expected_generation + 1)
+            self._consent_revocation_succeeded(written)
             environment_result = self._set_environment(environment, expected)
         except legacy_store.SettingsConflictError:
             self._reconcile()
@@ -441,7 +457,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self._consent_write_unavailable = True
+            self._consent_revocation_failed()
             self._reconcile()
             return self._rejected(
                 client_name,
@@ -497,10 +513,10 @@ class ConnectionService:
                 "The secure credential service could not disconnect this account.",
             )
         try:
-            self.consent.revoke_before(environment, expected_generation + 1)
-            self._consent_write_unavailable = False
+            written = self.consent.revoke_before(environment, expected_generation + 1)
+            self._consent_revocation_succeeded(written)
         except ConsentStorageError:
-            self._consent_write_unavailable = True
+            self._consent_revocation_failed()
         self._reconcile()
         return setup.ActionResult(
             {
@@ -528,7 +544,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self._consent_write_unavailable = True
+            self._consent_revocation_failed()
             return self._rejected(
                 client_name,
                 "Trading consent could not be revoked. The active environment is unchanged.",
@@ -566,6 +582,7 @@ class ConnectionService:
                 client_name, "Connect an account before enabling trading."
             )
         enabled = arguments.get("enabled") is True
+        backend = self.consent.backend(binding)
         if (
             enabled
             and environment == "india_prod"
@@ -600,12 +617,12 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self._consent_write_unavailable = True
+            self._consent_write_failed(backend)
             return self._rejected(
                 client_name,
                 "The trading consent service is unavailable. Trading remains disabled.",
             )
-        self._consent_write_unavailable = False
+        self._consent_write_succeeded(backend)
         return setup.ActionResult(
             {
                 "status": "enabled" if state.enabled else "disabled",
@@ -714,9 +731,9 @@ class ConnectionService:
             )
 
         def revoke() -> None:
-            self.consent.revoke_environment(expected_environment)
-            self.consent.revoke_environment(environment)
-            self._consent_write_unavailable = False
+            written = self.consent.revoke_environment(expected_environment)
+            written |= self.consent.revoke_environment(environment)
+            self._consent_revocation_succeeded(written)
 
         problem = legacy_store.compare_and_write_environment(
             expected_environment,
@@ -750,10 +767,10 @@ class ConnectionService:
         previous = self._active_binding
         if previous is not None and previous != binding:
             try:
-                self.consent.revoke_identity(previous)
-                self._consent_write_unavailable = False
+                written = self.consent.revoke_identity(previous)
+                self._consent_revocation_succeeded(written)
             except ConsentStorageError:
-                self._consent_write_unavailable = True
+                self._consent_revocation_failed()
         self.client.rebind(_bind_config(base, credential))
         self._active_binding = binding
         self.credential_error = error
@@ -838,7 +855,10 @@ class ConnectionService:
                 )
                 if credential is None:
                     return False
-                if self._binding(lease.binding.client_name, credential) != lease.binding:
+                if (
+                    self._binding(lease.binding.client_name, credential)
+                    != lease.binding
+                ):
                     return False
                 confirmed_credential, _ = _resolve_credential(
                     self.credentials, base.env, self.credential_environ
