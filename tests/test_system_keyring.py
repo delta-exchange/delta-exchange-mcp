@@ -4,13 +4,12 @@ import uuid
 
 import pytest
 
-from delta_exchange_mcp.auth.store import (
+from delta_exchange_mcp.auth.backend import (
     SERVICE_NAME,
-    CredentialSource,
-    CredentialStore,
     FileMetadata,
     SystemKeyringBackend,
 )
+from delta_exchange_mcp.auth.store import CredentialSource, CredentialStore
 
 
 @pytest.mark.skipif(

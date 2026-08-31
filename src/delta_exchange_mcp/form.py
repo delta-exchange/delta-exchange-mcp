@@ -280,7 +280,8 @@ _TEMPLATE = """<!doctype html>
         : "Trading is off for " + (status.client_name || "this session") + ".")
       : "Use this environment before you enable trading.";
     document.getElementById("activate").disabled = busy || selectedIsActive;
-    document.getElementById("disconnect").disabled = busy || !selected.connected || selected.externally_managed;
+    document.getElementById("disconnect").disabled = busy ||
+      (!selected.connected && !selected.credential_metadata_present) || selected.externally_managed;
     document.getElementById("connect").disabled = busy || selected.externally_managed;
     document.getElementById("enable-trading").disabled = busy || !selectedIsActive || !selected.connected || trading.enabled;
     document.getElementById("disable-trading").disabled = busy || !selectedIsActive || !trading.enabled;

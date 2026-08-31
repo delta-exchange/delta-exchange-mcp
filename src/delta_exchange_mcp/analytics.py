@@ -26,7 +26,7 @@ CONTEXT_HEADER = f"{PREFIX}Context"
 BUDGET_BYTES = 4096
 FIELD_LIMIT = 200
 
-_SAFE = " !\"#$&'()*+,-./:;<=>?@[]^_`{|}~"
+_SAFE = "!\"#$&'()*+,-./:;<=>?@[]^_`{|}~"
 _CLOSED_CAPABILITIES = ("sampling", "elicitation", "roots", "tasks")
 _OPEN_CAPABILITIES = ("experimental", "extensions")
 _PLATFORM = f"{platform.system()} {platform.machine()}"
