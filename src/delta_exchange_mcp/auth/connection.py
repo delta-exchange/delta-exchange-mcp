@@ -18,6 +18,7 @@ from delta_exchange_mcp.auth.consent import (
     ConsentBackend,
     ConsentBinding,
     ConsentLease,
+    ConsentRevocationError,
     ConsentState,
     ConsentStorageError,
     ConsentStore,
@@ -117,7 +118,9 @@ class ConnectionService:
     migration_error: str = ""
     credential_error: str = ""
     store_error: str = ""
-    _consent_read_unavailable: bool = field(default=False, repr=False)
+    _consent_read_unavailable: set[ConsentBackend] = field(
+        default_factory=set, repr=False
+    )
     _consent_write_unavailable: set[ConsentBackend] = field(
         default_factory=set, repr=False
     )
@@ -173,8 +176,13 @@ class ConnectionService:
                 consent_store.revoke_before(
                     migration.environment, migration.credential.generation
                 )
-            except ConsentStorageError:
-                consent_write_unavailable.add(ConsentBackend.PERSISTENT)
+            except ConsentStorageError as exc:
+                failed_backend = (
+                    exc.failed_backend
+                    if isinstance(exc, ConsentRevocationError)
+                    else ConsentBackend.PERSISTENT
+                )
+                consent_write_unavailable.add(failed_backend)
 
         fixed = replace(cfg, mode="read") if cfg is not None else None
         environ: Mapping[str, str] | None = None
@@ -228,8 +236,18 @@ class ConnectionService:
     def _consent_write_succeeded(self, *backends: ConsentBackend) -> None:
         self._consent_write_unavailable.difference_update(backends)
 
-    def _consent_revocation_failed(self) -> None:
-        """Record failure in the persistent part of a broad revocation."""
+    def _consent_read_failed(self, backend: ConsentBackend) -> None:
+        self._consent_read_unavailable.add(backend)
+
+    def _consent_read_succeeded(self, backend: ConsentBackend) -> None:
+        self._consent_read_unavailable.discard(backend)
+
+    def _consent_revocation_failed(self, error: ConsentStorageError) -> None:
+        """Record each completed and failed backend in a broad revocation."""
+        if isinstance(error, ConsentRevocationError):
+            self._consent_write_succeeded(*error.written)
+            self._consent_write_failed(error.failed_backend)
+            return
         self._consent_write_failed(ConsentBackend.PERSISTENT)
 
     def _consent_revocation_succeeded(self, written: frozenset[ConsentBackend]) -> None:
@@ -456,8 +474,8 @@ class ConnectionService:
                 revision=self._revision(client_name),
                 stale=True,
             )
-        except ConsentStorageError:
-            self._consent_revocation_failed()
+        except ConsentStorageError as exc:
+            self._consent_revocation_failed(exc)
             self._reconcile()
             return self._rejected(
                 client_name,
@@ -515,8 +533,8 @@ class ConnectionService:
         try:
             written = self.consent.revoke_before(environment, expected_generation + 1)
             self._consent_revocation_succeeded(written)
-        except ConsentStorageError:
-            self._consent_revocation_failed()
+        except ConsentStorageError as exc:
+            self._consent_revocation_failed(exc)
         self._reconcile()
         return setup.ActionResult(
             {
@@ -543,8 +561,8 @@ class ConnectionService:
                 revision=self._revision(client_name),
                 stale=True,
             )
-        except ConsentStorageError:
-            self._consent_revocation_failed()
+        except ConsentStorageError as exc:
+            self._consent_revocation_failed(exc)
             return self._rejected(
                 client_name,
                 "Trading consent could not be revoked. The active environment is unchanged.",
@@ -731,9 +749,22 @@ class ConnectionService:
             )
 
         def revoke() -> None:
-            written = self.consent.revoke_environment(expected_environment)
-            written |= self.consent.revoke_environment(environment)
-            self._consent_revocation_succeeded(written)
+            written: set[ConsentBackend] = set()
+            try:
+                written.update(self.consent.revoke_environment(expected_environment))
+                written.update(self.consent.revoke_environment(environment))
+            except ConsentStorageError as exc:
+                completed = set(written)
+                failed_backend = ConsentBackend.PERSISTENT
+                if isinstance(exc, ConsentRevocationError):
+                    completed.update(exc.written)
+                    failed_backend = exc.failed_backend
+                raise ConsentRevocationError(
+                    str(exc),
+                    failed_backend=failed_backend,
+                    written=frozenset(completed),
+                ) from exc
+            self._consent_revocation_succeeded(frozenset(written))
 
         problem = legacy_store.compare_and_write_environment(
             expected_environment,
@@ -769,8 +800,8 @@ class ConnectionService:
             try:
                 written = self.consent.revoke_identity(previous)
                 self._consent_revocation_succeeded(written)
-            except ConsentStorageError:
-                self._consent_revocation_failed()
+            except ConsentStorageError as exc:
+                self._consent_revocation_failed(exc)
         self.client.rebind(_bind_config(base, credential))
         self._active_binding = binding
         self.credential_error = error
@@ -815,29 +846,32 @@ class ConnectionService:
         """Read one approval, or fail only the trading capability closed."""
         if binding is None:
             return None
+        backend = self.consent.backend(binding)
         try:
             lease = self.consent.lease(binding)
         except ConsentStorageError:
-            self._consent_read_unavailable = True
+            self._consent_read_failed(backend)
             return None
-        self._consent_read_unavailable = False
+        self._consent_read_succeeded(backend)
         return lease
 
     def _consent_status(self, binding: ConsentBinding | None) -> ConsentState | None:
         """Read consent for status without making account access depend on its store."""
         if binding is None:
             return None
+        backend = self.consent.backend(binding)
         try:
             state = self.consent.status(binding)
         except ConsentStorageError:
-            self._consent_read_unavailable = True
+            self._consent_read_failed(backend)
             return None
-        self._consent_read_unavailable = False
+        self._consent_read_succeeded(backend)
         return state
 
     def _final_checker(self, lease: ConsentLease | None) -> Callable[[], bool]:
         if lease is None:
             return _deny
+        backend = self.consent.backend(lease.binding)
 
         def current() -> bool:
             try:
@@ -878,10 +912,10 @@ class ConnectionService:
                     ),
                     current_environment_generation=confirmed.environment_generation,
                 )
-                self._consent_read_unavailable = False
+                self._consent_read_succeeded(backend)
                 return accepted
             except ConsentStorageError:
-                self._consent_read_unavailable = True
+                self._consent_read_failed(backend)
                 return False
             except Exception:
                 return False
