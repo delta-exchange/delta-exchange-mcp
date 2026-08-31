@@ -1,6 +1,7 @@
 """Keep eval tool selection separate from live mutation authorization."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from mcp import types
@@ -18,7 +19,8 @@ from delta_exchange_mcp import authorization
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import account, trading
-from evals.agent import _call, mutating_tools, server_environment
+from evals.agent import _call, mutating_tools, run_case, server_environment
+from evals.dataset import Turn
 
 MANAGE_URL = "http://127.0.0.1:43123/manage"
 CLIENT_INFO = Implementation(name="delta-mcp-evals", version="1")
@@ -34,6 +36,39 @@ class FakeSession:
         return self.result
 
 
+class FakeRunnerSession:
+    async def list_tools(self) -> SimpleNamespace:
+        return SimpleNamespace(tools=[])
+
+
+class FakeMessages:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def create(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        system: str,
+        tools: list[dict[str, object]],
+        messages: list[dict[str, object]],
+    ) -> SimpleNamespace:
+        del model, max_tokens, system, tools
+        prompt = messages[-1]["content"]
+        assert isinstance(prompt, str)
+        self.prompts.append(prompt)
+        number = len(self.prompts)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=f"reply {number}")]
+        )
+
+
+class FakeLLM:
+    def __init__(self) -> None:
+        self.messages = FakeMessages()
+
+
 def _tool(name, properties):
     return Tool(name=name, input_schema={"type": "object", "properties": properties})
 
@@ -43,6 +78,21 @@ def _echo(payload):
 
 
 MUTATING = frozenset({"place_order"})
+
+
+async def test_runner_executes_and_records_each_typed_turn() -> None:
+    session = FakeRunnerSession()
+    llm = FakeLLM()
+    turns = (Turn(prompt="first prompt"), Turn(prompt="second prompt"))
+
+    transcript = await run_case(session, llm, turns, model="offline")
+
+    assert llm.messages.prompts == ["first prompt", "second prompt"]
+    assert [turn.prompt for turn in transcript.turns] == [
+        "first prompt",
+        "second prompt",
+    ]
+    assert [turn.reply for turn in transcript.turns] == ["reply 1", "reply 2"]
 
 
 def test_mutating_set_derived_from_dry_run_property():

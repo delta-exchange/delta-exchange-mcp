@@ -18,6 +18,12 @@ from delta_exchange_mcp.errors import (
     is_permission_failure,
 )
 
+TRADING_PREFERENCES_PERMISSION_MESSAGE = (
+    "API key lacks permission for trading preferences. Update its account-data "
+    "permissions in Delta API management. Current Delta documentation does not "
+    "establish whether Read Data alone is sufficient."
+)
+
 
 @dataclass(frozen=True)
 class Check:
@@ -54,7 +60,11 @@ async def check(env: str, key: str, secret: str) -> Check:
         return Check(
             ok=False,
             reachable=is_auth_failure(exc) or is_permission_failure(exc),
-            detail=str(exc),
+            detail=(
+                TRADING_PREFERENCES_PERMISSION_MESSAGE
+                if is_permission_failure(exc)
+                else str(exc)
+            ),
             code=exc.code,
             ip=exc.ip or "",
         )

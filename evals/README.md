@@ -5,6 +5,12 @@ This harness scores MCP tool selection, not Delta API correctness. It connects t
 which tools it calls with which arguments. DeepEval judge scores are advisory. The
 deterministic checks are the gate.
 
+Each case defines a typed policy for every conversation turn. A turn owns its expected
+calls, the supporting reads it permits, and the mutations it forbids. Calls cannot satisfy
+an expectation from a different turn. Values stated in the prompt, such as a price,
+resolution, leverage, or margin amount, must match exactly. The `ANY` marker is reserved
+for values the agent must derive, such as a current timestamp or product id.
+
 The server must return the same tool list before and after account connection or trading
 approval. A missing required tool fails the case. It does not become a skipped case.
 

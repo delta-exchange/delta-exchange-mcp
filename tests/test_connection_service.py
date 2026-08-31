@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,9 +22,11 @@ from delta_exchange_mcp.auth.store import (
     CredentialSource,
     CredentialState,
     CredentialStore,
+    MetadataError,
     MemoryMetadata,
     MemorySecretBackend,
 )
+from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
 
 
@@ -863,3 +866,206 @@ def test_final_checker_rejects_process_session_generation_change(
         change_after_first_read,
     )
     assert access.final_trading_check() is False
+
+
+def test_final_checker_checks_consent_after_the_last_credential_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+    access = asyncio.run(connection.access_state(context("Codex")))
+    original = connection.credentials.resolve
+    reads = 0
+
+    def disable_during_last_read(environment: str, environ: Any) -> Any:
+        nonlocal reads
+        credential = original(environment, environ)
+        reads += 1
+        if reads == 2:
+            binding = connection._binding("Codex", credential)
+            assert binding is not None
+            current = connection.consent.status(binding)
+            connection.consent.disable(
+                binding,
+                expected_generation=current.generation,
+            )
+        return credential
+
+    monkeypatch.setattr(
+        connection.credentials,
+        "resolve",
+        disable_during_last_read,
+    )
+
+    assert access.final_trading_check() is False
+    assert reads == 2
+
+
+@pytest.mark.asyncio
+async def test_candidate_validation_does_not_hold_the_connection_lock() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def paused_validator(
+        environment: str,
+        api_key: str,
+        api_secret: str,
+    ) -> credential_check.Check:
+        entered.set()
+        await asyncio.to_thread(release.wait, 2)
+        return credential_check.Check(ok=True, reachable=True, detail="42")
+
+    connection = service(paused_validator)
+    expected = connection._revision("Codex")
+    results: list[setup.ActionResult] = []
+
+    def replace_credential() -> None:
+        results.append(
+            connection._actions("Codex")(
+                "credentials",
+                {
+                    "environment": "india_prod",
+                    "api_key": "replacement-key",
+                    "api_secret": "replacement-secret",
+                },
+                expected,
+            )
+        )
+
+    worker = threading.Thread(target=replace_credential)
+    worker.start()
+    assert entered.wait(1)
+    started = time.monotonic()
+    await connection.access_state(context("Codex"))
+    elapsed = time.monotonic() - started
+    release.set()
+    worker.join(2)
+
+    assert worker.is_alive() is False
+    assert elapsed < 0.15
+    assert results[0].content["status"] == "saved"
+
+
+def test_candidate_validation_rechecks_the_browser_revision_before_commit() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def paused_validator(
+        environment: str,
+        api_key: str,
+        api_secret: str,
+    ) -> credential_check.Check:
+        entered.set()
+        await asyncio.to_thread(release.wait, 2)
+        return credential_check.Check(ok=True, reachable=True, detail="42")
+
+    connection = service(paused_validator)
+    expected = connection._revision("Codex")
+    results: list[setup.ActionResult] = []
+
+    def replace_from_browser() -> None:
+        results.append(
+            connection._actions("Codex")(
+                "credentials",
+                {
+                    "environment": "india_prod",
+                    "api_key": "stale-key",
+                    "api_secret": "stale-secret",
+                },
+                expected,
+            )
+        )
+
+    worker = threading.Thread(target=replace_from_browser)
+    worker.start()
+    assert entered.wait(1)
+    connection.credentials.replace(
+        "india_prod",
+        "current-key",
+        "current-secret",
+        expected_revision=0,
+        expected_generation=0,
+    )
+    release.set()
+    worker.join(2)
+
+    assert worker.is_alive() is False
+    assert results[0].stale is True
+    assert connection.credentials.get("india_prod").api_key == "current-key"
+
+
+@pytest.mark.asyncio
+async def test_store_open_failure_keeps_public_tools_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_open(
+        cls: type[CredentialStore],
+        metadata_path: Any = None,
+    ) -> CredentialStore:
+        del cls, metadata_path
+        raise MetadataError("metadata is unavailable")
+
+    monkeypatch.setattr(CredentialStore, "open", classmethod(fail_open))
+    app = build_server()
+    try:
+        names = {tool.name for tool in await app.list_tools()}
+        status = app.connection_service.status(context("Codex"))
+    finally:
+        await app.close_live_client()
+
+    assert "get_ticker" in names
+    assert status["account_tools_available"] is False
+    assert status["connection_error"] == "credential_store_unavailable"
+    assert app.connection_service.credentials.source is CredentialSource.MEMORY
+
+
+def test_missing_secret_record_disables_account_access_but_allows_disconnect() -> None:
+    backend = MemorySecretBackend()
+    credentials = CredentialStore(
+        backend,
+        MemoryMetadata(),
+        CredentialSource.OS_STORE,
+    )
+    consent = ConsentStore(
+        store.path().with_name("consent.json"),
+        secure_backend_available=True,
+        memory_backend=MemoryConsentBackend(),
+    )
+    connection = ConnectionService.open(
+        credentials=credentials,
+        consent=consent,
+        validator=verified,
+    )
+    credentials.replace(
+        "india_prod",
+        "key",
+        "secret",
+        state=CredentialState.VERIFIED,
+    )
+    backend._values.clear()
+
+    status = connection.status(context("Codex"))
+    environment = status["environments"]["india_prod"]
+    disconnected = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "disconnect", "environment": "india_prod"},
+    )
+
+    assert status["credentials_configured"] is False
+    assert status["account_tools_available"] is False
+    assert status["connection_error"] == "credential_store_unavailable"
+    assert environment["credential_metadata_present"] is True
+    assert environment["validation_state"] == "unavailable"
+    assert disconnected.content["status"] == "disconnected"

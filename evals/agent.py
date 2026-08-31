@@ -19,6 +19,8 @@ from mcp.client import Client
 from mcp.client.stdio import get_default_environment
 from mcp.types import CallToolResult, Implementation, Tool
 
+from evals.dataset import Turn
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _ALLOWED_ENVS = {"india_testnet", "india_devnet"}
@@ -176,7 +178,7 @@ async def _call(
 async def run_case(
     session: Client,
     llm: "anthropic.AsyncAnthropic",
-    prompts: Sequence[str],
+    case_turns: Sequence[Turn],
     *,
     model: str,
     max_iters: int = 8,
@@ -193,8 +195,9 @@ async def run_case(
     ]
 
     messages: list[dict] = []
-    turns: list[TurnRecord] = []
-    for prompt in prompts:
+    transcript_turns: list[TurnRecord] = []
+    for turn in case_turns:
+        prompt = turn.prompt
         messages.append({"role": "user", "content": prompt})
         calls: list[ToolCall] = []
         reply = ""
@@ -226,5 +229,5 @@ async def run_case(
                     }
                 )
             messages.append({"role": "user", "content": results})
-        turns.append(TurnRecord(prompt=prompt, reply=reply, calls=calls))
-    return Transcript(available_tools=list(tool_list), turns=turns)
+        transcript_turns.append(TurnRecord(prompt=prompt, reply=reply, calls=calls))
+    return Transcript(available_tools=list(tool_list), turns=transcript_turns)

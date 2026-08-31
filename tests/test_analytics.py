@@ -58,7 +58,9 @@ async def test_request_identifies_the_exact_client_and_tool() -> None:
         )
     )
 
-    assert sent[f"{analytics.PREFIX}Client"] == "claude-ai (via mcp-remote 0.1.37)"
+    assert sent[f"{analytics.PREFIX}Client"] == (
+        "claude-ai%20(via%20mcp-remote%200.1.37)"
+    )
     assert sent[f"{analytics.PREFIX}Client-Version"] == "1.30096.5"
     assert sent[f"{analytics.PREFIX}Tool"] == "get_ticker"
     assert sent[f"{analytics.PREFIX}Version"] == PACKAGE_VERSION
@@ -121,6 +123,61 @@ async def test_client_name_cannot_inject_an_http_header() -> None:
     assert "\r" not in reported and "\n" not in reported
     assert "%0D%0A" in reported
     assert sent.get("api-key") is None
+
+
+@pytest.mark.parametrize(
+    "client_name",
+    [" leading", "trailing ", f"{'a' * 199} tail"],
+)
+async def test_client_name_spaces_survive_real_http_serialization(
+    client_name: str,
+) -> None:
+    requests: list[bytes] = []
+
+    async def accept(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        body = json.dumps(TICKER).encode()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = DeltaClient(
+        Config(
+            env="india_testnet",
+            base_url=f"http://127.0.0.1:{port}/v2",
+        )
+    )
+    token = analytics._current.set(
+        analytics._Call(client_name=client_name, tool="get_ticker")
+    )
+    try:
+        async with server:
+            await client.get("/tickers/BTCUSD")
+    finally:
+        analytics._current.reset(token)
+        await client.aclose()
+
+    assert len(requests) == 1
+    expected = analytics.clean(client_name)
+    assert expected
+    assert not expected.startswith(" ")
+    assert not expected.endswith(" ")
+    header = next(
+        line
+        for line in requests[0].split(b"\r\n")
+        if line.lower().startswith(b"x-delta-mcp-client:")
+    )
+    assert header.endswith(expected.encode())
 
 
 @respx.mock

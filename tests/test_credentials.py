@@ -67,6 +67,7 @@ async def test_a_permission_failure_is_not_an_invalid_credential() -> None:
     result = await credentials.check("india_testnet", KEY, SECRET)
     error = DeltaApiError(result.code)
     assert (result.ok, result.reachable) == (False, True)
+    assert result.detail == credentials.TRADING_PREFERENCES_PERMISSION_MESSAGE
     assert is_permission_failure(error)
     assert not is_auth_failure(error)
 

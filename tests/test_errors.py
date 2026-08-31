@@ -1,3 +1,5 @@
+import pytest
+
 from delta_exchange_mcp.errors import DeltaApiError, extract_ip
 
 
@@ -36,3 +38,14 @@ def test_invalid_key_hint_uses_manage_connection() -> None:
         assert "Open Manage Connection" in message
         assert "environment is externally managed" in message
         assert "DELTA_MCP_ENV" not in message
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["UnauthorizedApiAccess", "unauthorized_api_access"],
+)
+def test_shared_permission_hint_is_endpoint_neutral(code: str) -> None:
+    message = str(DeltaApiError(code, status=403))
+
+    assert "permission for this endpoint" in message
+    assert "trading preferences" not in message

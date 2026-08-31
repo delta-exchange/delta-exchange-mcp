@@ -90,7 +90,11 @@ async def run_mode_group(
             tool.name for tool in (await session.list_tools(cache_mode="refresh")).tools
         }
         for case in cases:
-            missing = {e.name for e in case.expect} - available
+            missing = {
+                expected.name
+                for turn in case.turns
+                for expected in turn.expect
+            } - available
             if missing:
                 results.append(
                     CaseResult(
@@ -108,7 +112,7 @@ async def run_mode_group(
                 continue
             print(f"  running {case.id} ...", flush=True)
             transcript = await agent_mod.run_case(
-                session, llm, case.prompts, model=args.model
+                session, llm, case.turns, model=args.model
             )
             passed, failures = check(case, transcript)
             result = CaseResult(
@@ -116,8 +120,7 @@ async def run_mode_group(
                 mode=mode,
                 passed=passed,
                 failures=failures,
-                calls=transcript.calls,
-                final_text=transcript.final_text,
+                turns=transcript.turns,
             )
             if case.judge and not args.no_judge:
                 result.judge_scores = judge(case, transcript, args.judge_model)
@@ -171,14 +174,21 @@ def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
                     k: {"score": s, "reason": why}
                     for k, (s, why) in r.judge_scores.items()
                 },
-                "calls": [
+                "turns": [
                     {
-                        "name": c.name,
-                        "args": c.args,
-                        "is_error": c.is_error,
-                        "result": json.dumps(c.result, default=str)[:2000],
+                        "prompt": turn.prompt,
+                        "calls": [
+                            {
+                                "name": call.name,
+                                "args": call.args,
+                                "is_error": call.is_error,
+                                "result": json.dumps(call.result, default=str)[:2000],
+                            }
+                            for call in turn.calls
+                        ],
+                        "reply": turn.reply,
                     }
-                    for c in r.calls
+                    for turn in r.turns
                 ],
                 "final_text": r.final_text,
             }
@@ -193,7 +203,7 @@ async def main() -> int:
     args = parse_args()
     if args.list:
         for c in CASES:
-            marks = f"{'judge ' if c.judge else ''}{len(c.prompts)}-turn"
+            marks = f"{'judge ' if c.judge else ''}{len(c.turns)}-turn"
             print(f"{c.id:<30} {c.mode:<6} {marks}")
         return 0
 

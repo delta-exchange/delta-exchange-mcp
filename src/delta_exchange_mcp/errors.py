@@ -20,14 +20,12 @@ _AUTH_HINTS: dict[str, str] = {
     "InvalidApiKey": _INVALID_KEY_HINT,
     "invalid_api_key": _INVALID_KEY_HINT,
     "UnauthorizedApiAccess": (
-        "API key lacks permission for trading preferences. Update its account-data "
-        "permissions in Delta API management. Current Delta documentation does not "
-        "establish whether Read Data alone is sufficient."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "unauthorized_api_access": (
-        "API key lacks permission for trading preferences. Update its account-data "
-        "permissions in Delta API management. Current Delta documentation does not "
-        "establish whether Read Data alone is sufficient."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "ip_not_whitelisted_for_api_key": (
         "request IP is not allowed for this API key. Update the IP allowlist in Delta "
