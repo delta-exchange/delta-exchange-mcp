@@ -54,7 +54,7 @@ jobs:
 
       # Builds the wheel, derives the bundle project from pyproject.toml, locks, generates
       # the manifest, packs, then verifies: archive structure, the exact packed payload, a
-      # real MCP handshake, and that no mutation tool registered.
+      # modern and legacy MCP handshake, stable discovery, and all 13 mutation markers.
       - run: bash packaging/mcpb/build.sh
         env:
           MCPB_CLI_CACHE: ${{ github.workspace }}/.mcpb-cli

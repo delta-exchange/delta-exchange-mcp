@@ -93,11 +93,11 @@
     },
     {
       "name": "get_connection_status",
-      "description": "Whether an API key is configured, where it points, and if a restart is due."
+      "description": "Report connection and trading state without returning credential material."
     },
     {
       "name": "get_debug_status",
-      "description": "Whether debug logging is on and the absolute path of the current log file."
+      "description": "Report whether debug logging is on and where its log is stored."
     },
     {
       "name": "get_fills",
@@ -185,7 +185,7 @@
     },
     {
       "name": "get_trading_status",
-      "description": "Trading mode status and the audit log path (None if auditing is disabled)."
+      "description": "Report whether this client can send trading mutations."
     },
     {
       "name": "get_wallet_balances",
@@ -216,20 +216,12 @@
       "description": "Place a single order. Pass exactly one of product_id or product_symbol."
     },
     {
-      "name": "save_credentials",
-      "description": "Save a key typed into the credential form. Called by the form, not by you."
-    },
-    {
-      "name": "save_mode",
-      "description": "Change this client's access mode without reading or resubmitting its key."
-    },
-    {
       "name": "set_product_leverage",
       "description": "Set order leverage for a product."
     },
     {
       "name": "setup_credentials",
-      "description": "Open a form for the user to enter their Delta API key, kept out of the chat."
+      "description": "Open the browser page for credentials and trading consent."
     }
   ],
   "tools_generated": false,

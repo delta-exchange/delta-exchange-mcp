@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -205,6 +206,41 @@ async def test_trade_to_read_revokes_a_trade_still_in_preflight():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_final_checker_error_fails_closed_without_audit_data():
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    )
+    client = _client()
+    audit = Mock(spec=audit_log.AuditLog)
+    gate = trading.TradeGate()
+
+    def failed_check() -> bool:
+        raise RuntimeError("private checker failure")
+
+    gate.bind_final_check(failed_check)
+    try:
+        with pytest.raises(
+            Exception, match="trading authorization could not be confirmed"
+        ):
+            await _call(
+                client,
+                "place_order",
+                audit=audit,
+                gate=gate,
+                product_id=27,
+                size=1,
+                side="buy",
+                order_type="market_order",
+            )
+    finally:
+        await client.aclose()
+
+    assert route.called is False
+    audit.record.assert_not_called()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_post_only_bool_becomes_string_enum():
     route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -328,6 +364,93 @@ async def test_close_all_fetches_and_caches_user_id():
     assert b'"user_id":999' in close.calls[0].request.content
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_all_partitions_user_id_cache_after_rebind():
+    profile = respx.get(url__regex=r".*/profile$").mock(
+        side_effect=[
+            httpx.Response(200, json={"success": True, "result": {"id": 111}}),
+            httpx.Response(200, json={"success": True, "result": {"id": 222}}),
+        ]
+    )
+    first_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    second_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    trading.register(mcp, client)
+
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="k2",
+            api_secret="s2",
+            mode="trade",
+        )
+    )
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+    await client.aclose()
+
+    assert profile.call_count == 2
+    assert b'"user_id":111' in first_close.calls[0].request.content
+    assert b'"user_id":222' in second_close.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_price_cache_partitions_tick_size_after_rebind():
+    respx.get(f"{INDIA_TESTNET_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "1"}},
+        )
+    )
+    first_order = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 1}})
+    )
+    prod_lookup = respx.get(f"{INDIA_PROD_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "0.01"}},
+        )
+    )
+    second_order = respx.post(f"{INDIA_PROD_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 2}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    trading.register(mcp, client)
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "62000.07",
+    }
+
+    await mcp.call_tool("place_order", arguments)
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="k2",
+            api_secret="s2",
+            mode="trade",
+        )
+    )
+    await mcp.call_tool("place_order", arguments)
+    await client.aclose()
+
+    assert prod_lookup.call_count == 1
+    assert b'"limit_price":"62000"' in first_order.calls[0].request.content
+    assert b'"limit_price":"62000.07"' in second_order.calls[0].request.content
+
+
 # --------------------------------------------------------------- audit log
 
 
@@ -380,14 +503,14 @@ async def test_audit_kill_switch(tmp_path, monkeypatch):
 # --------------------------------------------------------------- mode gating
 
 
-def test_trade_tools_absent_in_read_mode():
+def test_trade_tools_stay_discoverable_in_read_mode():
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="read",
     )
     mcp = build_server(cfg)
     names = {t.name for t in mcp._tool_manager.list_tools()}
-    assert "place_order" not in names
+    assert "place_order" in names
     assert "get_positions" in names  # account tools still present
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp import hints
@@ -73,7 +74,7 @@ def _safe_export_path(output_path: str) -> Path:
     home = Path.home().resolve()
     if not (resolved.is_relative_to(cwd) or resolved.is_relative_to(home)):
         raise ValueError(
-            f"output_path must be inside cwd ({cwd}) or home ({home}); got {resolved}"
+            "output_path must be inside the current working directory or home directory"
         )
     return resolved
 
@@ -154,7 +155,9 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         fields, call `get_margined_positions` instead.
         """
         if (product_id is None) == (not underlying_asset_symbol):
-            raise ValueError("pass exactly one of product_id or underlying_asset_symbol")
+            raise ToolError(
+                "pass exactly one of product_id or underlying_asset_symbol"
+            )
         return await client.get(
             "/positions",
             params={"product_id": product_id, "underlying_asset_symbol": underlying_asset_symbol},
@@ -345,7 +348,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Fetch a single order by id or client_order_id. Exactly one must be provided."""
         if (order_id is None) == (not client_order_id):
-            raise ValueError("pass exactly one of order_id or client_order_id")
+            raise ToolError("pass exactly one of order_id or client_order_id")
         if order_id is not None:
             return await client.get(f"/orders/{order_id}", auth=True)
         return await client.get(f"/orders/client_order_id/{client_order_id}", auth=True)
@@ -409,7 +412,10 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         The output path is restricted to the current working directory or the user's
         home directory to keep the write scope predictable.
         """
-        resolved = _safe_export_path(output_path)
+        try:
+            resolved = _safe_export_path(output_path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         resolved.parent.mkdir(parents=True, exist_ok=True)
         data = await client.get_raw(
             "/fills/history/download/csv",

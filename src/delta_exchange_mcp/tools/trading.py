@@ -11,15 +11,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
-from delta_exchange_mcp import hints, request
+from delta_exchange_mcp import hints
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -49,7 +50,21 @@ _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
 _MUTATING_TOOL_META = {MUTATING_TOOL_META_KEY: True}
 _REVOKED_MESSAGE = "trading was disabled while this request was being prepared; no mutation was sent"
-_SESSION_MESSAGE = "trading is not enabled for this MCP session; no mutation was sent"
+_CHECK_FAILED_MESSAGE = "trading authorization could not be confirmed; no mutation was sent"
+
+FinalTradingCheck = Callable[[], bool]
+
+
+class FinalTradingCheckError(RuntimeError):
+    """The point-of-use authorization checker failed."""
+
+
+@dataclass(frozen=True)
+class TradeLease:
+    """The gate generation and final checker captured for one tool request."""
+
+    generation: int
+    final_check: FinalTradingCheck
 
 
 @dataclass
@@ -58,26 +73,46 @@ class TradeGate:
 
     generation: int = 0
     armed: bool = True
-    peer: object | None = None
+    _final_check: ContextVar[FinalTradingCheck | None] = field(
+        init=False, repr=False, compare=False
+    )
 
-    def bind(self, peer: object) -> None:
-        if self.peer is not None and self.peer is not peer:
-            self.generation += 1
-        self.peer = peer
+    def __post_init__(self) -> None:
+        self._final_check = ContextVar(
+            f"delta_trade_final_check_{id(self)}", default=None
+        )
 
-    def lease(self, peer: object | None) -> int:
+    def bind_final_check(self, checker: FinalTradingCheck | None) -> None:
+        """Bind a storage-backed checker to the current request task."""
+        self._final_check.set(checker)
+
+    def arm(self) -> None:
+        """Authorize future mutations after the request-scoped check succeeds."""
         if not self.armed:
-            raise RuntimeError(_REVOKED_MESSAGE)
-        if self.peer is not None and self.peer is not peer:
-            raise RuntimeError(_SESSION_MESSAGE)
-        return self.generation
+            self.generation += 1
+        self.armed = True
+
+    def lease(self) -> TradeLease:
+        if not self.armed:
+            raise ToolError(_REVOKED_MESSAGE)
+        checker = self._final_check.get() or self._in_memory_check
+        self._final_check.set(None)
+        return TradeLease(generation=self.generation, final_check=checker)
 
     def revoke(self) -> None:
         self.armed = False
         self.generation += 1
 
-    def accepts(self, lease: int | None) -> bool:
-        return self.armed and lease == self.generation
+    def accepts(self, lease: TradeLease | None) -> bool:
+        if not self.armed or lease is None or lease.generation != self.generation:
+            return False
+        try:
+            return lease.final_check() is True
+        except Exception as exc:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE) from exc
+
+    def _in_memory_check(self) -> bool:
+        return self.armed
 
 
 def _bs(value: bool | None) -> str | None:
@@ -100,7 +135,7 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _require_one(product_id: int | None, product_symbol: str | None) -> None:
     if (product_id is None) == (product_symbol is None):
-        raise ValueError("pass exactly one of product_id or product_symbol")
+        raise ToolError("pass exactly one of product_id or product_symbol")
 
 
 def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) -> None:
@@ -110,7 +145,9 @@ def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) 
     dry-run) with a clearer message instead of spending a live round-trip.
     """
     if stop_loss_price is not None and trail_amount is not None:
-        raise ValueError("bracket stop-loss takes either a fixed price or a trailing amount, not both")
+        raise ToolError(
+            "bracket stop-loss takes either a fixed price or a trailing amount, not both"
+        )
 
 
 def _validate_order(order_type: str | None, limit_price: str | None, size: int | None) -> None:
@@ -120,11 +157,13 @@ def _validate_order(order_type: str | None, limit_price: str | None, size: int |
     documented API constraints — they are not a full server simulation.
     """
     if size is not None and size <= 0:
-        raise ValueError("size must be a positive integer")
+        raise ToolError("size must be a positive integer")
     if order_type == "limit_order" and limit_price is None:
-        raise ValueError("limit_price is required for limit_order")
+        raise ToolError("limit_price is required for limit_order")
     if order_type == "market_order" and limit_price is not None:
-        raise ValueError("market_order must not carry a limit_price (it is ignored, not a cap)")
+        raise ToolError(
+            "market_order must not carry a limit_price (it is ignored, not a cap)"
+        )
 
 
 def _flag_partial(result: Any, sent: list[dict[str, Any]]) -> Any:
@@ -187,17 +226,20 @@ def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
 def register(
     mcp: MCPServer,
     client: DeltaClient,
-    audit: AuditLog | None = None,
+    audit: AuditLog | Callable[[], AuditLog | None] | None = None,
     gate: TradeGate | None = None,
 ) -> None:
     gate = gate or TradeGate()
-    active_lease: ContextVar[int | None] = ContextVar(
+    active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
-    _uid_cache: dict[str, int] = {}
-    # tick_size keyed by both product id (int) and symbol (str); filled lazily.
-    _tick_cache: dict[int | str, Decimal] = {}
-    _tick_list_loaded = {"done": False}
+    _uid_cache: dict[int, int] = {}
+    # Include the pinned HTTP identity so old requests cannot fill a new account's cache.
+    _tick_cache: dict[tuple[int, int | str], Decimal] = {}
+    _tick_list_loaded: set[int] = set()
+
+    def current_audit() -> AuditLog | None:
+        return audit() if callable(audit) else audit
 
     def mutation_tool(
         title: str, *, destructive: bool, idempotent: bool
@@ -215,7 +257,10 @@ def register(
         ) -> Callable[..., Awaitable[Any]]:
             @wraps(function)
             async def pinned(*args: Any, **kwargs: Any) -> Any:
-                lease = gate.lease(request.peer(request.session.get()))
+                if kwargs.get("dry_run") is True:
+                    async with client.pin():
+                        return await function(*args, **kwargs)
+                lease = gate.lease()
                 token = active_lease.set(lease)
                 try:
                     async with client.pin():
@@ -233,6 +278,7 @@ def register(
         return decorate
 
     def _store_product(prod: dict[str, Any]) -> None:
+        generation = client.binding_generation
         tick = prod.get("tick_size")
         if tick is None:
             return
@@ -241,9 +287,9 @@ def register(
         except (InvalidOperation, ValueError):
             return
         if prod.get("id") is not None:
-            _tick_cache[int(prod["id"])] = dec
+            _tick_cache[(generation, int(prod["id"]))] = dec
         if prod.get("symbol"):
-            _tick_cache[str(prod["symbol"])] = dec
+            _tick_cache[(generation, str(prod["symbol"]))] = dec
 
     async def _tick_size(product_id: int | None, product_symbol: str | None) -> Decimal | None:
         """Resolve a product's tick_size (cached per process). Returns None if unresolvable.
@@ -253,7 +299,11 @@ def register(
         indexes every product. Never raises — price rounding must not block an order on a
         metadata-lookup failure.
         """
-        key: int | str | None = product_symbol if product_symbol is not None else product_id
+        generation = client.binding_generation
+        product_key: int | str | None = (
+            product_symbol if product_symbol is not None else product_id
+        )
+        key = (generation, product_key) if product_key is not None else None
         if key is not None and key in _tick_cache:
             return _tick_cache[key]
         try:
@@ -262,13 +312,13 @@ def register(
                 inner = resp.get("result", resp) if isinstance(resp, dict) else None
                 if isinstance(inner, dict):
                     _store_product(inner)
-            elif not _tick_list_loaded["done"]:
+            elif generation not in _tick_list_loaded:
                 resp = await client.get("/products")
                 products = resp.get("result", []) if isinstance(resp, dict) else []
                 for prod in products if isinstance(products, list) else []:
                     if isinstance(prod, dict):
                         _store_product(prod)
-                _tick_list_loaded["done"] = True
+                _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
             logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
             return None
@@ -297,36 +347,42 @@ def register(
         return adjustments
 
     async def _user_id() -> int:
-        if "id" not in _uid_cache:
+        generation = client.binding_generation
+        if generation not in _uid_cache:
             prof = await client.get("/profile", auth=True)
             inner = prof.get("result", prof) if isinstance(prof, dict) else {}
             uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
             if uid is None:
                 raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
+            _uid_cache[generation] = int(uid)
+        return _uid_cache[generation]
 
     async def _finish(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
     ) -> Any:
         payload = _clean(payload)
+        log = current_audit()
         if dry_run:
-            if audit:
-                audit.record(tool, payload, dry_run=True)
+            if log:
+                log.record(tool, payload, dry_run=True)
             return {"dry_run": True, "method": method, "path": path, "payload": payload}
-        if not gate.accepts(active_lease.get()):
-            if audit:
-                audit.record(tool, payload, error=_REVOKED_MESSAGE)
-            raise RuntimeError(_REVOKED_MESSAGE)
         sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
+        try:
+            accepted = gate.accepts(active_lease.get())
+        except FinalTradingCheckError:
+            raise ToolError(_CHECK_FAILED_MESSAGE) from None
+        if not accepted:
+            if log:
+                log.record(tool, payload, error=_REVOKED_MESSAGE)
+            raise ToolError(_REVOKED_MESSAGE)
         try:
             result = await sender(path, payload, auth=True)
         except DeltaApiError as e:
-            if audit:
-                audit.record(tool, payload, error=str(e))
+            if log:
+                log.record(tool, payload, error=str(e))
             raise
-        if audit:
-            audit.record(tool, payload, result=result)
+        if log:
+            log.record(tool, payload, result=result)
         return result
 
     def _attach(result: Any, adjustments: list[dict[str, str]]) -> Any:
@@ -452,7 +508,7 @@ def register(
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
-            raise ValueError("pass exactly one of id or client_order_id")
+            raise ToolError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("cancel_order", "DELETE", "/orders", payload, dry_run=dry_run)
 
@@ -494,9 +550,9 @@ def register(
 
     def _check_batch(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not orders:
-            raise ValueError("orders must be a non-empty list")
+            raise ToolError("orders must be a non-empty list")
         if len(orders) > _MAX_BATCH:
-            raise ValueError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
+            raise ToolError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
         return [_clean(o) for o in orders]
 
     @mutation_tool("Place orders in batch", destructive=False, idempotent=False)
@@ -522,7 +578,7 @@ def register(
             coid = order.get("client_order_id")
             if coid is not None:
                 if coid in seen_coids:
-                    raise ValueError(f"duplicate client_order_id in batch: {coid}")
+                    raise ToolError(f"duplicate client_order_id in batch: {coid}")
                 seen_coids.add(coid)
         payload = {
             "product_id": product_id,
@@ -596,7 +652,9 @@ def register(
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
-            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
+            raise ToolError(
+                "provide at least one of stop_loss_order or take_profit_order"
+            )
         sl = _clean(stop_loss_order) if stop_loss_order else None
         tp = _clean(take_profit_order) if take_profit_order else None
         if sl:
@@ -702,11 +760,13 @@ def register(
         (fetched once and cached) — you do not pass it.
         """
         if not (close_all_portfolio or close_all_isolated):
-            raise ValueError("set at least one of close_all_portfolio or close_all_isolated to true")
+            raise ToolError(
+                "set at least one of close_all_portfolio or close_all_isolated to true"
+            )
         payload = {
             "close_all_portfolio": close_all_portfolio,
             "close_all_isolated": close_all_isolated,
-            "user_id": await _user_id(),
+            "user_id": None if dry_run else await _user_id(),
         }
         return await _finish("close_all_positions", "POST", "/positions/close_all", payload, dry_run=dry_run)
 

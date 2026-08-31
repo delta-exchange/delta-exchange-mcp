@@ -14,6 +14,7 @@ import httpx
 import pytest
 import respx
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -71,6 +72,15 @@ async def test_get_wallet_balances_hits_balances():
     await _call_tool("get_wallet_balances")
     assert route.called
     assert route.calls[0].request.headers.get("api-key") == "k"
+
+
+@pytest.mark.asyncio
+async def test_account_input_error_is_actionable_to_the_mcp_client():
+    with pytest.raises(
+        ToolError,
+        match="pass exactly one of product_id or underlying_asset_symbol",
+    ):
+        await _call_tool("get_positions")
 
 
 @pytest.mark.asyncio
@@ -288,6 +298,13 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
     monkeypatch.chdir(sandbox)
     with pytest.raises(ValueError, match="must be inside"):
         _safe_export_path("../../../../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_export_path_error_is_actionable_to_the_mcp_client(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ToolError, match="output_path must be inside"):
+        await _call_tool("bulk_fills_export", output_path="/etc/passwd")
 
 
 # --- GH #9: short-option unrealized_pnl sign fix ---------------------------
