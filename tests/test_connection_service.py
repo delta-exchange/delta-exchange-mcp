@@ -10,13 +10,18 @@ from typing import Any, cast
 import pytest
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CLIENT_INFO_META_KEY, Implementation
 
 from delta_exchange_mcp import credentials as credential_check
 from delta_exchange_mcp import setup, store
 from delta_exchange_mcp.auth import connection as connection_mod
 from delta_exchange_mcp.auth.connection import ConnectionService
-from delta_exchange_mcp.auth.consent import ConsentStore, MemoryConsentBackend
+from delta_exchange_mcp.auth.consent import (
+    ConsentStorageError,
+    ConsentStore,
+    MemoryConsentBackend,
+)
 from delta_exchange_mcp.auth.store import (
     CredentialConflictError,
     CredentialSource,
@@ -723,6 +728,52 @@ def test_status_and_results_never_contain_credential_material() -> None:
     assert "visible-only-to-store-secret" not in rendered
 
 
+@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+def test_broken_consent_store_preserves_account_access_and_reports_error(
+    monkeypatch,
+    failure: str,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace(
+        "india_prod",
+        "key",
+        "secret",
+        state=CredentialState.VERIFIED,
+    )
+    if failure == "malformed":
+        store.path().with_name("consent.json").write_text("not-json")
+    else:
+        def unreadable(*args, **kwargs):
+            raise ConsentStorageError("cannot read consent metadata")
+
+        monkeypatch.setattr(connection.consent, "status", unreadable)
+
+    access = asyncio.run(connection.access_state(context("Codex")))
+    status = connection.status(context("Codex"))
+    reads: list[tuple[str, bool]] = []
+
+    async def get(path: str, params=None, *, auth: bool = False):
+        reads.append((path, auth))
+        return {"success": True, "result": {"id": 42}}
+
+    monkeypatch.setattr(connection.client, "get", get)
+    app = build_server(connection_service=connection)
+    account_result = asyncio.run(
+        app.call_tool("get_wallet_balances", {}, context("Codex"))
+    )
+
+    assert access.credentials_ready is True
+    assert access.trading_enabled is False
+    assert access.final_trading_check() is False
+    assert status["credentials_configured"] is True
+    assert status["account_tools_available"] is True
+    assert status["trading"]["enabled"] is False
+    assert status["connection_error"] == "consent_store_unavailable"
+    assert status["consent_error"] == "consent_store_unavailable"
+    assert account_result.is_error is False
+    assert reads == [("/wallet/balances", True)]
+
+
 @pytest.mark.parametrize("change", ["credential", "environment"])
 def test_final_checker_rejects_cross_process_changes_before_mutation(
     monkeypatch,
@@ -909,6 +960,60 @@ def test_final_checker_checks_consent_after_the_last_credential_read(
 
     assert access.final_trading_check() is False
     assert reads == 2
+
+
+def test_corrupt_consent_store_blocks_an_already_authorized_mutation(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+    access = asyncio.run(connection.access_state(context("Codex")))
+    assert access.trading_enabled is True
+    store.path().with_name("consent.json").write_text("not-json")
+
+    gate = trading.TradeGate()
+    mcp = MCPServer("point-of-use")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(access.final_trading_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    with pytest.raises(ToolError, match="trading was disabled"):
+        asyncio.run(invoke())
+
+    assert mutations == []
+    assert connection.consent_error == "consent_store_unavailable"
 
 
 @pytest.mark.asyncio
