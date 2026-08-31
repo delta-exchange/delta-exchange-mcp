@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from delta_exchange_mcp.auth.backend import MetadataError, file_lock
@@ -18,6 +19,13 @@ from delta_exchange_mcp.auth.backend import MetadataError, file_lock
 SCHEMA_VERSION = 1
 SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
 logger = logging.getLogger(__name__)
+
+
+class ConsentBackend(StrEnum):
+    """The storage backend selected for one consent binding."""
+
+    MEMORY = "memory"
+    PERSISTENT = "persistent"
 
 
 class ConsentError(RuntimeError):
@@ -336,16 +344,19 @@ class MemoryConsentBackend:
             self._records[key] = next_record
             return _state(next_record, persistent=False)
 
-    def revoke_environment(self, environment: str) -> None:
+    def revoke_environment(self, environment: str) -> bool:
         """Revoke all process-only approvals for an environment."""
-        self.revoke(lambda record: record.environment == environment)
+        return self.revoke(lambda record: record.environment == environment)
 
-    def revoke(self, matches: Callable[[_Record], bool]) -> None:
+    def revoke(self, matches: Callable[[_Record], bool]) -> bool:
         """Invalidate only process-only records selected by the caller."""
+        changed = False
         with self._lock:
             for key, record in list(self._records.items()):
                 if matches(record):
                     self._records[key] = _revoked_record(record)
+                    changed = True
+        return changed
 
 
 class ConsentStore:
@@ -367,6 +378,14 @@ class ConsentStore:
         if not self._is_persistent(binding):
             return self._memory_backend.status(binding)
         return _state(self._read_file().get(_record_key(binding)), persistent=True)
+
+    def backend(self, binding: ConsentBinding) -> ConsentBackend:
+        """Return the backend that reads and writes this binding."""
+        return (
+            ConsentBackend.PERSISTENT
+            if self._is_persistent(binding)
+            else ConsentBackend.MEMORY
+        )
 
     def enable(
         self,
@@ -431,21 +450,23 @@ class ConsentStore:
         state = self.status(lease.binding)
         return state.enabled and state.generation == lease.generation
 
-    def revoke_environment(self, environment: str) -> None:
+    def revoke_environment(self, environment: str) -> frozenset[ConsentBackend]:
         """Revoke all stored approvals for an environment after disconnect or rotation."""
         if environment not in SUPPORTED_ENVIRONMENTS:
             raise ValueError(
                 f"environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}"
             )
-        self._revoke(lambda record: record.environment == environment)
+        return self._revoke(lambda record: record.environment == environment)
 
-    def revoke_identity(self, binding: ConsentBinding) -> None:
+    def revoke_identity(self, binding: ConsentBinding) -> frozenset[ConsentBackend]:
         """Invalidate a superseded identity without changing newer approvals."""
-        self._revoke(lambda record: record.binding.identity == binding.identity)
+        return self._revoke(lambda record: record.binding.identity == binding.identity)
 
-    def revoke_before(self, environment: str, credential_generation: int) -> None:
+    def revoke_before(
+        self, environment: str, credential_generation: int
+    ) -> frozenset[ConsentBackend]:
         """Invalidate stored credentials older than a completed credential change."""
-        self._revoke(
+        return self._revoke(
             lambda record: (
                 record.environment == environment
                 and record.credential_generation is not None
@@ -453,10 +474,12 @@ class ConsentStore:
             )
         )
 
-    def _revoke(self, matches: Callable[[_Record], bool]) -> None:
-        self._memory_backend.revoke(matches)
+    def _revoke(self, matches: Callable[[_Record], bool]) -> frozenset[ConsentBackend]:
+        written: set[ConsentBackend] = set()
+        if self._memory_backend.revoke(matches):
+            written.add(ConsentBackend.MEMORY)
         if not self._secure_backend_available:
-            return
+            return frozenset(written)
         with self._write_lock():
             records = self._read_file()
             changed = False
@@ -466,6 +489,8 @@ class ConsentStore:
                     changed = True
             if changed:
                 self._write_file(records)
+                written.add(ConsentBackend.PERSISTENT)
+        return frozenset(written)
 
     def _set(
         self,
