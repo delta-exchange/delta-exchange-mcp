@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field, replace as replace_fields
+from dataclasses import asdict, dataclass, field, replace as replace_fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -419,7 +419,7 @@ class FileMetadata:
             "version": METADATA_VERSION,
             "namespace": self.namespace,
             "environments": {
-                environment: _state_to_json(state)
+                environment: asdict(state)
                 for environment, state in sorted(values.items())
             },
         }
@@ -1261,24 +1261,6 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         preserved_records=tuple(raw_preserved),
         reconnect_required=reconnect_required,
     )
-
-
-def _state_to_json(
-    state: _EnvironmentState,
-) -> dict[str, int | str | list[int] | list[str] | None]:
-    return {
-        "active_revision": state.active_revision,
-        "next_revision": state.next_revision,
-        "generation": state.generation,
-        "state": state.state.value if state.state is not None else None,
-        "account_id": state.account_id,
-        "created_at": state.created_at,
-        "updated_at": state.updated_at,
-        "validated_at": state.validated_at,
-        "pending_revisions": list(state.pending_revisions),
-        "preserved_records": list(state.preserved_records),
-        "reconnect_required": state.reconnect_required,
-    }
 
 
 def _now() -> str:
