@@ -123,6 +123,7 @@ def test_trading_controls_are_disabled_for_an_inactive_selection() -> None:
         in html
     )
     assert "Use this environment before you enable trading." in html
+    assert "(!selected.connected && !selected.credential_metadata_present)" in html
 
 
 def test_page_has_rotate_disconnect_and_no_legacy_setup_language() -> None:

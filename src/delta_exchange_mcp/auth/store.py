@@ -473,12 +473,7 @@ class CredentialStore:
         try:
             backend = SystemKeyringBackend()
         except BackendUnavailableError as exc:
-            return cls(
-                MemorySecretBackend(),
-                MemoryMetadata(),
-                CredentialSource.MEMORY,
-                fallback_reason=str(exc),
-            )
+            return cls.memory(str(exc))
         store = cls(
             backend,
             FileMetadata(metadata_path or default_metadata_path()),
@@ -486,6 +481,16 @@ class CredentialStore:
         )
         store._retry_pending_cleanup()
         return store
+
+    @classmethod
+    def memory(cls, fallback_reason: str = "") -> "CredentialStore":
+        """Create one process-local credential store."""
+        return cls(
+            MemorySecretBackend(),
+            MemoryMetadata(),
+            CredentialSource.MEMORY,
+            fallback_reason=fallback_reason,
+        )
 
     @property
     def persistent(self) -> bool:
