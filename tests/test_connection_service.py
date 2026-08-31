@@ -743,6 +743,7 @@ def test_broken_consent_store_preserves_account_access_and_reports_error(
     if failure == "malformed":
         store.path().with_name("consent.json").write_text("not-json")
     else:
+
         def unreadable(*args, **kwargs):
             raise ConsentStorageError("cannot read consent metadata")
 
@@ -816,6 +817,52 @@ def test_consent_write_failure_survives_reads_until_a_write_succeeds(
 
     assert enabled.content["status"] == "enabled"
     assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+@pytest.mark.parametrize(
+    ("failed_client", "other_client"),
+    [("Codex", ""), ("", "Codex")],
+    ids=[
+        "persistent-failure-survives-memory-write",
+        "memory-failure-survives-persistent-write",
+    ],
+)
+def test_consent_write_recovery_is_scoped_to_the_selected_backend(
+    monkeypatch,
+    failed_client: str,
+    other_client: str,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    original_enable = connection.consent.enable
+    failed_persistent = bool(failed_client)
+
+    def fail_selected_backend(binding, **kwargs):
+        if binding.persistent is failed_persistent:
+            raise ConsentStorageError("selected consent backend is read-only")
+        return original_enable(binding, **kwargs)
+
+    monkeypatch.setattr(connection.consent, "enable", fail_selected_backend)
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+
+    failed = action(connection, failed_client, "consent", arguments)
+    recovered_other = action(connection, other_client, "consent", arguments)
+
+    assert failed.content["status"] == "rejected"
+    assert recovered_other.content["status"] == "enabled"
+    assert connection.status(context(failed_client))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    recovered_failed = action(connection, failed_client, "consent", arguments)
+
+    assert recovered_failed.content["status"] == "enabled"
+    assert connection.status(context(failed_client))["consent_error"] == ""
 
 
 def test_consent_read_recovery_clears_only_the_read_failure(monkeypatch) -> None:

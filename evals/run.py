@@ -30,14 +30,27 @@ from evals.scoring import CaseResult, check, judge
 DEFAULT_MODEL = os.environ.get("DELTA_EVAL_MODEL", "claude-sonnet-5")
 DEFAULT_JUDGE_MODEL = os.environ.get("DELTA_EVAL_JUDGE_MODEL", "claude-opus-4-8")
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+_REPORT_PRIVACY_ERROR = (
+    "owner-only evaluation reports are unavailable on Windows; "
+    "run again with --no-report"
+)
+
+
+def _private_reports_supported() -> bool:
+    return os.name != "nt"
+
+
+def _require_private_reports() -> None:
+    if not _private_reports_supported():
+        raise RuntimeError(_REPORT_PRIVACY_ERROR)
 
 
 def _write_private_report(path: Path, contents: str) -> None:
     """Write one report without exposing account data to other local users."""
+    _require_private_reports()
     fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        if os.name != "nt":
-            os.fchmod(fd, 0o600)
+        os.fchmod(fd, 0o600)
         os.ftruncate(fd, 0)
         with os.fdopen(fd, "w", encoding="utf-8") as report:
             fd = -1
@@ -170,6 +183,7 @@ def print_table(results: list[CaseResult]) -> None:
 
 
 def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
+    _require_private_reports()
     path = (
         Path(args.json_path)
         if args.json_path
@@ -224,6 +238,12 @@ async def main() -> int:
             marks = f"{'judge ' if c.judge else ''}{len(c.turns)}-turn"
             print(f"{c.id:<30} {c.mode:<6} {marks}")
         return 0
+
+    if not args.no_report:
+        try:
+            _require_private_reports()
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
 
     agent_mod.resolve_env()  # fail fast on india_prod
     if not os.environ.get("ANTHROPIC_API_KEY"):

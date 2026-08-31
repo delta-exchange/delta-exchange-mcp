@@ -37,4 +37,7 @@ A full run costs real tokens. Start with one case and `--no-judge`. Select model
 `--model`, `--judge-model`, `DELTA_EVAL_MODEL`, or `DELTA_EVAL_JUDGE_MODEL`. JSON reports
 land in `evals/reports/` and record the model IDs.
 
+The harness cannot guarantee owner-only report access on Windows. Use `--no-report` on
+Windows. Without this option, the harness exits before it starts Claude or the MCP server.
+
 Never wire this into CI.
