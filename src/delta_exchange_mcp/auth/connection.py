@@ -116,7 +116,8 @@ class ConnectionService:
     migration_error: str = ""
     credential_error: str = ""
     store_error: str = ""
-    consent_error: str = ""
+    _consent_read_unavailable: bool = field(default=False, repr=False)
+    _consent_write_unavailable: bool = field(default=False, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
@@ -159,7 +160,7 @@ class ConnectionService:
         except (CredentialStoreError, OSError, ValueError) as exc:
             migration = MigrationResult(MigrationStatus.ABSENT, "")
             migration_error = type(exc).__name__
-        consent_error = ""
+        consent_write_unavailable = False
         if migration.status is MigrationStatus.MIGRATED and migration.environment:
             if migration.credential is None or migration.credential.generation is None:
                 raise CredentialStoreError(
@@ -170,7 +171,7 @@ class ConnectionService:
                     migration.environment, migration.credential.generation
                 )
             except ConsentStorageError:
-                consent_error = _CONSENT_STORE_UNAVAILABLE
+                consent_write_unavailable = True
 
         fixed = replace(cfg, mode="read") if cfg is not None else None
         environ: Mapping[str, str] | None = None
@@ -204,10 +205,19 @@ class ConnectionService:
             migration_error=migration_error,
             credential_error=credential_error,
             store_error=store_error,
-            consent_error=consent_error,
+            _consent_write_unavailable=consent_write_unavailable,
         )
         service._active_binding = service._binding("", credential)
         return service
+
+    @property
+    def consent_error(self) -> str:
+        """Report unavailable consent reads or mutations through one public status."""
+        return (
+            _CONSENT_STORE_UNAVAILABLE
+            if self._consent_read_unavailable or self._consent_write_unavailable
+            else ""
+        )
 
     async def access_state(self, ctx: Context) -> AccessState:
         """Return authorization and a point-of-use checker for this request."""
@@ -415,6 +425,7 @@ class ConnectionService:
         status = "saved" if checked.ok else "unverified"
         try:
             self.consent.revoke_before(environment, expected_generation + 1)
+            self._consent_write_unavailable = False
             environment_result = self._set_environment(environment, expected)
         except legacy_store.SettingsConflictError:
             self._reconcile()
@@ -430,7 +441,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_write_unavailable = True
             self._reconcile()
             return self._rejected(
                 client_name,
@@ -487,8 +498,9 @@ class ConnectionService:
             )
         try:
             self.consent.revoke_before(environment, expected_generation + 1)
+            self._consent_write_unavailable = False
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_write_unavailable = True
         self._reconcile()
         return setup.ActionResult(
             {
@@ -516,7 +528,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_write_unavailable = True
             return self._rejected(
                 client_name,
                 "Trading consent could not be revoked. The active environment is unchanged.",
@@ -588,11 +600,12 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_write_unavailable = True
             return self._rejected(
                 client_name,
                 "The trading consent service is unavailable. Trading remains disabled.",
             )
+        self._consent_write_unavailable = False
         return setup.ActionResult(
             {
                 "status": "enabled" if state.enabled else "disabled",
@@ -703,6 +716,7 @@ class ConnectionService:
         def revoke() -> None:
             self.consent.revoke_environment(expected_environment)
             self.consent.revoke_environment(environment)
+            self._consent_write_unavailable = False
 
         problem = legacy_store.compare_and_write_environment(
             expected_environment,
@@ -737,8 +751,9 @@ class ConnectionService:
         if previous is not None and previous != binding:
             try:
                 self.consent.revoke_identity(previous)
+                self._consent_write_unavailable = False
             except ConsentStorageError:
-                self.consent_error = _CONSENT_STORE_UNAVAILABLE
+                self._consent_write_unavailable = True
         self.client.rebind(_bind_config(base, credential))
         self._active_binding = binding
         self.credential_error = error
@@ -786,9 +801,9 @@ class ConnectionService:
         try:
             lease = self.consent.lease(binding)
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_read_unavailable = True
             return None
-        self.consent_error = ""
+        self._consent_read_unavailable = False
         return lease
 
     def _consent_status(self, binding: ConsentBinding | None) -> ConsentState | None:
@@ -798,9 +813,9 @@ class ConnectionService:
         try:
             state = self.consent.status(binding)
         except ConsentStorageError:
-            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            self._consent_read_unavailable = True
             return None
-        self.consent_error = ""
+        self._consent_read_unavailable = False
         return state
 
     def _final_checker(self, lease: ConsentLease | None) -> Callable[[], bool]:
@@ -834,7 +849,7 @@ class ConnectionService:
                 )
                 if confirmed != lease.binding:
                     return False
-                return self.consent.accepts(
+                accepted = self.consent.accepts(
                     lease,
                     current_credential_revision=confirmed.credential_revision,
                     current_credential_generation=confirmed.credential_generation,
@@ -843,8 +858,10 @@ class ConnectionService:
                     ),
                     current_environment_generation=confirmed.environment_generation,
                 )
+                self._consent_read_unavailable = False
+                return accepted
             except ConsentStorageError:
-                self.consent_error = _CONSENT_STORE_UNAVAILABLE
+                self._consent_read_unavailable = True
                 return False
             except Exception:
                 return False
