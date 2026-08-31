@@ -742,11 +742,7 @@ def _rejection(env: str, result: credentials.Check) -> str:
             "were pasted in full."
         )
     if result.code in _NO_PERMISSION:
-        return (
-            "API key lacks permission for trading preferences. Update its account-data "
-            "permissions in Delta API management. Current Delta documentation does not "
-            "establish whether Read Data alone is sufficient."
-        )
+        return credentials.TRADING_PREFERENCES_PERMISSION_MESSAGE
     if result.code in _IP_BLOCKED:
         seen = f" It saw {result.ip}." if result.ip else ""
         return (

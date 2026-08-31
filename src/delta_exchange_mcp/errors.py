@@ -16,14 +16,12 @@ _AUTH_HINTS: dict[str, str] = {
         "matches the dashboard the key was created on."
     ),
     "UnauthorizedApiAccess": (
-        "API key lacks permission for trading preferences. Update its account-data "
-        "permissions in Delta API management. Current Delta documentation does not "
-        "establish whether Read Data alone is sufficient."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "unauthorized_api_access": (
-        "API key lacks permission for trading preferences. Update its account-data "
-        "permissions in Delta API management. Current Delta documentation does not "
-        "establish whether Read Data alone is sufficient."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "ip_not_whitelisted_for_api_key": (
         "request IP not whitelisted for this API key. Add the IP shown in the error "

@@ -668,6 +668,24 @@ async def test_tick_rounding_skipped_when_unresolved():
     assert "price_adjustments" not in out[1]
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_trading_permission_error_does_not_name_the_validation_endpoint() -> None:
+    respx.delete(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": "UnauthorizedApiAccess"}},
+        )
+    )
+
+    with pytest.raises(Exception) as exc:
+        await _call(_client(), "cancel_order", product_id=27, id=81)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
+
+
 # ------------------------------------------------------- transport-failure safety
 
 
@@ -806,10 +824,10 @@ async def test_unknown_outcome_names_the_correct_state_checks(
     expected: tuple[str, ...],
 ) -> None:
     if tool == "close_all_positions":
-        respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+        respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
             return_value=httpx.Response(
                 200,
-                json={"success": True, "result": {"id": 99}},
+                json={"success": True, "result": {"user_id": 99}},
             )
         )
     respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(
