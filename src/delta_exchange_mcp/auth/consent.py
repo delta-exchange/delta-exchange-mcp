@@ -40,6 +40,21 @@ class ConsentStorageError(ConsentError):
     """The non-secret consent metadata could not be read or written safely."""
 
 
+class ConsentRevocationError(ConsentStorageError):
+    """A broad revocation failed after zero or more backends were updated."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failed_backend: ConsentBackend,
+        written: frozenset[ConsentBackend],
+    ) -> None:
+        super().__init__(message)
+        self.failed_backend = failed_backend
+        self.written = written
+
+
 @dataclass(frozen=True)
 class ConsentBinding:
     """The exact values that one trading approval authorizes."""
@@ -476,20 +491,34 @@ class ConsentStore:
 
     def _revoke(self, matches: Callable[[_Record], bool]) -> frozenset[ConsentBackend]:
         written: set[ConsentBackend] = set()
-        if self._memory_backend.revoke(matches):
-            written.add(ConsentBackend.MEMORY)
+        try:
+            if self._memory_backend.revoke(matches):
+                written.add(ConsentBackend.MEMORY)
+        except ConsentStorageError as exc:
+            raise ConsentRevocationError(
+                str(exc),
+                failed_backend=ConsentBackend.MEMORY,
+                written=frozenset(written),
+            ) from exc
         if not self._secure_backend_available:
             return frozenset(written)
-        with self._write_lock():
-            records = self._read_file()
-            changed = False
-            for key, record in list(records.items()):
-                if matches(record):
-                    records[key] = _revoked_record(record)
-                    changed = True
-            if changed:
-                self._write_file(records)
-                written.add(ConsentBackend.PERSISTENT)
+        try:
+            with self._write_lock():
+                records = self._read_file()
+                changed = False
+                for key, record in list(records.items()):
+                    if matches(record):
+                        records[key] = _revoked_record(record)
+                        changed = True
+                if changed:
+                    self._write_file(records)
+                    written.add(ConsentBackend.PERSISTENT)
+        except ConsentStorageError as exc:
+            raise ConsentRevocationError(
+                str(exc),
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(written),
+            ) from exc
         return frozenset(written)
 
     def _set(

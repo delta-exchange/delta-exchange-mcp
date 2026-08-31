@@ -865,6 +865,89 @@ def test_consent_write_recovery_is_scoped_to_the_selected_backend(
     assert connection.status(context(failed_client))["consent_error"] == ""
 
 
+def test_partial_revocation_clears_each_backend_that_was_updated(monkeypatch) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    enabled = action(connection, "", "consent", arguments)
+    credential = connection.credentials.get("india_prod")
+    memory_binding = connection._binding("", credential)
+    assert enabled.content["status"] == "enabled"
+    assert memory_binding is not None
+
+    original_enable = connection.consent.enable
+
+    def fail_memory_backend(binding, **kwargs):
+        if not binding.persistent:
+            raise ConsentStorageError("memory consent backend is unavailable")
+        return original_enable(binding, **kwargs)
+
+    monkeypatch.setattr(connection.consent, "enable", fail_memory_backend)
+    failed = action(connection, "", "consent", arguments)
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    assert failed.content["status"] == "rejected"
+
+    consent_path = store.path().with_name("consent.json")
+    consent_path.write_text("not-json")
+    disconnected = action(
+        connection,
+        "",
+        "credentials",
+        {"operation": "disconnect", "environment": "india_prod"},
+    )
+
+    assert disconnected.content["status"] == "disconnected"
+    assert connection.consent.status(memory_binding).enabled is False
+    assert consent_path.read_text() == "not-json"
+
+    consent_path.unlink()
+    connection.credentials.replace("india_prod", "next-key", "next-secret")
+    persistent_recovered = action(connection, "Codex", "consent", arguments)
+
+    assert persistent_recovered.content["status"] == "enabled"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+@pytest.mark.parametrize(
+    ("failed_client", "other_client"),
+    [("Codex", ""), ("", "Codex")],
+    ids=[
+        "persistent-failure-survives-memory-read",
+        "memory-failure-survives-persistent-read",
+    ],
+)
+def test_consent_read_recovery_is_scoped_to_the_selected_backend(
+    monkeypatch,
+    failed_client: str,
+    other_client: str,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    original_status = connection.consent.status
+    failed_persistent = bool(failed_client)
+
+    def fail_selected_backend(binding):
+        if binding.persistent is failed_persistent:
+            raise ConsentStorageError("selected consent backend is unreadable")
+        return original_status(binding)
+
+    monkeypatch.setattr(connection.consent, "status", fail_selected_backend)
+
+    assert connection.status(context(failed_client))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+    assert connection.status(context(other_client))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    monkeypatch.setattr(connection.consent, "status", original_status)
+    assert connection.status(context(failed_client))["consent_error"] == ""
+
+
 def test_consent_read_recovery_clears_only_the_read_failure(monkeypatch) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "key", "secret")
