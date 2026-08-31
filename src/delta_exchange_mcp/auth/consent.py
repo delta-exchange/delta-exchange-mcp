@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from delta_exchange_mcp.auth.store import MetadataError, file_lock
+from delta_exchange_mcp.auth.backend import MetadataError, file_lock
 
 
 SCHEMA_VERSION = 1
