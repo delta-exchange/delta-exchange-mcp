@@ -30,7 +30,7 @@ class CaseResult:
 
 def _value_matches(expected: object, actual: object) -> bool:
     if expected is ANY:
-        return True
+        return actual is not None
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
             key in actual and _value_matches(value, actual[key])
