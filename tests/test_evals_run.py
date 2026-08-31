@@ -66,7 +66,7 @@ def test_new_report_is_owner_only_under_a_permissive_umask(tmp_path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
-def test_existing_permissive_report_is_tightened_before_write(tmp_path) -> None:
+def test_existing_permissive_report_is_replaced_before_write(tmp_path) -> None:
     path = tmp_path / "report.json"
     path.write_text("old account data")
     path.chmod(0o644)
@@ -79,6 +79,36 @@ def test_existing_permissive_report_is_tightened_before_write(tmp_path) -> None:
     payload = json.loads(contents)
     result = json.loads(payload["results"][0]["turns"][0]["calls"][0]["result"])
     assert result == {"balance": "123.45", "account_id": 99}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
+def test_existing_reader_cannot_observe_replacement_report(tmp_path) -> None:
+    path = tmp_path / "report.json"
+    path.write_text("old public report")
+    path.chmod(0o644)
+
+    with path.open() as existing_reader:
+        run_mod.write_report([_result()], _args(path))
+        existing_reader.seek(0)
+        assert existing_reader.read() == "old public report"
+
+    assert "old public report" not in path.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
+def test_failed_report_replace_removes_private_temp_file(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "report.json"
+
+    def fail_replace(source, destination) -> None:
+        del source, destination
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(run_mod.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        run_mod._write_private_report(path, "private account data")
+
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("writer", ["write_report", "_write_private_report"])

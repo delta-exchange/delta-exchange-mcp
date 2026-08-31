@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,16 +49,23 @@ def _require_private_reports() -> None:
 def _write_private_report(path: Path, contents: str) -> None:
     """Write one report without exposing account data to other local users."""
     _require_private_reports()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temp_path = Path(temp_name)
     try:
         os.fchmod(fd, 0o600)
-        os.ftruncate(fd, 0)
-        with os.fdopen(fd, "w", encoding="utf-8") as report:
-            fd = -1
+        report = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with report:
             report.write(contents)
+        os.replace(temp_path, path)
     finally:
-        if fd != -1:
-            os.close(fd)
+        try:
+            if fd != -1:
+                os.close(fd)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
