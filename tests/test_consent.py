@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from delta_exchange_mcp.auth import consent as consent_mod
-from delta_exchange_mcp.auth import store as auth_store
+from delta_exchange_mcp.auth import backend as auth_backend
 from delta_exchange_mcp.auth.consent import (
     ConsentBinding,
     ConsentStorageError,
@@ -417,12 +417,12 @@ def test_consent_write_times_out_under_contention_and_succeeds_after_release(
 ) -> None:
     path = tmp_path / "nested" / "consent.json"
     store = new_store(path)
-    monkeypatch.setattr(auth_store, "_LOCK_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(auth_backend, "_LOCK_TIMEOUT_SECONDS", 0)
 
-    with auth_store.file_lock(path):
+    with auth_backend.file_lock(path):
         with pytest.raises(ConsentStorageError, match="timed out") as raised:
             store.enable(binding(), expected_generation=0)
-        assert isinstance(raised.value.__cause__, auth_store.MetadataError)
+        assert isinstance(raised.value.__cause__, auth_backend.MetadataError)
         assert not path.exists()
 
     assert store.enable(binding(), expected_generation=0).enabled is True
@@ -433,14 +433,14 @@ def test_consent_translates_only_lock_acquisition_errors(
     tmp_path, monkeypatch, phase: str
 ) -> None:
     store = new_store(tmp_path / "consent.json")
-    failure = auth_store.MetadataError(phase)
-    monkeypatch.setattr(auth_store, "_LOCK_TIMEOUT_SECONDS", 0)
+    failure = auth_backend.MetadataError(phase)
+    monkeypatch.setattr(auth_backend, "_LOCK_TIMEOUT_SECONDS", 0)
 
     @contextmanager
     def failing_lock(path: Path) -> Iterator[tuple[int, Path]]:
         if phase == "acquire":
             raise failure
-        with auth_store.file_lock(path) as locked:
+        with auth_backend.file_lock(path) as locked:
             yield locked
         if phase == "release":
             raise failure
@@ -451,14 +451,14 @@ def test_consent_translates_only_lock_acquisition_errors(
         return True
 
     monkeypatch.setattr(consent_mod, "file_lock", failing_lock)
-    expected = ConsentStorageError if phase == "acquire" else auth_store.MetadataError
+    expected = ConsentStorageError if phase == "acquire" else auth_backend.MetadataError
     with pytest.raises(expected) as raised:
         store.enable(binding(), expected_generation=0, check_current=check_current)
     if phase == "acquire":
         assert raised.value.__cause__ is failure
     else:
         assert raised.value is failure
-    with auth_store.file_lock(tmp_path / "consent.json"):
+    with auth_backend.file_lock(tmp_path / "consent.json"):
         pass
 
 

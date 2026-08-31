@@ -58,6 +58,13 @@ PageFactory = Callable[..., setup.Page]
 
 
 @dataclass(frozen=True)
+class _CredentialCandidate:
+    environment: str
+    api_key: str = field(repr=False)
+    api_secret: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class ConnectionStatus:
     """One secret-free snapshot for an MCP result or the browser page."""
 
@@ -104,6 +111,7 @@ class ConnectionService:
     credential_environ: Mapping[str, str] | None = field(default=None, repr=False)
     migration_error: str = ""
     credential_error: str = ""
+    store_error: str = ""
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
@@ -122,9 +130,17 @@ class ConnectionService:
     ) -> "ConnectionService":
         """Open each store once, migrate plaintext, and create the live client."""
         config_path = legacy_store.path()
-        credential_store = credentials or CredentialStore.open(
-            config_path.with_name(default_metadata_path().name)
-        )
+        store_error = ""
+        if credentials is not None:
+            credential_store = credentials
+        else:
+            try:
+                credential_store = CredentialStore.open(
+                    config_path.with_name(default_metadata_path().name)
+                )
+            except CredentialStoreError as exc:
+                store_error = "credential_store_unavailable"
+                credential_store = CredentialStore.memory(str(exc))
         shared_memory = memory_consent or MemoryConsentBackend()
         consent_store = consent or ConsentStore(
             config_path.with_name(DEFAULT_CONSENT_NAME),
@@ -178,6 +194,7 @@ class ConnectionService:
             credential_environ=environ,
             migration_error=migration_error,
             credential_error=credential_error,
+            store_error=store_error,
         )
         service._active_binding = service._binding("", credential)
         return service
@@ -246,6 +263,31 @@ class ConnectionService:
             arguments: Mapping[str, Any],
             expected: setup.Revision,
         ) -> setup.ActionResult:
+            operation = str(arguments.get("operation") or "replace")
+            if action == "credentials" and operation == "replace":
+                with self._lock:
+                    stale = self._stale_action(client_name, expected)
+                    if stale is not None:
+                        return stale
+                    candidate = self._credential_candidate(client_name, arguments)
+                    if isinstance(candidate, setup.ActionResult):
+                        return candidate
+                checked = self._validate(
+                    candidate.environment,
+                    candidate.api_key,
+                    candidate.api_secret,
+                )
+                with self._lock:
+                    stale = self._stale_action(client_name, expected)
+                    if stale is not None:
+                        return stale
+                    return self._replace_credential(
+                        client_name,
+                        candidate,
+                        checked,
+                        expected,
+                    )
+
             with self._lock:
                 current = self._revision(client_name)
                 if action == "status":
@@ -270,6 +312,39 @@ class ConnectionService:
 
         return run
 
+    def _stale_action(
+        self,
+        client_name: str,
+        expected: setup.Revision,
+    ) -> setup.ActionResult | None:
+        current = self._revision(client_name)
+        if isinstance(expected, dict) and expected == current:
+            return None
+        return setup.ActionResult(
+            {"message": "The connection changed. Reload this page."},
+            revision=current,
+            stale=True,
+        )
+
+    def _credential_candidate(
+        self,
+        client_name: str,
+        arguments: Mapping[str, Any],
+    ) -> _CredentialCandidate | setup.ActionResult:
+        environment = str(arguments.get("environment") or "").strip().lower()
+        if environment not in SUPPORTED_ENVIRONMENTS:
+            return self._rejected(client_name, "Choose production or testnet.")
+        if self._process_credentials_present():
+            return self._rejected(
+                client_name,
+                "Credentials are managed by this MCP client's environment. Change them there.",
+            )
+        api_key = str(arguments.get("api_key") or "").strip()
+        api_secret = str(arguments.get("api_secret") or "").strip()
+        if not api_key or not api_secret:
+            return self._rejected(client_name, "Enter both the API key and API secret.")
+        return _CredentialCandidate(environment, api_key, api_secret)
+
     def _credential_action(
         self,
         client_name: str,
@@ -284,20 +359,16 @@ class ConnectionService:
             return self._activate_environment(client_name, environment, expected)
         if operation == "disconnect":
             return self._disconnect(client_name, environment, expected)
-        if operation != "replace":
-            return self._rejected(client_name, "Unknown credential action.")
-        if self._process_credentials_present():
-            return self._rejected(
-                client_name,
-                "Credentials are managed by this MCP client's environment. Change them there.",
-            )
+        return self._rejected(client_name, "Unknown credential action.")
 
-        api_key = str(arguments.get("api_key") or "").strip()
-        api_secret = str(arguments.get("api_secret") or "").strip()
-        if not api_key or not api_secret:
-            return self._rejected(client_name, "Enter both the API key and API secret.")
-
-        checked = self._validate(environment, api_key, api_secret)
+    def _replace_credential(
+        self,
+        client_name: str,
+        candidate: _CredentialCandidate,
+        checked: credential_check.Check,
+        expected: RevisionToken,
+    ) -> setup.ActionResult:
+        environment = candidate.environment
         if not checked.ok and checked.code in _DECISIVE_REJECTION_CODES:
             return self._rejected(
                 client_name,
@@ -311,8 +382,8 @@ class ConnectionService:
         try:
             self.credentials.replace(
                 environment,
-                api_key,
-                api_secret,
+                candidate.api_key,
+                candidate.api_secret,
                 state=state,
                 account_id=account_id,
                 expected_revision=expected_revision,
@@ -704,20 +775,25 @@ class ConnectionService:
                 )
                 if credential is None:
                     return False
-                accepted = self.consent.accepts(
-                    lease,
-                    current_credential_revision=credential.revision,
-                    current_credential_generation=credential.generation,
-                    current_credential_session_generation=credential.session_generation,
-                    current_environment_generation=generation,
-                )
-                if not accepted:
+                if self._binding(lease.binding.client_name, credential) != lease.binding:
                     return False
-                confirmed, _ = _resolve_credential(
+                confirmed_credential, _ = _resolve_credential(
                     self.credentials, base.env, self.credential_environ
                 )
-                return (
-                    self._binding(lease.binding.client_name, confirmed) == lease.binding
+                confirmed = self._binding(
+                    lease.binding.client_name,
+                    confirmed_credential,
+                )
+                if confirmed != lease.binding:
+                    return False
+                return self.consent.accepts(
+                    lease,
+                    current_credential_revision=confirmed.credential_revision,
+                    current_credential_generation=confirmed.credential_generation,
+                    current_credential_session_generation=(
+                        confirmed.credential_session_generation
+                    ),
+                    current_environment_generation=confirmed.environment_generation,
                 )
             except Exception:
                 return False
@@ -755,6 +831,7 @@ class ConnectionService:
         process_override = self._process_credentials_present()
         for environment in SUPPORTED_ENVIRONMENTS:
             metadata = self._metadata(environment)
+            is_active = environment == base.env
             is_active_override = environment == base.env and process_override
             is_active_process = bool(
                 is_active_override
@@ -762,20 +839,24 @@ class ConnectionService:
                 and active.source is CredentialSource.PROCESS
             )
             connected = (
-                is_active_process
-                if is_active_override
+                active is not None
+                if is_active
                 else metadata is not None and metadata.revision is not None
             )
+            metadata_present = metadata is not None and metadata.revision is not None
             source = (
                 CredentialSource.PROCESS
                 if is_active_override
+                else active.source
+                if is_active and active is not None
                 else self.credentials.source
-                if metadata is not None and metadata.revision is not None
+                if metadata_present
                 else None
             )
             environments[environment] = {
                 "connected": connected,
-                "active": environment == base.env,
+                "active": is_active,
+                "credential_metadata_present": metadata_present,
                 "credential_source": _source_name(source),
                 "reconnect_required": bool(
                     not is_active_override
@@ -784,9 +865,11 @@ class ConnectionService:
                 ),
                 "validation_state": (
                     active.state.value
-                    if is_active_process and active is not None
+                    if is_active and active is not None
                     else "incomplete"
                     if is_active_override
+                    else "unavailable"
+                    if is_active and metadata_present and self.credential_error
                     else metadata.state.value
                     if metadata is not None and metadata.state is not None
                     else "unavailable"
@@ -795,9 +878,9 @@ class ConnectionService:
                 ),
                 "account_id": (
                     active.account_id
-                    if is_active_process and active is not None
+                    if is_active and active is not None
                     else ""
-                    if is_active_override
+                    if is_active
                     else metadata.account_id
                     if metadata is not None
                     else ""
@@ -834,7 +917,7 @@ class ConnectionService:
             environment_externally_managed=(
                 self.fixed_config is not None or bool(_process_setting("DELTA_MCP_ENV"))
             ),
-            connection_error=self.credential_error,
+            connection_error=self.store_error or self.credential_error,
         )
 
     def _process_credentials_present(self) -> bool:
