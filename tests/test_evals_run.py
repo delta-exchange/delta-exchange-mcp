@@ -1,23 +1,30 @@
 """Report-writing contracts for the manual evaluation runner."""
 
 import argparse
+import asyncio
 import json
 import os
 import stat
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from evals.agent import ToolCall, TurnRecord
-from evals.run import write_report
+from evals import run as run_mod
 from evals.scoring import CaseResult
 
 
-def _args(path) -> argparse.Namespace:
+def _args(path, *, no_report: bool = False) -> argparse.Namespace:
     return argparse.Namespace(
         json_path=str(path),
         model="agent-model",
         no_judge=True,
         judge_model="judge-model",
+        no_report=no_report,
+        list=False,
+        mode=None,
+        cases=None,
     )
 
 
@@ -48,7 +55,7 @@ def test_new_report_is_owner_only_under_a_permissive_umask(tmp_path) -> None:
     path = tmp_path / "report.json"
     previous = os.umask(0)
     try:
-        write_report([_result()], _args(path))
+        run_mod.write_report([_result()], _args(path))
     finally:
         os.umask(previous)
 
@@ -64,7 +71,7 @@ def test_existing_permissive_report_is_tightened_before_write(tmp_path) -> None:
     path.write_text("old account data")
     path.chmod(0o644)
 
-    write_report([_result()], _args(path))
+    run_mod.write_report([_result()], _args(path))
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     contents = path.read_text()
@@ -72,3 +79,63 @@ def test_existing_permissive_report_is_tightened_before_write(tmp_path) -> None:
     payload = json.loads(contents)
     result = json.loads(payload["results"][0]["turns"][0]["calls"][0]["result"])
     assert result == {"balance": "123.45", "account_id": 99}
+
+
+@pytest.mark.parametrize("writer", ["write_report", "_write_private_report"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_windows_report_writers_refuse_before_touching_target(
+    tmp_path,
+    monkeypatch,
+    writer: str,
+    existing: bool,
+) -> None:
+    path = tmp_path / "report.json"
+    if existing:
+        path.write_text("existing account data")
+    monkeypatch.setattr(run_mod, "_private_reports_supported", lambda: False)
+
+    with pytest.raises(RuntimeError, match="--no-report"):
+        if writer == "write_report":
+            run_mod.write_report([_result()], _args(path))
+        else:
+            run_mod._write_private_report(path, "replacement account data")
+
+    if existing:
+        assert path.read_text() == "existing account data"
+    else:
+        assert not path.exists()
+
+
+def test_windows_report_guard_runs_before_live_setup(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(run_mod, "parse_args", lambda: _args(tmp_path / "report.json"))
+    monkeypatch.setattr(run_mod, "_private_reports_supported", lambda: False)
+
+    def unexpected_live_setup() -> str:
+        raise AssertionError("live setup started before the report privacy check")
+
+    monkeypatch.setattr(run_mod.agent_mod, "resolve_env", unexpected_live_setup)
+
+    with pytest.raises(SystemExit, match="--no-report"):
+        asyncio.run(run_mod.main())
+
+
+def test_windows_no_report_run_remains_supported(tmp_path, monkeypatch) -> None:
+    args = _args(tmp_path / "report.json", no_report=True)
+    monkeypatch.setattr(run_mod, "parse_args", lambda: args)
+    monkeypatch.setattr(run_mod, "_private_reports_supported", lambda: False)
+    monkeypatch.setattr(run_mod.agent_mod, "resolve_env", lambda: "india_testnet")
+    monkeypatch.setattr(run_mod, "select_cases", lambda _: [])
+    monkeypatch.setattr(run_mod, "print_table", lambda _: None)
+    monkeypatch.setattr(
+        run_mod,
+        "write_report",
+        lambda *_: pytest.fail("--no-report must not write a report"),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder")
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(AsyncAnthropic=lambda: object()),
+    )
+
+    assert asyncio.run(run_mod.main()) == 0
