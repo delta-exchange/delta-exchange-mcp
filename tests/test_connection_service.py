@@ -774,6 +774,67 @@ def test_broken_consent_store_preserves_account_access_and_reports_error(
     assert reads == [("/wallet/balances", True)]
 
 
+def test_consent_write_failure_survives_reads_until_a_write_succeeds(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    original_enable = connection.consent.enable
+
+    def unavailable(*args, **kwargs):
+        raise ConsentStorageError("consent metadata is read-only")
+
+    monkeypatch.setattr(connection.consent, "enable", unavailable)
+    failed = action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+
+    assert failed.content["status"] == "rejected"
+    assert connection.consent_error == "consent_store_unavailable"
+    assert connection.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    enabled = action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+def test_consent_read_recovery_clears_only_the_read_failure(monkeypatch) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    original_status = connection.consent.status
+
+    def unavailable(*args, **kwargs):
+        raise ConsentStorageError("cannot read consent metadata")
+
+    monkeypatch.setattr(connection.consent, "status", unavailable)
+    assert connection.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    monkeypatch.setattr(connection.consent, "status", original_status)
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
 @pytest.mark.parametrize("change", ["credential", "environment"])
 def test_final_checker_rejects_cross_process_changes_before_mutation(
     monkeypatch,
