@@ -233,10 +233,10 @@ def register(
     active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
-    _uid_cache: dict[str, int] = {}
-    # tick_size keyed by both product id (int) and symbol (str); filled lazily.
-    _tick_cache: dict[int | str, Decimal] = {}
-    _tick_list_loaded = {"done": False}
+    _uid_cache: dict[int, int] = {}
+    # Include the pinned HTTP identity so old requests cannot fill a new account's cache.
+    _tick_cache: dict[tuple[int, int | str], Decimal] = {}
+    _tick_list_loaded: set[int] = set()
 
     def current_audit() -> AuditLog | None:
         return audit() if callable(audit) else audit
@@ -278,6 +278,7 @@ def register(
         return decorate
 
     def _store_product(prod: dict[str, Any]) -> None:
+        generation = client.binding_generation
         tick = prod.get("tick_size")
         if tick is None:
             return
@@ -286,9 +287,9 @@ def register(
         except (InvalidOperation, ValueError):
             return
         if prod.get("id") is not None:
-            _tick_cache[int(prod["id"])] = dec
+            _tick_cache[(generation, int(prod["id"]))] = dec
         if prod.get("symbol"):
-            _tick_cache[str(prod["symbol"])] = dec
+            _tick_cache[(generation, str(prod["symbol"]))] = dec
 
     async def _tick_size(product_id: int | None, product_symbol: str | None) -> Decimal | None:
         """Resolve a product's tick_size (cached per process). Returns None if unresolvable.
@@ -298,7 +299,11 @@ def register(
         indexes every product. Never raises — price rounding must not block an order on a
         metadata-lookup failure.
         """
-        key: int | str | None = product_symbol if product_symbol is not None else product_id
+        generation = client.binding_generation
+        product_key: int | str | None = (
+            product_symbol if product_symbol is not None else product_id
+        )
+        key = (generation, product_key) if product_key is not None else None
         if key is not None and key in _tick_cache:
             return _tick_cache[key]
         try:
@@ -307,13 +312,13 @@ def register(
                 inner = resp.get("result", resp) if isinstance(resp, dict) else None
                 if isinstance(inner, dict):
                     _store_product(inner)
-            elif not _tick_list_loaded["done"]:
+            elif generation not in _tick_list_loaded:
                 resp = await client.get("/products")
                 products = resp.get("result", []) if isinstance(resp, dict) else []
                 for prod in products if isinstance(products, list) else []:
                     if isinstance(prod, dict):
                         _store_product(prod)
-                _tick_list_loaded["done"] = True
+                _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
             logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
             return None
@@ -342,14 +347,15 @@ def register(
         return adjustments
 
     async def _user_id() -> int:
-        if "id" not in _uid_cache:
+        generation = client.binding_generation
+        if generation not in _uid_cache:
             prof = await client.get("/profile", auth=True)
             inner = prof.get("result", prof) if isinstance(prof, dict) else {}
             uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
             if uid is None:
                 raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
+            _uid_cache[generation] = int(uid)
+        return _uid_cache[generation]
 
     async def _finish(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool

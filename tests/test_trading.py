@@ -364,6 +364,93 @@ async def test_close_all_fetches_and_caches_user_id():
     assert b'"user_id":999' in close.calls[0].request.content
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_all_partitions_user_id_cache_after_rebind():
+    profile = respx.get(url__regex=r".*/profile$").mock(
+        side_effect=[
+            httpx.Response(200, json={"success": True, "result": {"id": 111}}),
+            httpx.Response(200, json={"success": True, "result": {"id": 222}}),
+        ]
+    )
+    first_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    second_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    trading.register(mcp, client)
+
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="k2",
+            api_secret="s2",
+            mode="trade",
+        )
+    )
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+    await client.aclose()
+
+    assert profile.call_count == 2
+    assert b'"user_id":111' in first_close.calls[0].request.content
+    assert b'"user_id":222' in second_close.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_price_cache_partitions_tick_size_after_rebind():
+    respx.get(f"{INDIA_TESTNET_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "1"}},
+        )
+    )
+    first_order = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 1}})
+    )
+    prod_lookup = respx.get(f"{INDIA_PROD_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "0.01"}},
+        )
+    )
+    second_order = respx.post(f"{INDIA_PROD_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 2}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    trading.register(mcp, client)
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "62000.07",
+    }
+
+    await mcp.call_tool("place_order", arguments)
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="k2",
+            api_secret="s2",
+            mode="trade",
+        )
+    )
+    await mcp.call_tool("place_order", arguments)
+    await client.aclose()
+
+    assert prod_lookup.call_count == 1
+    assert b'"limit_price":"62000"' in first_order.calls[0].request.content
+    assert b'"limit_price":"62000.07"' in second_order.calls[0].request.content
+
+
 # --------------------------------------------------------------- audit log
 
 
