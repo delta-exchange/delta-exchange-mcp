@@ -128,9 +128,6 @@ async def run_mode_group(
 def print_table(results: list[CaseResult]) -> None:
     print(f"\n{'id':<30} {'mode':<6} {'det':<5} judge")
     for r in results:
-        if r.skipped:
-            print(f"{r.case_id:<30} {r.mode:<6} {'SKIP':<5} {r.skipped}")
-            continue
         det = "PASS" if r.passed else "FAIL"
         parts = []
         for name, (score, _) in r.judge_scores.items():
@@ -168,7 +165,7 @@ def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
                 "id": r.case_id,
                 "mode": r.mode,
                 "passed": r.passed,
-                "skipped": r.skipped,
+                "skipped": None,
                 "failures": r.failures,
                 "judge_scores": {
                     k: {"score": s, "reason": why}
@@ -217,7 +214,7 @@ async def main() -> int:
     print_table(results)
     if not args.no_report:
         print(f"\nreport: {write_report(results, args)}")
-    return sum(1 for r in results if not r.passed and not r.skipped)
+    return sum(1 for r in results if not r.passed)
 
 
 if __name__ == "__main__":

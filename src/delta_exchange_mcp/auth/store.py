@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field, replace as replace_fields
+from dataclasses import asdict, dataclass, field, replace as replace_fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -291,7 +291,8 @@ class MemorySecretBackend:
 
 
 @contextmanager
-def _file_lock(target: Path) -> Iterator[tuple[int, Path]]:
+def file_lock(target: Path) -> Iterator[tuple[int, Path]]:
+    """Hold an exclusive file lock and expose its descriptor and path."""
     lock_path = target.with_name(f".{target.name}.lock")
     try:
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -344,7 +345,7 @@ class FileMetadata:
     def __init__(self, path: Path):
         # The persistent lock exists before the first metadata write. Resolve its
         # filesystem spelling so case aliases use the same namespace from startup.
-        with _file_lock(path.resolve()) as (fd, lock_path):
+        with file_lock(path.resolve()) as (fd, lock_path):
             if os.name != "nt" and hasattr(fcntl, "F_GETPATH"):
                 raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
                 lock_path = Path(os.fsdecode(raw.split(b"\0", 1)[0]))
@@ -359,7 +360,7 @@ class FileMetadata:
     @contextmanager
     def lock(self) -> Iterator[None]:
         with self._thread_lock:
-            with _file_lock(self.path):
+            with file_lock(self.path):
                 yield
 
     def read(self) -> dict[str, _EnvironmentState]:
@@ -418,7 +419,7 @@ class FileMetadata:
             "version": METADATA_VERSION,
             "namespace": self.namespace,
             "environments": {
-                environment: _state_to_json(state)
+                environment: asdict(state)
                 for environment, state in sorted(values.items())
             },
         }
@@ -598,7 +599,7 @@ class CredentialStore:
 
     def migrate(self, config_path: Path) -> MigrationResult:
         """Move one complete legacy file credential into this store."""
-        with _file_lock(config_path):
+        with file_lock(config_path):
             if config_path.is_symlink():
                 return MigrationResult(MigrationStatus.UNAVAILABLE, "")
             try:
@@ -1260,24 +1261,6 @@ def _state_from_json(value: object, path: Path) -> _EnvironmentState:
         preserved_records=tuple(raw_preserved),
         reconnect_required=reconnect_required,
     )
-
-
-def _state_to_json(
-    state: _EnvironmentState,
-) -> dict[str, int | str | list[int] | list[str] | None]:
-    return {
-        "active_revision": state.active_revision,
-        "next_revision": state.next_revision,
-        "generation": state.generation,
-        "state": state.state.value if state.state is not None else None,
-        "account_id": state.account_id,
-        "created_at": state.created_at,
-        "updated_at": state.updated_at,
-        "validated_at": state.validated_at,
-        "pending_revisions": list(state.pending_revisions),
-        "preserved_records": list(state.preserved_records),
-        "reconnect_required": state.reconnect_required,
-    }
 
 
 def _now() -> str:

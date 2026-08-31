@@ -7,23 +7,16 @@ import os
 import stat
 import tempfile
 import threading
-import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+from delta_exchange_mcp.auth.store import MetadataError, file_lock
 
 
 SCHEMA_VERSION = 1
 SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
-_LOCK_TIMEOUT_SECONDS = 10.0
-_LOCK_POLL_SECONDS = 0.05
-
 logger = logging.getLogger(__name__)
 
 
@@ -588,51 +581,12 @@ class ConsentStore:
 
     @contextmanager
     def _write_lock(self) -> Iterator[None]:
-        try:
-            self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            lock_path = self._path.with_name(f".{self._path.name}.lock")
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError as exc:
-            raise ConsentStorageError(
-                f"cannot open consent metadata lock: {exc}"
-            ) from exc
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        locked = False
-        try:
-            if os.name == "nt":
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                while not locked:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    try:
-                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                        locked = True
-                    except OSError as exc:
-                        if time.monotonic() >= deadline:
-                            raise ConsentStorageError(
-                                "timed out waiting for consent metadata lock"
-                            ) from exc
-                        time.sleep(_LOCK_POLL_SECONDS)
-            else:
-                while not locked:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        locked = True
-                    except BlockingIOError as exc:
-                        if time.monotonic() >= deadline:
-                            raise ConsentStorageError(
-                                "timed out waiting for consent metadata lock"
-                            ) from exc
-                        time.sleep(_LOCK_POLL_SECONDS)
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(file_lock(self._path))
+            except MetadataError as exc:
+                raise ConsentStorageError(str(exc)) from exc
             yield
-        finally:
-            if locked:
-                if os.name == "nt":
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
 
 def _sync_directory(path: Path) -> None:

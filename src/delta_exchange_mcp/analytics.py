@@ -107,19 +107,11 @@ def _modern_models(
     raw_info = meta.get(CLIENT_INFO_META_KEY)
     raw_capabilities = meta.get(CLIENT_CAPABILITIES_META_KEY)
     try:
-        info = (
-            raw_info
-            if isinstance(raw_info, Implementation)
-            else Implementation.model_validate(raw_info)
-        )
+        info = Implementation.model_validate(raw_info)
     except (TypeError, ValueError):
         info = None
     try:
-        capabilities = (
-            raw_capabilities
-            if isinstance(raw_capabilities, ClientCapabilities)
-            else ClientCapabilities.model_validate(raw_capabilities)
-        )
+        capabilities = ClientCapabilities.model_validate(raw_capabilities)
     except (TypeError, ValueError):
         capabilities = None
     return info, capabilities
