@@ -29,6 +29,21 @@ DEFAULT_JUDGE_MODEL = os.environ.get("DELTA_EVAL_JUDGE_MODEL", "claude-opus-4-8"
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 
+def _write_private_report(path: Path, contents: str) -> None:
+    """Write one report without exposing account data to other local users."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "w", encoding="utf-8") as report:
+            fd = -1
+            report.write(contents)
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -195,7 +210,7 @@ def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
             for r in results
         ],
     }
-    path.write_text(json.dumps(payload, indent=2, default=str))
+    _write_private_report(path, json.dumps(payload, indent=2, default=str))
     return path
 
 

@@ -137,6 +137,26 @@ def test_wrong_prompt_literal_does_not_satisfy_a_mutation(wrong_margin: str) -> 
     assert any("forbidden mutation" in failure for failure in failures)
 
 
+def test_null_does_not_satisfy_a_derived_argument() -> None:
+    case = _case("set_leverage")
+    transcript = _transcript(
+        case,
+        (
+            (
+                _call(
+                    "set_product_leverage",
+                    {"product_id": None, "leverage": "10"},
+                ),
+            ),
+        ),
+    )
+
+    passed, failures = check(case, transcript)
+
+    assert not passed
+    assert any("product_id=<any>" in failure for failure in failures)
+
+
 def test_nested_price_contract_allows_extra_valid_fields() -> None:
     case = _case("bracket_on_position")
     transcript = _transcript(

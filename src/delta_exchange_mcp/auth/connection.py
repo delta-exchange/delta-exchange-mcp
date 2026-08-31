@@ -17,6 +17,7 @@ from delta_exchange_mcp import store as legacy_store
 from delta_exchange_mcp.auth.consent import (
     ConsentBinding,
     ConsentLease,
+    ConsentState,
     ConsentStorageError,
     ConsentStore,
     MemoryConsentBackend,
@@ -43,6 +44,7 @@ SUPPORTED_ENVIRONMENTS = ("india_prod", "india_testnet")
 DEFAULT_CONSENT_NAME = "consent.json"
 
 _ENVIRONMENT_TOKEN = {"india_prod": 1, "india_testnet": 2, "india_devnet": 3}
+_CONSENT_STORE_UNAVAILABLE = "consent_store_unavailable"
 _DECISIVE_REJECTION_CODES = frozenset(
     {
         "InvalidApiKey",
@@ -76,6 +78,7 @@ class ConnectionStatus:
     migration_status: str
     environment_externally_managed: bool
     connection_error: str
+    consent_error: str
 
     def as_dict(self) -> dict[str, object]:
         """Return the stable status payload."""
@@ -88,6 +91,7 @@ class ConnectionStatus:
             "migration_status": self.migration_status,
             "environment_externally_managed": self.environment_externally_managed,
             "connection_error": self.connection_error,
+            "consent_error": self.consent_error,
             "credentials_configured": bool(
                 self.environments.get(self.environment, {}).get("connected")
             ),
@@ -112,6 +116,7 @@ class ConnectionService:
     migration_error: str = ""
     credential_error: str = ""
     store_error: str = ""
+    consent_error: str = ""
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
@@ -154,14 +159,18 @@ class ConnectionService:
         except (CredentialStoreError, OSError, ValueError) as exc:
             migration = MigrationResult(MigrationStatus.ABSENT, "")
             migration_error = type(exc).__name__
+        consent_error = ""
         if migration.status is MigrationStatus.MIGRATED and migration.environment:
             if migration.credential is None or migration.credential.generation is None:
                 raise CredentialStoreError(
                     "migration did not publish a credential generation"
                 )
-            consent_store.revoke_before(
-                migration.environment, migration.credential.generation
-            )
+            try:
+                consent_store.revoke_before(
+                    migration.environment, migration.credential.generation
+                )
+            except ConsentStorageError:
+                consent_error = _CONSENT_STORE_UNAVAILABLE
 
         fixed = replace(cfg, mode="read") if cfg is not None else None
         environ: Mapping[str, str] | None = None
@@ -195,6 +204,7 @@ class ConnectionService:
             migration_error=migration_error,
             credential_error=credential_error,
             store_error=store_error,
+            consent_error=consent_error,
         )
         service._active_binding = service._binding("", credential)
         return service
@@ -205,7 +215,7 @@ class ConnectionService:
         with self._lock:
             base, credential = self._reconcile()
             binding = self._binding(client_name, credential)
-            lease = self.consent.lease(binding) if binding is not None else None
+            lease = self._consent_lease(binding)
             checker = self._final_checker(lease)
             return AccessState(
                 credentials_ready=credential is not None,
@@ -420,6 +430,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
             self._reconcile()
             return self._rejected(
                 client_name,
@@ -474,7 +485,10 @@ class ConnectionService:
                 client_name,
                 "The secure credential service could not disconnect this account.",
             )
-        self.consent.revoke_before(environment, expected_generation + 1)
+        try:
+            self.consent.revoke_before(environment, expected_generation + 1)
+        except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
         self._reconcile()
         return setup.ActionResult(
             {
@@ -502,6 +516,7 @@ class ConnectionService:
                 stale=True,
             )
         except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
             return self._rejected(
                 client_name,
                 "Trading consent could not be revoked. The active environment is unchanged.",
@@ -571,6 +586,12 @@ class ConnectionService:
                 {"message": "Trading consent changed. Reload this page."},
                 revision=self._revision(client_name),
                 stale=True,
+            )
+        except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            return self._rejected(
+                client_name,
+                "The trading consent service is unavailable. Trading remains disabled.",
             )
         return setup.ActionResult(
             {
@@ -714,7 +735,10 @@ class ConnectionService:
         binding = self._binding("", credential)
         previous = self._active_binding
         if previous is not None and previous != binding:
-            self.consent.revoke_identity(previous)
+            try:
+                self.consent.revoke_identity(previous)
+            except ConsentStorageError:
+                self.consent_error = _CONSENT_STORE_UNAVAILABLE
         self.client.rebind(_bind_config(base, credential))
         self._active_binding = binding
         self.credential_error = error
@@ -754,6 +778,30 @@ class ConnectionService:
         if environment:
             return environment.lower(), 0
         return legacy_store.environment_state(config_mod.DEFAULT_ENV)
+
+    def _consent_lease(self, binding: ConsentBinding | None) -> ConsentLease | None:
+        """Read one approval, or fail only the trading capability closed."""
+        if binding is None:
+            return None
+        try:
+            lease = self.consent.lease(binding)
+        except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            return None
+        self.consent_error = ""
+        return lease
+
+    def _consent_status(self, binding: ConsentBinding | None) -> ConsentState | None:
+        """Read consent for status without making account access depend on its store."""
+        if binding is None:
+            return None
+        try:
+            state = self.consent.status(binding)
+        except ConsentStorageError:
+            self.consent_error = _CONSENT_STORE_UNAVAILABLE
+            return None
+        self.consent_error = ""
+        return state
 
     def _final_checker(self, lease: ConsentLease | None) -> Callable[[], bool]:
         if lease is None:
@@ -795,6 +843,9 @@ class ConnectionService:
                     ),
                     current_environment_generation=confirmed.environment_generation,
                 )
+            except ConsentStorageError:
+                self.consent_error = _CONSENT_STORE_UNAVAILABLE
+                return False
             except Exception:
                 return False
 
@@ -820,8 +871,9 @@ class ConnectionService:
             else 0
         )
         binding = self._binding(client_name, credential)
+        consent_state = self._consent_status(binding)
         token["consent_generation"] = (
-            self.consent.status(binding).generation if binding is not None else 0
+            consent_state.generation if consent_state is not None else 0
         )
         return token
 
@@ -894,7 +946,7 @@ class ConnectionService:
                 ),
             }
         binding = self._binding(client_name, active)
-        consent_state = self.consent.status(binding) if binding is not None else None
+        consent_state = self._consent_status(binding)
         return ConnectionStatus(
             environment=base.env,
             client_name=client_name,
@@ -917,7 +969,10 @@ class ConnectionService:
             environment_externally_managed=(
                 self.fixed_config is not None or bool(_process_setting("DELTA_MCP_ENV"))
             ),
-            connection_error=self.store_error or self.credential_error,
+            connection_error=(
+                self.store_error or self.credential_error or self.consent_error
+            ),
+            consent_error=self.consent_error,
         )
 
     def _process_credentials_present(self) -> bool:
