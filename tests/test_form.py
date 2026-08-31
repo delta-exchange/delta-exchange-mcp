@@ -1,6 +1,6 @@
-import importlib.util
 import json
 import re
+import runpy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -409,16 +409,6 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     assert "never ask them to send a key" in text
 
 
-def _harness():
-    """`scripts/host.py`, loaded by path because `scripts` is not an importable package."""
-    path = Path(__file__).resolve().parent.parent / "scripts" / "host.py"
-    spec = importlib.util.spec_from_file_location("delta_host_harness", path)
-    assert spec and spec.loader, path
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_the_harness_can_still_find_the_touch_rules_it_injects():
     """`(pointer: coarse)` answers to the device, so no page can ask to be measured as one.
 
@@ -433,4 +423,5 @@ def test_the_harness_can_still_find_the_touch_rules_it_injects():
     would still pass after the harness's own copy stopped matching, which is the one
     outcome this test exists to prevent.
     """
-    assert "min-height: 44px" in _harness().coarse_rules()
+    path = Path(__file__).resolve().parent.parent / "scripts" / "host.py"
+    assert "min-height: 44px" in runpy.run_path(str(path))["coarse_rules"]()
