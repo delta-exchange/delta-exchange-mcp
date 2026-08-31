@@ -267,27 +267,20 @@ class DeltaClient:
             except httpx.HTTPError as e:
                 last_error = e
                 # Transport failures retry only for GETs. A mutation may have reached
-                # Delta before the response was lost, so resending it can place a
-                # duplicate order. A connect failure provably sent nothing, which is
-                # why the two cases carry different codes: one is safe to retry, the
-                # other must be reconciled against open orders first. Wrapped as
-                # DeltaApiError so the trading audit log records the failure — a raw
-                # httpx error bypasses that catch.
+                # Delta before the response was lost, so resending it can duplicate the
+                # mutation. The original exception remains the cause for local debugging,
+                # but its text can contain serialized headers and must not reach users.
                 if method != "GET":
                     if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
                         raise DeltaApiError(
                             "upstream_unreachable",
-                            context=(
-                                f"could not connect for {method} {path}: {e!r} — "
-                                "nothing was sent, safe to retry"
-                            ),
+                            context="the connection failed before the mutation was sent; retry is safe",
                         ) from e
                     raise DeltaApiError(
                         "execution_outcome_unknown",
                         context=(
-                            f"transport failure during {method} {path}: {e!r} — the "
-                            "request may have reached Delta. Do not resubmit; check "
-                            "open orders / order history first."
+                            "the transport failed after the mutation may have been sent; "
+                            "reconcile its state before another attempt"
                         ),
                     ) from e
                 if attempt == 2:
