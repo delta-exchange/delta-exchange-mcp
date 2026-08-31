@@ -68,7 +68,6 @@ class ToolCall:
     name: str
     args: dict[str, Any]
     result: Any
-    raw: CallToolResult
     is_error: bool
 
 
@@ -170,7 +169,6 @@ async def _call(
         name=name,
         args=recorded,
         result=parsed,
-        raw=res,
         is_error=bool(res.is_error),
     )
 

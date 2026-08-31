@@ -19,7 +19,6 @@ class CaseResult:
     judge_scores: dict[str, tuple[float | None, str]] = field(default_factory=dict)
     calls: list[ToolCall] = field(default_factory=list)
     final_text: str = ""
-    skipped: str | None = None
 
 
 def _args_match(expected: dict, actual: dict) -> bool:
@@ -99,7 +98,7 @@ def judge(
                         # deepeval's multi-turn text builder reads
                         # result.structured_content["result"] unguarded
                         structured_content={"result": text},
-                        is_error=c.raw.is_error,
+                        is_error=c.is_error,
                     ),
                 )
             )
