@@ -1,5 +1,7 @@
 import json
 import re
+import runpy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -174,13 +176,56 @@ def test_the_view_names_no_type_size_of_its_own():
     assert offenders == [], f"these name a size instead of asking for one: {offenders}"
 
 
+def _contrast(one: str, two: str) -> float:
+    """WCAG relative-luminance ratio between two `#rrggbb` colours."""
+
+    def luminance(colour: str) -> float:
+        raw = [int(colour.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in raw]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    high, low = sorted((luminance(one), luminance(two)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
 def test_the_view_carries_delta_s_own_brand_colours():
-    """Surfaces follow the host, but the accent has to be Delta's or it is a generic form."""
-    # --brand-india-bg-primary and its hover, from delta.exchange's own token set.
-    assert "#fe6c02" in form.VIEW_HTML
-    assert "#e76202" in form.VIEW_HTML
+    """Surfaces follow the host, but the accent has to be Delta's or it is a generic form.
+
+    The mark paints its own fills rather than reading a variable, so it is asserted by the
+    colour it actually draws. Delta's undarkened #fe6c02 is deliberately not a variable:
+    white text on it measures 2.85:1, and a declared variable is exactly how it would find
+    its way back onto a control. The stylesheet records the value in a comment instead.
+    """
     # The official mark, inlined because nothing may be fetched.
     assert 'viewBox="0 0 53 52"' in form.VIEW_HTML
+    assert "#FD7D02" in form.VIEW_HTML
+    # The interactive accent: --brand-india-bg-primary walked toward black until white text
+    # is readable on it. The ratio itself is enforced by the contrast test below.
+    assert "--brand-strong: #c45302" in form.VIEW_HTML
+    assert re.search(r"--brand:\s*#", form.VIEW_HTML) is None
+    assert "var(--brand)" not in form.VIEW_HTML
+
+
+def test_every_colour_that_carries_text_is_readable_in_light_mode():
+    """Delta's orange is the mark's colour, and it is too light to put white text on.
+
+    Measured against white it is 2.85:1, short of the 4.5:1 that text needs and even of the
+    3:1 a control's edge needs. A logo is exempt from both, so the mark keeps it and every
+    interactive fill takes a darkened stop instead. Reading the values out of the stylesheet
+    rather than restating them here is what makes this catch a change to either one.
+    """
+    tokens = dict(re.findall(r"(--(?:brand-strong|brand-strong-hover)):\s*(#[0-9a-f]{6})", form.VIEW_HTML))
+    assert set(tokens) == {"--brand-strong", "--brand-strong-hover"}, tokens
+    for name, colour in tokens.items():
+        ratio = _contrast(colour, "#ffffff")
+        assert ratio >= 4.5, f"{name} is {colour}, only {ratio:.2f}:1 against white text"
+
+    # The light stop of each semantic pair, which is prose on the form's own background.
+    for name in ("positive", "negative"):
+        light = re.search(rf"--{name}:[^;]*light-dark\((#[0-9a-f]{{6}}),", form.VIEW_HTML)
+        assert light, f"--{name} no longer names a light stop"
+        ratio = _contrast(light.group(1), "#ffffff")
+        assert ratio >= 4.5, f"--{name} light is {light.group(1)}, only {ratio:.2f}:1 on white"
 
 
 def test_the_view_carries_the_dashboards_the_rest_of_the_package_uses():
@@ -362,3 +407,21 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     # The one instruction that matters: a model asked for help with a key will otherwise
     # offer to take it in the chat, and people accept.
     assert "never ask them to send a key" in text
+
+
+def test_the_harness_can_still_find_the_touch_rules_it_injects():
+    """`(pointer: coarse)` answers to the device, so no page can ask to be measured as one.
+
+    `scripts/host.py` therefore lifts these declarations out of the view and injects them
+    unwrapped, which is the only way to see the touch layout's height — and the touch
+    layout is the one at risk, because larger targets are what make it taller. It was 517px
+    against a 500px ceiling before anything could measure it. If this block is renamed or
+    reformatted past the harness's pattern, the harness reports the mouse height under a
+    control that says touch, which is worse than not having the control at all.
+
+    It calls the harness rather than restating its pattern. A copy of the pattern here
+    would still pass after the harness's own copy stopped matching, which is the one
+    outcome this test exists to prevent.
+    """
+    path = Path(__file__).resolve().parent.parent / "scripts" / "host.py"
+    assert "min-height: 44px" in runpy.run_path(str(path))["coarse_rules"]()

@@ -79,6 +79,22 @@ Fonts are the same story from the other side: the host may send `@font-face` rul
 `hostContext.styles.css.fonts`, and the spec makes installing them the app's job, so a view
 that ignores them names a family in `--font-sans` that its own frame never loaded, renders
 in a substituted face, and measures its own height against that face.
+
+**The height has a ceiling and it is nearly full.** A host draws the view inline without a
+scrollbar up to 500px, and this form measures 495px at a 16px base in a 400px column, which
+is what both measured hosts land near. There are 5px spare. Anything added here has to take
+its room from something already present, and the only way to know is to look: run
+`scripts/host.py`, which frames the view in a stand-in host, answers the handshake with a
+palette, and prints the height the view asks for. Two numbers show how little slack there
+is. Before this was measurable the form had already drifted to 549px without anyone
+noticing, and putting a 44px touch target on every control — rather than on the fields and
+the primary button alone — cost 92px on its own.
+
+Contrast is settled and should not be re-litigated per colour. Delta's orange is the mark's
+colour and stays exactly as the brand defines it, because WCAG exempts a logo. It measures
+2.85:1 on white, which fails the 4.5:1 text needs and the 3:1 a control edge needs, so
+every interactive fill uses a darkened stop instead. The test enforces the ratio rather than
+the hex value, so a new colour has to clear the bar rather than match a literal.
 """
 
 from __future__ import annotations
@@ -99,6 +115,7 @@ from mcp.types import CallToolResult, TextContent
 from delta_exchange_mcp import credentials, hints, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
+    CREDENTIAL_NAMES,
     DASHBOARDS,
     DEFAULT_ENV,
     DEFAULT_MODE,
@@ -190,9 +207,17 @@ _TEMPLATE = """<!DOCTYPE html>
      and checkbox, the success and danger tones, and the focus ring. */
   :root {
     color-scheme: light dark;
-    /* Delta's own, always. These are the colours that make it Delta rather than a form. */
-    --brand: #fe6c02;
-    --brand-hover: #e76202;
+    /* Delta's own, always. These are the colours that make it Delta rather than a form.
+       Delta's orange is #fe6c02, and deliberately no variable holds it. WCAG exempts a logo
+       from contrast, so the mark keeps that hue in the four fills of its own inlined SVG,
+       and nothing else in the view may use it: measured against white it is 2.85:1, which
+       fails the 4.5:1 that text needs and also the 3:1 that a control edge needs. Every
+       interactive fill takes `--brand-strong` instead — the same hue walked toward black
+       until it clears 4.5:1 with white text at 4.58:1. Declaring the undarkened orange as a
+       variable is what would invite it back onto a control, which is why the value is
+       recorded in this sentence rather than on the next line. */
+    --brand-strong: #c45302;
+    --brand-strong-hover: #ac4902;
     --on-brand: #ffffff;
     /* The host's tokens, falling back to the platform's own system colours rather than to
        literals, so a host that sends no palette still lands on the right side of light or
@@ -202,9 +227,12 @@ _TEMPLATE = """<!DOCTYPE html>
     --faint: var(--color-text-tertiary, color-mix(in srgb, canvastext 48%, canvas));
     /* The one pair that needs a value per scheme rather than a mix of the system colours:
        Delta's own success and danger tones, lightened for dark exactly as delta.exchange
-       lightens them. A host that sends these tokens overrides both. */
-    --positive: var(--color-text-success, light-dark(#00a876, #33b991));
-    --negative: var(--color-text-danger, light-dark(#dc4e4e, #ff5c5c));
+       lightens them. A host that sends these tokens overrides both.
+       The light stops are darkened from delta.exchange's own #00a876 and #dc4e4e, which
+       measure 3.06:1 and 4.01:1 on white and so miss the 4.5:1 that body text needs. These
+       clear it at 4.59:1 and 4.52:1. The dark stops are untouched — they already pass. */
+    --positive: var(--color-text-success, light-dark(#00865e, #33b991));
+    --negative: var(--color-text-danger, light-dark(#cd4949, #ff5c5c));
     --line: var(--color-border-primary, color-mix(in srgb, canvastext 22%, canvas));
     --field: var(--color-background-secondary, color-mix(in srgb, canvastext 5%, canvas));
     --sans: var(--font-sans, ui-sans-serif, system-ui, -apple-system, sans-serif);
@@ -216,7 +244,7 @@ _TEMPLATE = """<!DOCTYPE html>
        The tight one binds a label to the control it names and a control to the note about
        it; the loose one separates one question from the next. Having only the loose step
        is what made the form read as a flat list with nothing grouped. */
-    --gap: 1em;
+    --gap: .85em;
     --gap-tight: .35em;
   }
 
@@ -229,7 +257,12 @@ _TEMPLATE = """<!DOCTYPE html>
      label. No field reports whether a host insets, so the view pads itself.
      On a wrapper rather than on `body`, deliberately: a host that injects a reset into the
      frame will target the elements it can name, and `body` is the one every reset names. */
-  .pad { padding: var(--gap); }
+  /* Half a gap, not a whole one. The padding is here because Codex draws its border and
+     insets by nothing, so without it the text sits against the line. Claude Desktop insets
+     as well, and there the view's own padding is added to the host's — so this is the one
+     value that is deliberately too small for the host that needs it most, because the
+     whole view has to fit inside 500px and a full gap top and bottom costs 32 of them. */
+  .pad { padding: calc(var(--gap) / 2) var(--gap); }
   p { margin: 0 0 var(--gap); }
 
   .head { display: flex; align-items: center; gap: .5em; margin-bottom: var(--gap-tight); }
@@ -250,10 +283,11 @@ _TEMPLATE = """<!DOCTYPE html>
 
   fieldset { border: 0; padding: 0; margin: 0 0 var(--gap); }
   legend { padding: 0; margin-bottom: var(--gap-tight); }
-  /* Block, so the whole row is a click target rather than just the words. */
-  .choice { display: block; cursor: pointer; }
+  /* The whole row is the click target, not just the words. Flex keeps the control
+     centred against a label that wraps to a second line. */
+  .choice { display: flex; align-items: center; cursor: pointer; }
   .choice + .choice { margin-top: var(--gap-tight); }
-  .choice input { margin: 0 .45em 0 0; }
+  .choice input { margin: 0 .45em 0 0; flex: none; }
   .choice .site { color: var(--faint); }
 
   /* Native controls throughout: their keyboard behaviour, their theme-correct chrome, and
@@ -267,20 +301,20 @@ _TEMPLATE = """<!DOCTYPE html>
   input, select, button { font: inherit; line-height: 1.35; }
   input[type=text], input[type=password] { font-family: var(--mono); }
   input[type=text], input[type=password], select {
-      width: 100%; box-sizing: border-box; margin: 0; padding: .45em .6em;
+      width: 100%; box-sizing: border-box; margin: 0; padding: .55em .6em;
       color: var(--ink); background: var(--field);
       border: var(--stroke) solid var(--line); border-radius: var(--radius); }
-  input[type=radio], input[type=checkbox] { accent-color: var(--brand); }
+  input[type=radio], input[type=checkbox] { accent-color: var(--brand-strong); }
   input::placeholder { font-family: var(--sans); color: var(--faint); }
 
   .row { display: flex; align-items: center; justify-content: space-between;
          gap: var(--gap); flex-wrap: wrap; margin-bottom: var(--gap); }
   .reveal { display: flex; align-items: center; gap: .4em; cursor: pointer; }
 
-  button { background: var(--brand); color: var(--on-brand); border: 0; cursor: pointer;
-           font-weight: var(--font-weight-medium, 500); padding: .55em 1.15em;
+  button { background: var(--brand-strong); color: var(--on-brand); border: 0; cursor: pointer;
+           font-weight: var(--font-weight-medium, 500); padding: .6em 1.15em;
            border-radius: var(--radius); }
-  button:hover { background: var(--brand-hover); }
+  button:hover { background: var(--brand-strong-hover); }
   button[aria-disabled=true], button[aria-disabled=true]:hover {
       background: color-mix(in srgb, var(--ink) 14%, transparent);
       color: var(--faint); cursor: not-allowed; }
@@ -291,9 +325,32 @@ _TEMPLATE = """<!DOCTYPE html>
 
   /* A field already has a border of its own, so the ring hugs it instead of floating
      outside; everything else keeps the offset that stops it touching the glyphs. */
-  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--brand-strong); outline-offset: 2px; }
   input[type=text]:focus-visible, input[type=password]:focus-visible,
   select:focus-visible { outline-offset: 0; }
+
+  /* 44px is a finger, not a cursor, so the larger targets are asked for only where there
+     is a finger. Height is not free: the whole view has to stay inside the 500px a host
+     draws without a scrollbar, and putting 44px on everything spent about 92px of that.
+     So the two thresholds are used for what each is for. The fields and the primary button
+     take 44px, which is the size Apple asks for and what a thumb actually needs on the
+     controls that carry the work. The label rows take 24px, WCAG 2.5.8's minimum at AA:
+     each is a full-width row with a clear gap above and below, which is the arrangement
+     that criterion is written for, and it costs about 60px less.
+     The radio and the checkbox keep the platform's own size either way, which preserves
+     their native look and keyboard behaviour. A label is already the hit area for the
+     control it wraps, so growing the label grows the target without touching the control. */
+  @media (pointer: coarse) {
+    /* Growing the controls costs height, and the ceiling does not move for a phone. The
+       room comes back out of the gaps: .72em still separates one question from the next
+       clearly at this size, and it buys more than the controls spend. Measured with the
+       harness's touch control: 517px before this line, 495px after. */
+    :root { --gap: .72em; }
+    input[type=text], input[type=password], select { padding: .65em .6em; }
+    button:not(.link) { min-height: 44px; padding: .65em 1.15em; }
+    .choice, .reveal { min-height: 24px; }
+    button.link { min-height: 24px; display: inline-flex; align-items: center; }
+  }
 
   #state:not(:empty) { margin-top: var(--gap); }
   #state.err { color: var(--negative); }
@@ -363,7 +420,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="row">
       <label class="reveal"><input id="show" type="checkbox">Show what I typed</label>
       <button id="create" class="link" type="button" aria-disabled="true">
-        Get a key &mdash; Read Data is enough</button>
+        Get a key &mdash; Read Data only</button>
     </div>
 
     <button id="save" type="button" aria-disabled="true">Check and save</button>
@@ -769,7 +826,7 @@ def _override_message(overridden: list[str]) -> str:
     key, against the site it was not created on, where Delta rejects it as unknown.
     """
     names = set(overridden)
-    if {"DELTA_API_KEY", "DELTA_API_SECRET"} & names:
+    if set(CREDENTIAL_NAMES) & names:
         consequence = "so this key will not be used at all"
     elif "DELTA_MCP_ENV" in names:
         consequence = (
