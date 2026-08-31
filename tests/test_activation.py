@@ -106,7 +106,7 @@ def accepted(monkeypatch):
     """Delta accepts whatever key is offered, without a live call."""
 
     async def check(env, key, secret):
-        return credentials.Check(ok=True, reachable=True, detail="someone@delta.exchange")
+        return credentials.Check(ok=True, reachable=True, detail="57354187")
 
     monkeypatch.setattr(credentials, "check", check)
 
@@ -178,7 +178,7 @@ async def test_the_saved_message_leads_with_carrying_on_rather_than_restarting(a
     async with connected() as session:
         message = (await save(session))["message"]
         assert "live in this session" in message
-        assert "someone@delta.exchange" in message
+        assert "57354187" in message
 
 
 async def test_the_status_tool_reports_the_surface_that_is_actually_live(accepted):
@@ -215,13 +215,13 @@ async def test_replacing_a_key_already_in_use_rebinds_without_a_restart(accepted
 async def test_a_rotated_key_signs_the_next_account_request(accepted):
     """Hot status is not enough: the shared client must actually use the new identity."""
     rotated = "rotated-in-the-form-key"
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 7}})
     )
     async with connected() as session:
         await save(session)
         await save(session, api_key=rotated)
-        await session.call("get_profile")
+        await session.call("get_trading_preferences")
 
     assert route.called
     assert route.calls.last.request.headers["api-key"] == rotated
@@ -233,15 +233,17 @@ async def test_the_first_save_rebinds_market_and_account_tools_to_one_environmen
     ticker = respx.get(f"{config_mod.INDIA_TESTNET_REST}/tickers/BTCUSD").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {"symbol": "BTCUSD"}})
     )
-    profile = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    preferences = respx.get(
+        f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences"
+    ).mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 7}})
     )
     async with connected() as session:
         await save(session)
         await session.call("get_ticker", symbol="BTCUSD")
-        await session.call("get_profile")
+        await session.call("get_trading_preferences")
 
-    assert ticker.called and profile.called
+    assert ticker.called and preferences.called
 
 
 async def test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one(accepted):
@@ -307,8 +309,8 @@ async def test_a_key_the_client_config_outranks_says_so_instead_of_reporting_suc
         assert result["status"] == "overridden"
         assert "DELTA_API_KEY" in result["message"]
         assert "will not be used" in result["message"]
-        # The email of the account it checked must not be reported as connected.
-        assert "someone@delta.exchange" not in result["message"]
+        # The id of the account it checked must not be reported as connected.
+        assert "57354187" not in result["message"]
 
         # The key still belongs in the file — every other client on the machine reads it.
         assert store.read()["DELTA_API_KEY"] == KEY
@@ -537,7 +539,7 @@ async def test_a_concurrent_full_save_is_reported_as_superseded(accepted, monkey
         result = await save(session)
 
         assert result["status"] == "superseded"
-        assert "someone@delta.exchange" not in result["message"]
+        assert "57354187" not in result["message"]
         assert "newer settings" in result["message"]
         status = await session.call("get_connection_status")
         assert status["environment"] == "india_prod"
@@ -654,10 +656,13 @@ async def test_a_blocked_ip_says_so_and_shows_the_address_delta_saw(monkeypatch)
         assert "demo.delta.exchange" not in message
 
 
-async def test_a_key_without_read_data_says_which_permission_to_add(monkeypatch):
+async def test_a_trading_preferences_permission_failure_is_not_an_invalid_key(monkeypatch):
     monkeypatch.setattr(credentials, "check", rejecting("unauthorized_api_access"))
     async with connected() as session:
-        assert "Read Data" in (await save(session))["message"]
+        message = (await save(session))["message"]
+        assert "lacks permission for trading preferences" in message
+        assert "does not establish whether Read Data alone is sufficient" in message
+        assert "invalid" not in message.lower()
 
 
 async def test_an_unanticipated_failure_keeps_the_raw_message(monkeypatch):

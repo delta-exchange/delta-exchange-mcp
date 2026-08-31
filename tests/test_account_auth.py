@@ -168,6 +168,27 @@ async def test_invalid_api_key_message_hints_env():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["UnauthorizedApiAccess", "unauthorized_api_access"])
+@respx.mock
+async def test_account_permission_error_does_not_name_the_validation_endpoint(
+    code: str,
+) -> None:
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": code}},
+        )
+    )
+
+    with pytest.raises(DeltaApiError) as exc:
+        await _client_with_creds().get("/wallet/balances", auth=True)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_ip_not_whitelisted_includes_ip_in_message():
     respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
