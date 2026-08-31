@@ -17,8 +17,11 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import anthropic
+# Keep offline listing and report helpers importable without the manual eval group.
+if TYPE_CHECKING:
+    import anthropic
 
 from evals import agent as agent_mod
 from evals.dataset import CASES, Case
@@ -96,7 +99,7 @@ def select_cases(args: argparse.Namespace) -> list[Case]:
 async def run_mode_group(
     mode: str,
     cases: list[Case],
-    llm: anthropic.AsyncAnthropic,
+    llm: "anthropic.AsyncAnthropic",
     args: argparse.Namespace,
 ) -> list[CaseResult]:
     results = []
@@ -225,6 +228,9 @@ async def main() -> int:
     agent_mod.resolve_env()  # fail fast on india_prod
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("ANTHROPIC_API_KEY is required")
+
+    # The live runner alone needs this optional manual-evaluation dependency.
+    import anthropic
 
     cases = select_cases(args)
     llm = anthropic.AsyncAnthropic()
