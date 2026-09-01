@@ -216,14 +216,16 @@ def print_table(results: list[CaseResult]) -> None:
 
 def write_report(results: list[CaseResult], args: argparse.Namespace) -> Path:
     _require_private_reports()
+    timestamp = datetime.now(UTC)
     path = (
         Path(args.json_path)
         if args.json_path
-        else REPORTS_DIR / f"eval-{datetime.now(UTC):%Y%m%d-%H%M%S}.json"
+        else REPORTS_DIR
+        / f"eval-{timestamp:%Y%m%d-%H%M%S-%f}-{secrets.token_hex(16)}.json"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": timestamp.isoformat(),
         "env": agent_mod.resolve_env(),
         "agent_model": args.model,
         "judge_model": None if args.no_judge else args.judge_model,

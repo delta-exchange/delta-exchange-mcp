@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +95,37 @@ def test_existing_reader_cannot_observe_replacement_report(tmp_path) -> None:
         assert existing_reader.read() == "old public report"
 
     assert "old public report" not in path.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
+def test_default_reports_do_not_replace_another_run_from_the_same_instant(
+    tmp_path, monkeypatch
+) -> None:
+    instant = datetime.fromisoformat("2026-09-01T02:30:00+00:00")
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, timezone):
+            del cls, timezone
+            return instant
+
+    tokens = iter(("first-report", "first-temp", "second-report", "second-temp"))
+    monkeypatch.setattr(run_mod, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(run_mod, "datetime", FixedDatetime)
+    monkeypatch.setattr(run_mod.secrets, "token_hex", lambda _: next(tokens))
+    args = _args(tmp_path / "unused")
+    args.json_path = None
+
+    first = run_mod.write_report(
+        [CaseResult(case_id="first", mode="read", passed=True)], args
+    )
+    second = run_mod.write_report(
+        [CaseResult(case_id="second", mode="read", passed=True)], args
+    )
+
+    assert first != second
+    assert json.loads(first.read_text())["results"][0]["id"] == "first"
+    assert json.loads(second.read_text())["results"][0]["id"] == "second"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
