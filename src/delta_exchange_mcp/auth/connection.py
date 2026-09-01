@@ -825,25 +825,10 @@ class ConnectionService:
         self,
         environment: str,
         environment_generation: int,
-    ) -> IdentityRisk | CoverageRisk:
-        credential, credential_error = _resolve_credential(
-            self.credentials,
+    ) -> CoverageRisk:
+        return self._memory_revocation_coverage(
             environment,
-            self.credential_environ,
-        )
-        if credential_error or credential is None:
-            return self._memory_revocation_coverage(
-                environment,
-                environment_generation,
-            )
-        return IdentityRisk(
-            (
-                environment,
-                credential.revision,
-                credential.generation,
-                credential.session_generation,
-                environment_generation,
-            )
+            environment_generation,
         )
 
     def _persistent_revocation_risk(
@@ -872,15 +857,13 @@ class ConnectionService:
         environment: str,
         environment_generation: int,
     ) -> CoverageRisk:
-        """Bound process risk even when stored credential metadata is unavailable."""
+        """Capture both credential families covered by a memory revocation."""
         try:
             metadata = self.credentials.metadata(environment)
         except CredentialStoreError:
             credential_generation = None
         else:
-            credential_generation = (
-                metadata.generation if metadata.revision is None else None
-            )
+            credential_generation = metadata.generation
         return CoverageRisk(
             environment_generation,
             credential_generation,

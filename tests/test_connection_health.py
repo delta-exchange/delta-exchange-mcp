@@ -752,7 +752,7 @@ def test_inactive_credential_change_expires_its_failed_generation_scope(
     assert status["consent_error"] == ""
 
 
-def test_first_process_identity_expires_empty_memory_coverage(
+def test_first_process_identity_is_outside_empty_memory_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = service(verified)
@@ -798,7 +798,7 @@ def test_first_process_identity_expires_empty_memory_coverage(
     assert status["consent_error"] == "consent_store_unavailable"
 
 
-def test_completed_process_identity_expires_incomplete_memory_coverage(
+def test_completed_process_identity_is_outside_incomplete_memory_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DELTA_API_KEY", "completed-process-key")

@@ -96,6 +96,7 @@ class _FailedRevocation:
         return bool(
             binding.environment_generation <= self.risk.through_environment_generation
             and self.scope.covers(binding)
+            and _coverage_includes(self.risk, binding)
         )
 
 
@@ -333,12 +334,29 @@ def _failure_obsolete(
         return False
     if isinstance(failed.risk, IdentityRisk):
         return _identity_supersedes(binding.identity, failed.risk.identity)
+    if isinstance(failed.scope, EnvironmentRevocationScope):
+        return False
     if isinstance(failed.scope, GenerationRevocationScope):
         return bool(
             binding.credential_generation is not None
             and binding.credential_generation >= failed.scope.generation
         )
     return _coverage_obsolete(failed, binding)
+
+
+def _coverage_includes(risk: CoverageRisk, binding: ConsentBinding) -> bool:
+    session_generation = binding.credential_session_generation
+    if session_generation is not None:
+        return bool(
+            risk.through_session_generation is None
+            or session_generation <= risk.through_session_generation
+        )
+    credential_generation = binding.credential_generation
+    return bool(
+        credential_generation is None
+        or risk.through_credential_generation is None
+        or credential_generation <= risk.through_credential_generation
+    )
 
 
 def _coverage_obsolete(

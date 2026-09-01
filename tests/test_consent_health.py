@@ -100,7 +100,7 @@ def test_environment_retry_recovers_a_prior_identity_risk() -> None:
     assert health.unavailable is False
 
 
-def test_new_stored_generation_expires_coverage_after_a_process_override() -> None:
+def test_new_stored_generation_is_outside_bounded_coverage() -> None:
     successor = _persistent_binding("", 1)
     other = _persistent_binding("Claude", 1)
     temporary = _process_binding("Codex", 1)
@@ -115,12 +115,12 @@ def test_new_stored_generation_expires_coverage_after_a_process_override() -> No
     health.direct_write_succeeded(ConsentBackend.PERSISTENT, other)
     health.expire(0, temporary)
 
-    assert health.available(ConsentBackend.PERSISTENT, successor) is False
+    assert health.available(ConsentBackend.PERSISTENT, successor) is True
 
     health.expire(0, successor)
 
     assert health.available(ConsentBackend.PERSISTENT, successor) is True
-    assert health.unavailable is False
+    assert health.unavailable is True
 
 
 def test_unbounded_coverage_survives_credential_store_recovery() -> None:
@@ -146,7 +146,7 @@ def test_exact_write_proof_does_not_clear_unbounded_coverage() -> None:
     stored = _persistent_binding("", 1)
     health = ConsentHealth(_backend_for)
     scope = EnvironmentRevocationScope("india_prod")
-    risks = {ConsentBackend.MEMORY: CoverageRisk(0, None, 0)}
+    risks = {ConsentBackend.MEMORY: CoverageRisk(0)}
 
     health.revocation_failed(_failed_memory_revocation(), scope, risks)
     health.direct_write_succeeded(ConsentBackend.MEMORY, proven)
