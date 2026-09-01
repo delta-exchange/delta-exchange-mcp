@@ -50,6 +50,10 @@ class ToolCaller(Protocol):
     ) -> CallToolResult: ...
 
 
+class BlockedToolError(RuntimeError):
+    """The model selected a tool that the evaluation policy cannot execute."""
+
+
 def resolve_env() -> str:
     env = os.environ.get("DELTA_MCP_ENV", "").strip().lower() or "india_testnet"
     if env not in _ALLOWED_ENVS:
@@ -164,7 +168,7 @@ async def _call(
     blocked: frozenset[str] = frozenset(),
 ) -> ToolCall:
     if name in blocked:
-        raise RuntimeError(
+        raise BlockedToolError(
             f"{name} is not read-only and has no dry_run; refusing to run it in evaluations"
         )
     wire_args = {**args, "dry_run": True} if name in mutating else args

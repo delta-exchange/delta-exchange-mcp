@@ -7,13 +7,16 @@ import os
 import stat
 import sys
 import threading
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
-from evals.agent import ToolCall, TurnRecord
+from evals.agent import BlockedToolError, ToolCall, Transcript, TurnRecord
 from evals import run as run_mod
+from evals.dataset import Case, Turn
 from evals.scoring import CaseResult
 
 
@@ -50,6 +53,55 @@ def _result() -> CaseResult:
             )
         ],
     )
+
+
+async def test_blocked_tool_fails_one_case_and_allows_later_cases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        async def list_tools(self, *, cache_mode: str) -> SimpleNamespace:
+            del cache_mode
+            return SimpleNamespace(tools=[])
+
+    @asynccontextmanager
+    async def mcp_session() -> AsyncIterator[Session]:
+        yield Session()
+
+    prompts: list[str] = []
+
+    async def run_case(
+        session: object,
+        llm: object,
+        case_turns: Sequence[Turn],
+        *,
+        model: str,
+    ) -> Transcript:
+        del session, llm, model
+        prompt = case_turns[0].prompt
+        prompts.append(prompt)
+        if prompt == "blocked":
+            raise BlockedToolError(
+                "bulk_fills_export is not read-only and has no dry_run; "
+                "refusing to run it in evaluations"
+            )
+        return Transcript(
+            available_tools=[],
+            turns=[TurnRecord(prompt=prompt, reply="done", calls=[])],
+        )
+
+    monkeypatch.setattr(run_mod.agent_mod, "mcp_session", mcp_session)
+    monkeypatch.setattr(run_mod.agent_mod, "run_case", run_case)
+    cases = [
+        Case(id="blocked", mode="read", turns=(Turn(prompt="blocked"),)),
+        Case(id="later", mode="read", turns=(Turn(prompt="later"),)),
+    ]
+    args = argparse.Namespace(model="offline", no_judge=True, judge_model="unused")
+
+    results = await run_mod.run_mode_group("read", cases, object(), args)
+
+    assert prompts == ["blocked", "later"]
+    assert [result.passed for result in results] == [False, True]
+    assert "bulk_fills_export" in results[0].failures[0]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")

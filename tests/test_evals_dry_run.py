@@ -20,6 +20,7 @@ from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import account, trading
 from evals.agent import (
+    BlockedToolError,
     _call,
     blocked_tools,
     mutating_tools,
@@ -296,7 +297,7 @@ async def test_success_without_dry_run_echo_is_rejected():
 async def test_non_dry_run_mutation_is_rejected_before_the_tool_call():
     session = FakeSession(_echo({"path": "fills.csv"}))
 
-    with pytest.raises(RuntimeError, match="not read-only and has no dry_run"):
+    with pytest.raises(BlockedToolError, match="not read-only and has no dry_run"):
         await _call(
             session,
             frozenset(),

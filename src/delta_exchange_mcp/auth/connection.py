@@ -777,9 +777,9 @@ class ConnectionService:
             return (
                 "The active environment is managed by this MCP client's configuration."
             )
-        if expected_environment not in BROWSER_MANAGED_ENVIRONMENTS:
+        if environment not in BROWSER_MANAGED_ENVIRONMENTS:
             raise legacy_store.SettingsConflictError(
-                "the active environment is not browser-managed"
+                "the requested environment is not browser-managed"
             )
 
         def revoke() -> None:
