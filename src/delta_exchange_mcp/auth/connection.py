@@ -14,6 +14,9 @@ from delta_exchange_mcp import credentials as credential_check
 from delta_exchange_mcp import request
 from delta_exchange_mcp import setup
 from delta_exchange_mcp import store as legacy_store
+from delta_exchange_mcp.auth.backend import (
+    SUPPORTED_ENVIRONMENTS as PERSISTENT_ENVIRONMENTS,
+)
 from delta_exchange_mcp.auth.consent import (
     ConsentBackend,
     ConsentBinding,
@@ -49,8 +52,12 @@ from delta_exchange_mcp.authorization import Access, AccessState
 from delta_exchange_mcp.client import DeltaClient
 
 
-SUPPORTED_ENVIRONMENTS = ("india_prod", "india_testnet")
 RUNTIME_ENVIRONMENTS = tuple(config_mod.BASE_URLS)
+BROWSER_MANAGED_ENVIRONMENTS = tuple(
+    environment
+    for environment in RUNTIME_ENVIRONMENTS
+    if environment in PERSISTENT_ENVIRONMENTS
+)
 DEFAULT_CONSENT_NAME = "consent.json"
 
 _ENVIRONMENT_TOKEN = {"india_prod": 1, "india_testnet": 2, "india_devnet": 3}
@@ -375,7 +382,7 @@ class ConnectionService:
         arguments: Mapping[str, Any],
     ) -> _CredentialCandidate | setup.ActionResult:
         environment = str(arguments.get("environment") or "").strip().lower()
-        if environment not in SUPPORTED_ENVIRONMENTS:
+        if environment not in BROWSER_MANAGED_ENVIRONMENTS:
             return self._rejected(client_name, "Choose production or testnet.")
         if self._process_credentials_present():
             return self._rejected(
@@ -396,7 +403,7 @@ class ConnectionService:
     ) -> setup.ActionResult:
         operation = str(arguments.get("operation") or "replace")
         environment = str(arguments.get("environment") or "").strip().lower()
-        if environment not in SUPPORTED_ENVIRONMENTS:
+        if environment not in BROWSER_MANAGED_ENVIRONMENTS:
             return self._rejected(client_name, "Choose production or testnet.")
         if operation == "activate":
             return self._activate_environment(client_name, environment, expected)
@@ -770,7 +777,7 @@ class ConnectionService:
             return (
                 "The active environment is managed by this MCP client's configuration."
             )
-        if expected_environment not in SUPPORTED_ENVIRONMENTS:
+        if expected_environment not in BROWSER_MANAGED_ENVIRONMENTS:
             raise legacy_store.SettingsConflictError(
                 "the active environment is not browser-managed"
             )
@@ -1062,7 +1069,7 @@ class ConnectionService:
     def _revision(self, client_name: str) -> RevisionToken:
         _, credential = self._reconcile()
         token: RevisionToken = {}
-        for environment in SUPPORTED_ENVIRONMENTS:
+        for environment in BROWSER_MANAGED_ENVIRONMENTS:
             metadata = self._metadata(environment)
             token[f"{environment}_credential_revision"] = (
                 metadata.revision or 0 if metadata is not None else 0
@@ -1089,11 +1096,11 @@ class ConnectionService:
         base, active = self._reconcile()
         environments: dict[str, dict[str, object]] = {}
         process_override = self._process_credentials_present()
-        status_environments = dict.fromkeys((*SUPPORTED_ENVIRONMENTS, base.env))
+        status_environments = dict.fromkeys((*BROWSER_MANAGED_ENVIRONMENTS, base.env))
         for environment in status_environments:
             metadata = (
                 self._metadata(environment)
-                if environment in SUPPORTED_ENVIRONMENTS
+                if environment in BROWSER_MANAGED_ENVIRONMENTS
                 else None
             )
             is_active = environment == base.env
@@ -1121,6 +1128,7 @@ class ConnectionService:
             environments[environment] = {
                 "connected": connected,
                 "active": is_active,
+                "browser_manageable": environment in BROWSER_MANAGED_ENVIRONMENTS,
                 "credential_metadata_present": metadata_present,
                 "credential_source": _source_name(source),
                 "reconnect_required": bool(
