@@ -156,9 +156,7 @@ async def run_mode_group(
         }
         for case in cases:
             missing = {
-                expected.name
-                for turn in case.turns
-                for expected in turn.expect
+                expected.name for turn in case.turns for expected in turn.expect
             } - available
             if missing:
                 results.append(
