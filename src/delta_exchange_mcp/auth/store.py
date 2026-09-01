@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp.auth.backend import (
     DEFAULT_DIR as DEFAULT_DIR,
     DEFAULT_METADATA_NAME as DEFAULT_METADATA_NAME,
@@ -278,7 +279,7 @@ class CredentialStore:
 
     def process_generation(self, environment: str) -> int:
         """Return the current process-credential session generation."""
-        env = normalize_environment(environment)
+        env = _normalize_runtime_environment(environment)
         with self._process_lock:
             return self._process_generations.get(env, 0)
 
@@ -296,7 +297,7 @@ class CredentialStore:
         environ: Mapping[str, str] | None = None,
     ) -> Credential | None:
         """Prefer a complete external process credential over the stored record."""
-        env = normalize_environment(environment)
+        env = _normalize_runtime_environment(environment)
         supplied = os.environ if environ is None else environ
         key = (supplied.get("DELTA_API_KEY") or "").strip()
         secret = (supplied.get("DELTA_API_SECRET") or "").strip()
@@ -322,6 +323,8 @@ class CredentialStore:
                 session_generation=session_generation,
             )
         self._clear_process_pair(env)
+        if env not in SUPPORTED_ENVIRONMENTS:
+            return None
         return self.get(env)
 
     def replace(
@@ -685,6 +688,17 @@ class CredentialStore:
                 self._process_generations[environment] = (
                     self._process_generations.get(environment, 0) + 1
                 )
+
+
+def _normalize_runtime_environment(environment: str) -> str:
+    """Validate an environment that can receive process credentials."""
+    value = environment.strip().lower()
+    if value not in config_mod.BASE_URLS:
+        raise ValueError(
+            f"Delta environment must be one of {sorted(config_mod.BASE_URLS)}, "
+            f"got {environment!r}"
+        )
+    return value
 
 
 def _credential_from_payload(

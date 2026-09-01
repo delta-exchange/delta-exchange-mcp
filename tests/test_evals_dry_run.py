@@ -19,7 +19,13 @@ from delta_exchange_mcp import authorization
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import account, trading
-from evals.agent import _call, mutating_tools, run_case, server_environment
+from evals.agent import (
+    _call,
+    blocked_tools,
+    mutating_tools,
+    run_case,
+    server_environment,
+)
 from evals.dataset import Turn
 
 MANAGE_URL = "http://127.0.0.1:43123/manage"
@@ -103,6 +109,32 @@ def test_mutating_set_derived_from_dry_run_property():
     assert mutating_tools(tools) == {"place_order"}
 
 
+def test_tools_without_read_only_or_dry_run_are_blocked():
+    tools = [
+        Tool(
+            name="place_order",
+            input_schema={"type": "object", "properties": {"dry_run": {}}},
+            annotations=types.ToolAnnotations(read_only_hint=False),
+        ),
+        Tool(
+            name="bulk_fills_export",
+            input_schema={"type": "object", "properties": {"output_path": {}}},
+            annotations=types.ToolAnnotations(read_only_hint=False),
+        ),
+        Tool(
+            name="get_ticker",
+            input_schema={"type": "object", "properties": {"symbol": {}}},
+            annotations=types.ToolAnnotations(read_only_hint=True),
+        ),
+        Tool(
+            name="unannotated_tool",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    ]
+
+    assert blocked_tools(tools) == {"bulk_fills_export", "unannotated_tool"}
+
+
 def test_child_environment_isolates_settings_and_legacy_trading_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -164,6 +196,10 @@ async def test_modern_discovery_lists_every_trade_tool_without_consent(
     assert protocol_version == "2026-07-28"
     assert account.TOOL_NAMES <= {tool.name for tool in tools}
     assert mutating_tools(tools) == trading.TOOL_NAMES
+    assert blocked_tools(tools) == {
+        "bulk_fills_export",
+        "setup_credentials",
+    }
     assert result.structured_content["dry_run"] is True
 
 
@@ -196,9 +232,7 @@ async def test_selected_real_trade_requires_input_without_sending_a_mutation(
     )
     mutations: list[str] = []
 
-    async def record_mutation(
-        *args: object, **kwargs: object
-    ) -> dict[str, object]:
+    async def record_mutation(*args: object, **kwargs: object) -> dict[str, object]:
         del args, kwargs
         mutations.append("sent")
         return {}
@@ -249,6 +283,21 @@ async def test_success_without_dry_run_echo_is_rejected():
     session = FakeSession(_echo({"id": 42, "state": "open"}))
     with pytest.raises(RuntimeError, match="did not honour dry_run"):
         await _call(session, MUTATING, "place_order", {"size": 1})
+
+
+async def test_non_dry_run_mutation_is_rejected_before_the_tool_call():
+    session = FakeSession(_echo({"path": "fills.csv"}))
+
+    with pytest.raises(RuntimeError, match="not read-only and has no dry_run"):
+        await _call(
+            session,
+            frozenset(),
+            "bulk_fills_export",
+            {"output_path": "fills.csv"},
+            blocked=frozenset({"bulk_fills_export"}),
+        )
+
+    assert session.sent is None
 
 
 async def test_error_results_skip_the_echo_check():

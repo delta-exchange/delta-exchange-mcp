@@ -70,6 +70,14 @@ def test_page_configuration_is_secret_free_and_uses_shared_environment_urls() ->
     assert "api_secret" not in settings
 
 
+def test_devnet_is_hidden_until_an_external_devnet_connection_is_active() -> None:
+    html = form.page_html("/rpc", nonce="test-nonce")
+
+    assert '"value": "india_devnet"' in html
+    assert '"hidden": true' in html
+    assert "environmentLabels[environment].hidden = false" in html
+
+
 def test_page_has_labelled_keyboard_accessible_controls_and_live_status() -> None:
     html = form.VIEW_HTML
 

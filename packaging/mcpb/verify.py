@@ -129,22 +129,44 @@ def check_archive(mcpb: Path) -> None:
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(workdir: Path) -> dict[str, str]:
-    """Build a disposable process environment with hostile legacy authorization values."""
-    env = dict(os.environ)
+def check_connection_contract(manifest: dict) -> None:
+    """Require the bundle to defer credentials and consent to Manage Connection."""
+    if "user_config" in manifest:
+        raise SystemExit(
+            "the browser-configured bundle must not declare user_config prompts"
+        )
+    if "env" in manifest["server"]["mcp_config"]:
+        raise SystemExit(
+            "the browser-configured bundle must not inject launch settings"
+        )
+    print("  connection: no install-time secrets or authorization settings")
+
+
+def launch_env(workdir: Path, *, hostile: bool) -> dict[str, str]:
+    """Build an isolated public or hostile process environment."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("DELTA_")
+    }
     env.update(
         {
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
-            "DELTA_MCP_MODE": "trade",
-            "DELTA_MCP_ENV": "india_prod",
-            "DELTA_API_KEY": "ambient",
-            "DELTA_API_SECRET": "ambient",
             "DELTA_MCP_DEBUG": "1",
             "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
             "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
             "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
         }
     )
+    if hostile:
+        env.update(
+            {
+                "DELTA_MCP_MODE": "trade",
+                "DELTA_MCP_ENV": "india_devnet",
+                "DELTA_API_KEY": "synthetic-key",
+                "DELTA_API_SECRET": "synthetic-secret",
+            }
+        )
     return env
 
 
@@ -326,8 +348,16 @@ def discover_tools(
     modern_dir: Path, legacy_dir: Path
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     """Run protocol discovery with independent installation and state directories."""
-    modern = handshake(modern_dir, modern=True, env=launch_env(modern_dir))
-    legacy = handshake(legacy_dir, modern=False, env=launch_env(legacy_dir))
+    modern = handshake(
+        modern_dir,
+        modern=True,
+        env=launch_env(modern_dir, hostile=False),
+    )
+    legacy = handshake(
+        legacy_dir,
+        modern=False,
+        env=launch_env(legacy_dir, hostile=True),
+    )
     return modern, legacy
 
 
@@ -339,16 +369,7 @@ def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="mcpb-verify-"))
     try:
         manifest, modern_dir, legacy_dir = unpack_installations(mcpb, tmp)
-
-        if "user_config" in manifest:
-            raise SystemExit(
-                "the browser-configured bundle must not declare user_config prompts"
-            )
-        if "env" in manifest["server"]["mcp_config"]:
-            raise SystemExit(
-                "the browser-configured bundle must not inject launch credentials"
-            )
-
+        check_connection_contract(manifest)
         modern, legacy = discover_tools(modern_dir, legacy_dir)
         if not modern:
             raise SystemExit("no tools registered")

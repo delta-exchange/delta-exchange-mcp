@@ -17,6 +17,12 @@ ENVIRONMENTS = [
         "label": "Practice account",
         "site": "demo.delta.exchange",
     },
+    {
+        "value": "india_devnet",
+        "label": "Development account",
+        "site": "process credentials only",
+        "hidden": True,
+    },
 ]
 
 
@@ -177,6 +183,7 @@ _TEMPLATE = """<!doctype html>
   var complete = false;
 
   var envs = document.getElementById("envs");
+  var environmentLabels = {};
   var key = document.getElementById("key");
   var secret = document.getElementById("secret");
   var show = document.getElementById("show");
@@ -187,6 +194,7 @@ _TEMPLATE = """<!doctype html>
   CONFIG.environments.forEach(function (env, index) {
     var label = document.createElement("label");
     label.className = "choice";
+    label.hidden = env.hidden === true;
     var radio = document.createElement("input");
     radio.type = "radio";
     radio.name = "environment";
@@ -200,6 +208,7 @@ _TEMPLATE = """<!doctype html>
     site.textContent = "— " + env.site;
     label.appendChild(site);
     envs.appendChild(label);
+    environmentLabels[env.value] = label;
   });
 
   function selectedEnvironment() {
@@ -209,7 +218,10 @@ _TEMPLATE = """<!doctype html>
 
   function selectEnvironment(environment) {
     var selected = envs.querySelector('input[value="' + environment + '"]');
-    if (selected) selected.checked = true;
+    if (selected) {
+      selected.checked = true;
+      environmentLabels[environment].hidden = false;
+    }
     syncAcknowledgement();
   }
 
@@ -283,6 +295,7 @@ _TEMPLATE = """<!doctype html>
     document.getElementById("disconnect").disabled = busy ||
       (!selected.connected && !selected.credential_metadata_present) || selected.externally_managed;
     document.getElementById("connect").disabled = busy || selected.externally_managed;
+    document.getElementById("dashboard").disabled = busy || !CONFIG.dashboards[selectedEnvironment()];
     document.getElementById("enable-trading").disabled = busy || !selectedIsActive || !selected.connected || trading.enabled;
     document.getElementById("disable-trading").disabled = busy || !selectedIsActive || !trading.enabled;
   }

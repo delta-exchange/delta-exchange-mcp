@@ -51,8 +51,9 @@ until all of this passes:
 
 - A strict zip parser accepts the archive.
 - The archive contains only the expected payload and one wheel.
-- A fresh unpack answers MCP 2026 `server/discover`, then `tools/list`.
-- A separate fresh unpack answers the legacy `initialize`, then `tools/list`.
+- A fresh public-data unpack answers MCP 2026 `server/discover`, then `tools/list`.
+- A separate fresh unpack with synthetic process credentials answers the legacy `initialize`,
+  then `tools/list`.
 - Modern and legacy discovery return the same stable tool list.
 - The committed manifest and the runtime list match exactly.
 - The runtime list matches the approved set of 43 tool names.
@@ -60,10 +61,11 @@ until all of this passes:
 - All 13 trading tools carry `_meta["delta.exchange/mutating"] = true`.
 - The manifest has no install prompts and injects no launch credentials.
 
-The child process receives hostile legacy values for credentials and trade mode. It also
-receives isolated configuration and log paths and a null keyring. These values must not
-change the tool list or read a developer's credential store. Authorization tests cover
-whether calls can run. The bundle verifier covers the package and protocol contract.
+The second child process receives a complete synthetic `india_devnet` credential and the
+ignored legacy `DELTA_MCP_MODE=trade` value. Both processes receive separate configuration
+and log paths and a null keyring. The hostile values must not change the tool list or read a
+developer's credential store. Authorization tests cover whether calls can run. The bundle
+verifier covers the package and protocol contract.
 
 ## The icon
 

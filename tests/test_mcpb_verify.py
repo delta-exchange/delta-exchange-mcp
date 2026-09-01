@@ -21,7 +21,7 @@ def test_protocol_handshakes_use_independent_unpack_and_state_directories(
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr("manifest.json", "{}")
 
-    calls: list[tuple[Path, bool]] = []
+    calls: list[tuple[Path, bool, bool]] = []
 
     def fake_handshake(
         extracted: Path,
@@ -33,11 +33,20 @@ def test_protocol_handshakes_use_independent_unpack_and_state_directories(
         del timeout
         config_path = Path(env["DELTA_MCP_CONFIG_FILE"])
         assert config_path.parent == extracted
+        hostile = env.get("DELTA_MCP_ENV") == "india_devnet"
         if modern:
+            assert not hostile
+            assert "DELTA_API_KEY" not in env
+            assert "DELTA_API_SECRET" not in env
+            assert "DELTA_MCP_MODE" not in env
             config_path.write_text("state initialized by modern discovery")
         else:
+            assert hostile
+            assert env["DELTA_API_KEY"] == "synthetic-key"
+            assert env["DELTA_API_SECRET"] == "synthetic-secret"
+            assert env["DELTA_MCP_MODE"] == "trade"
             assert not config_path.exists()
-        calls.append((extracted, modern))
+        calls.append((extracted, modern, hostile))
         return {}
 
     monkeypatch.setattr(verify, "handshake", fake_handshake)
@@ -51,7 +60,10 @@ def test_protocol_handshakes_use_independent_unpack_and_state_directories(
 
     assert manifest == {}
     assert modern == legacy == {}
-    assert calls == [(workdir / "modern", True), (workdir / "legacy", False)]
+    assert calls == [
+        (workdir / "modern", True, False),
+        (workdir / "legacy", False, True),
+    ]
 
 
 def test_invalid_manifest_is_rejected_before_protocol_discovery(

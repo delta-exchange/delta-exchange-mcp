@@ -507,7 +507,7 @@ def test_existing_persistent_record_key_and_shape_remain_readable(tmp_path):
 
 def test_invalid_binding_values_are_rejected():
     with pytest.raises(ValueError, match="environment"):
-        binding(environment="india_devnet")
+        binding(environment="other")
     with pytest.raises(ValueError, match="credential_revision"):
         binding(revision=0)
     with pytest.raises(ValueError, match="both be set or absent"):
@@ -520,6 +520,25 @@ def test_invalid_binding_values_are_rejected():
         binding(revision=None, generation=None, session_generation=0)
     with pytest.raises(ValueError, match="environment_generation"):
         binding(environment_generation=-1)
+
+
+def test_devnet_process_binding_is_session_only(tmp_path):
+    path = tmp_path / "consent.json"
+    store = new_store(path)
+    devnet = binding(
+        environment="india_devnet",
+        revision=None,
+        generation=None,
+        session_generation=1,
+    )
+
+    enabled = store.enable(devnet, expected_generation=0)
+
+    assert enabled.enabled is True
+    assert enabled.persistent is False
+    assert store.backend(devnet).value == "memory"
+    assert path.exists() is False
+    assert binding(environment="india_devnet").persistent is False
 
 
 def test_unpaired_surrogate_in_exact_client_name_cannot_crash_authorization(

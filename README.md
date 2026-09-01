@@ -100,7 +100,8 @@ Moving a metadata file to a different location also requires this reconnect.
 
 A complete credential pair supplied by the MCP client's process environment remains
 supported for compatibility. The status tool reports it as externally managed. The browser
-cannot remove or replace that source.
+cannot remove or replace that source. `india_devnet` accepts only this process-managed
+credential source, and its trading approval lasts only for the current server process.
 
 ## What you can ask
 
