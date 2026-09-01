@@ -26,7 +26,7 @@ from evals.agent import (
     run_case,
     server_environment,
 )
-from evals.dataset import Turn
+from evals.dataset import CASES, Turn
 
 MANAGE_URL = "http://127.0.0.1:43123/manage"
 CLIENT_INFO = Implementation(name="delta-mcp-evals", version="1")
@@ -196,10 +196,18 @@ async def test_modern_discovery_lists_every_trade_tool_without_consent(
     assert protocol_version == "2026-07-28"
     assert account.TOOL_NAMES <= {tool.name for tool in tools}
     assert mutating_tools(tools) == trading.TOOL_NAMES
-    assert blocked_tools(tools) == {
+    blocked = blocked_tools(tools)
+    assert blocked == {
         "bulk_fills_export",
         "setup_credentials",
     }
+    expected = {
+        expectation.name
+        for case in CASES
+        for turn in case.turns
+        for expectation in turn.expect
+    }
+    assert expected.isdisjoint(blocked)
     assert result.structured_content["dry_run"] is True
 
 
