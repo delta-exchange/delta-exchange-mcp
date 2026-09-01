@@ -124,6 +124,9 @@ class ConnectionService:
     _consent_write_unavailable: set[ConsentBackend] = field(
         default_factory=set, repr=False
     )
+    _consent_write_generation: dict[ConsentBackend, int] = field(
+        default_factory=dict, repr=False
+    )
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _page: setup.Page | None = field(default=None, repr=False)
     _page_client_name: str = ""
@@ -232,9 +235,19 @@ class ConnectionService:
 
     def _consent_write_failed(self, backend: ConsentBackend) -> None:
         self._consent_write_unavailable.add(backend)
+        self._consent_write_generation[backend] = (
+            self._consent_write_generation.get(backend, 0) + 1
+        )
 
     def _consent_write_succeeded(self, *backends: ConsentBackend) -> None:
         self._consent_write_unavailable.difference_update(backends)
+        for backend in set(backends):
+            self._consent_write_generation[backend] = (
+                self._consent_write_generation.get(backend, 0) + 1
+            )
+
+    def _consent_write_available(self, backend: ConsentBackend) -> bool:
+        return backend not in self._consent_write_unavailable
 
     def _consent_read_failed(self, backend: ConsentBackend) -> None:
         self._consent_read_unavailable.add(backend)
@@ -853,6 +866,8 @@ class ConnectionService:
             self._consent_read_failed(backend)
             return None
         self._consent_read_succeeded(backend)
+        if not self._consent_write_available(backend):
+            return None
         return lease
 
     def _consent_status(self, binding: ConsentBinding | None) -> ConsentState | None:
@@ -874,6 +889,10 @@ class ConnectionService:
         backend = self.consent.backend(lease.binding)
 
         def current() -> bool:
+            with self._lock:
+                if not self._consent_write_available(backend):
+                    return False
+                write_generation = self._consent_write_generation.get(backend, 0)
             try:
                 base = self._base_config()
                 if base.env != lease.binding.environment:
@@ -912,10 +931,17 @@ class ConnectionService:
                     ),
                     current_environment_generation=confirmed.environment_generation,
                 )
-                self._consent_read_succeeded(backend)
-                return accepted
+                with self._lock:
+                    self._consent_read_succeeded(backend)
+                    return (
+                        accepted
+                        and write_generation
+                        == self._consent_write_generation.get(backend, 0)
+                        and self._consent_write_available(backend)
+                    )
             except ConsentStorageError:
-                self._consent_read_failed(backend)
+                with self._lock:
+                    self._consent_read_failed(backend)
                 return False
             except Exception:
                 return False
@@ -1018,15 +1044,21 @@ class ConnectionService:
             }
         binding = self._binding(client_name, active)
         consent_state = self._consent_status(binding)
+        consent_write_available = bool(
+            binding is not None
+            and self._consent_write_available(self.consent.backend(binding))
+        )
         return ConnectionStatus(
             environment=base.env,
             client_name=client_name,
             client_version=client_version,
             environments=environments,
             trading={
-                "enabled": consent_state.enabled
-                if consent_state is not None
-                else False,
+                "enabled": bool(
+                    consent_state is not None
+                    and consent_state.enabled
+                    and consent_write_available
+                ),
                 "persistent": consent_state.persistent
                 if consent_state is not None
                 else False,
