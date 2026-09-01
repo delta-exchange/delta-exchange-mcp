@@ -13,11 +13,16 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from delta_exchange_mcp.auth.backend import MetadataError, file_lock
+from delta_exchange_mcp import config as config_mod
+from delta_exchange_mcp.auth.backend import (
+    SUPPORTED_ENVIRONMENTS as PERSISTENT_ENVIRONMENTS,
+    MetadataError,
+    file_lock,
+)
 
 
 SCHEMA_VERSION = 1
-SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
+RUNTIME_ENVIRONMENTS = frozenset(config_mod.BASE_URLS)
 logger = logging.getLogger(__name__)
 
 type ConsentIdentity = tuple[str, int | None, int | None, int | None, int]
@@ -71,9 +76,9 @@ class ConsentBinding:
     environment_generation: int = 0
 
     def __post_init__(self) -> None:
-        if self.environment not in SUPPORTED_ENVIRONMENTS:
+        if self.environment not in RUNTIME_ENVIRONMENTS:
             raise ValueError(
-                f"environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}"
+                f"environment must be one of {sorted(RUNTIME_ENVIRONMENTS)}"
             )
         versions = (self.credential_revision, self.credential_generation)
         if (versions[0] is None) != (versions[1] is None):
@@ -125,6 +130,7 @@ class ConsentBinding:
         """Whether this binding can persist beyond the current process."""
         return bool(
             self.client_name
+            and self.environment in PERSISTENT_ENVIRONMENTS
             and self.credential_revision is not None
             and self.credential_generation is not None
         )
@@ -172,7 +178,7 @@ class _Record:
         environment_generation = value.get("environment_generation", 0)
         if not isinstance(client_name, str):
             raise ConsentStorageError("consent client_name must be a string")
-        if environment not in SUPPORTED_ENVIRONMENTS:
+        if environment not in PERSISTENT_ENVIRONMENTS:
             raise ConsentStorageError("consent environment is not supported")
         for name, item in (
             ("credential_revision", credential_revision),
@@ -479,9 +485,9 @@ class ConsentStore:
 
     def revoke_environment(self, environment: str) -> frozenset[ConsentBackend]:
         """Revoke all stored approvals for an environment after disconnect or rotation."""
-        if environment not in SUPPORTED_ENVIRONMENTS:
+        if environment not in RUNTIME_ENVIRONMENTS:
             raise ValueError(
-                f"environment must be one of {sorted(SUPPORTED_ENVIRONMENTS)}"
+                f"environment must be one of {sorted(RUNTIME_ENVIRONMENTS)}"
             )
         return self._revoke(lambda record: record.environment == environment)
 

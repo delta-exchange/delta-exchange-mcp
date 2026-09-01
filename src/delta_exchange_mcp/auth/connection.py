@@ -50,6 +50,7 @@ from delta_exchange_mcp.client import DeltaClient
 
 
 SUPPORTED_ENVIRONMENTS = ("india_prod", "india_testnet")
+RUNTIME_ENVIRONMENTS = tuple(config_mod.BASE_URLS)
 DEFAULT_CONSENT_NAME = "consent.json"
 
 _ENVIRONMENT_TOKEN = {"india_prod": 1, "india_testnet": 2, "india_devnet": 3}
@@ -757,7 +758,7 @@ class ConnectionService:
             ),
             "",
         )
-        if expected_environment not in SUPPORTED_ENVIRONMENTS:
+        if expected_environment not in RUNTIME_ENVIRONMENTS:
             raise legacy_store.SettingsConflictError(
                 "the active environment token is invalid"
             )
@@ -768,6 +769,10 @@ class ConnectionService:
                 )
             return (
                 "The active environment is managed by this MCP client's configuration."
+            )
+        if expected_environment not in SUPPORTED_ENVIRONMENTS:
+            raise legacy_store.SettingsConflictError(
+                "the active environment is not browser-managed"
             )
 
         def revoke() -> None:
@@ -1084,8 +1089,13 @@ class ConnectionService:
         base, active = self._reconcile()
         environments: dict[str, dict[str, object]] = {}
         process_override = self._process_credentials_present()
-        for environment in SUPPORTED_ENVIRONMENTS:
-            metadata = self._metadata(environment)
+        status_environments = dict.fromkeys((*SUPPORTED_ENVIRONMENTS, base.env))
+        for environment in status_environments:
+            metadata = (
+                self._metadata(environment)
+                if environment in SUPPORTED_ENVIRONMENTS
+                else None
+            )
             is_active = environment == base.env
             is_active_override = environment == base.env and process_override
             is_active_process = bool(
@@ -1213,7 +1223,7 @@ def _resolve_credential(
     environment: str,
     environ: Mapping[str, str] | None,
 ) -> tuple[Credential | None, str]:
-    if environment not in SUPPORTED_ENVIRONMENTS:
+    if environment not in RUNTIME_ENVIRONMENTS:
         return None, "unsupported_environment"
     try:
         return store.resolve(environment, environ), ""

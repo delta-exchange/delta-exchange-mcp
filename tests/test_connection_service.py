@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from delta_exchange_mcp import credentials as credential_check
 from delta_exchange_mcp import setup, store
+from delta_exchange_mcp.config import Config, INDIA_DEVNET_REST
 from delta_exchange_mcp.auth import connection as connection_mod
 from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.auth.consent import (
@@ -560,6 +561,78 @@ def test_process_pair_change_invalidates_session_only_consent(
     monkeypatch.setenv("DELTA_API_KEY", "external-key-2")
     after = asyncio.run(connection.access_state(context(client_name)))
 
+    assert before.trading_enabled is True
+    assert before.final_trading_check() is False
+    assert after.credentials_ready is True
+    assert after.trading_enabled is False
+
+
+def test_fixed_devnet_credentials_support_session_only_consent() -> None:
+    credentials, consent = stores()
+    connection = ConnectionService.open(
+        Config(
+            env="india_devnet",
+            base_url=INDIA_DEVNET_REST,
+            api_key="dev-key",
+            api_secret="dev-secret",
+        ),
+        credentials=credentials,
+        consent=consent,
+        validator=verified,
+    )
+    client_name = "Codex"
+
+    status = connection.status(context(client_name))
+    enabled = action(
+        connection,
+        client_name,
+        "consent",
+        {"environment": "india_devnet", "enabled": True},
+    )
+    access = asyncio.run(connection.access_state(context(client_name)))
+
+    assert connection.client.config.has_credentials is True
+    assert connection.credential_error == ""
+    assert status["environment"] == "india_devnet"
+    assert status["credentials_configured"] is True
+    assert status["environments"]["india_devnet"] == {
+        "connected": True,
+        "active": True,
+        "credential_metadata_present": False,
+        "credential_source": "process_environment",
+        "reconnect_required": False,
+        "validation_state": "unverified",
+        "account_id": "",
+        "externally_managed": True,
+        "persistent": False,
+    }
+    assert enabled.content["status"] == "enabled"
+    assert enabled.content["persistent"] is False
+    assert access.credentials_ready is True
+    assert access.trading_enabled is True
+    assert access.final_trading_check() is True
+
+
+def test_devnet_process_pair_change_invalidates_session_only_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_devnet")
+    monkeypatch.setenv("DELTA_API_KEY", "dev-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "first-secret")
+    connection = service(verified)
+    client_name = "Codex"
+    enabled = action(
+        connection,
+        client_name,
+        "consent",
+        {"environment": "india_devnet", "enabled": True},
+    )
+    before = asyncio.run(connection.access_state(context(client_name)))
+
+    monkeypatch.setenv("DELTA_API_SECRET", "second-secret")
+    after = asyncio.run(connection.access_state(context(client_name)))
+
+    assert enabled.content["persistent"] is False
     assert before.trading_enabled is True
     assert before.final_trading_check() is False
     assert after.credentials_ready is True
