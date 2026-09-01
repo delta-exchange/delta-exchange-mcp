@@ -280,6 +280,7 @@ _TEMPLATE = """<!doctype html>
     if (syncSelection && status.environment) selectEnvironment(status.environment);
     var selected = selectedStatus(status);
     var selectedIsActive = selected.active === true;
+    var credentialsLocked = busy || selected.browser_manageable !== true || selected.externally_managed;
     document.getElementById("connection-state").textContent = selected.connected ? "Connected" : "Not connected";
     document.getElementById("validation-state").textContent = selected.validation_state || "—";
     document.getElementById("account-state").textContent = selected.account_id || "—";
@@ -293,8 +294,12 @@ _TEMPLATE = """<!doctype html>
       : "Use this environment before you enable trading.";
     document.getElementById("activate").disabled = busy || selectedIsActive;
     document.getElementById("disconnect").disabled = busy ||
+      !selected.browser_manageable ||
       (!selected.connected && !selected.credential_metadata_present) || selected.externally_managed;
-    document.getElementById("connect").disabled = busy || selected.externally_managed;
+    key.disabled = credentialsLocked;
+    secret.disabled = credentialsLocked;
+    show.disabled = credentialsLocked;
+    document.getElementById("connect").disabled = credentialsLocked;
     document.getElementById("dashboard").disabled = busy || !CONFIG.dashboards[selectedEnvironment()];
     document.getElementById("enable-trading").disabled = busy || !selectedIsActive || !selected.connected || trading.enabled;
     document.getElementById("disable-trading").disabled = busy || !selectedIsActive || !trading.enabled;
