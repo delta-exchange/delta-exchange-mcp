@@ -174,9 +174,20 @@ async def run_mode_group(
                 )
                 continue
             print(f"  running {case.id} ...", flush=True)
-            transcript = await agent_mod.run_case(
-                session, llm, case.turns, model=args.model
-            )
+            try:
+                transcript = await agent_mod.run_case(
+                    session, llm, case.turns, model=args.model
+                )
+            except agent_mod.BlockedToolError as exc:
+                results.append(
+                    CaseResult(
+                        case_id=case.id,
+                        mode=mode,
+                        passed=False,
+                        failures=[str(exc)],
+                    )
+                )
+                continue
             passed, failures = check(case, transcript)
             result = CaseResult(
                 case_id=case.id,
