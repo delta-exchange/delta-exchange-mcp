@@ -124,7 +124,8 @@ When a call needs input:
 
 - An account call without a connection returns `input_required` and opens Manage Connection.
 - A real trading call without approval returns `input_required` and opens the same page.
-- Browser approval never executes the blocked trade. The client must resume or retry it.
+- A resumed request reports authorization state and never executes the blocked trade. Submit
+  a new call only if the user still wants the trade.
 - A call with `dry_run=true` sends no mutation and needs no trading approval.
 
 Call `get_connection_status` to see the selected environment, credential source, validation

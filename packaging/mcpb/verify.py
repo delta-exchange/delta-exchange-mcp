@@ -1,4 +1,4 @@
-"""Check a built .mcpb: archive structure, then a real MCP handshake from a fresh unpack.
+"""Check a built .mcpb: archive structure, then real MCP handshakes from fresh unpacks.
 
 Packing successfully is not evidence the bundle works. This unpacks the artifact the way a
 client would and speaks the protocol to it, so a bundle that installs but cannot start
@@ -101,7 +101,13 @@ def check_archive(mcpb: Path) -> None:
 
     # Assert the payload rather than trusting .mcpbignore. Build tooling sits beside the
     # payload in this directory, so one missed ignore rule would otherwise ship it silently.
-    required = {"manifest.json", "pyproject.toml", "uv.lock", "icon.png", "server/main.py"}
+    required = {
+        "manifest.json",
+        "pyproject.toml",
+        "uv.lock",
+        "icon.png",
+        "server/main.py",
+    }
     missing = required - names
     if missing:
         raise SystemExit(f"missing from the bundle: {', '.join(sorted(missing))}")
@@ -117,24 +123,28 @@ def check_archive(mcpb: Path) -> None:
             f".mcpbignore?): {', '.join(sorted(unexpected))}"
         )
 
-    print(f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid")
+    print(
+        f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid"
+    )
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
 def launch_env(workdir: Path) -> dict[str, str]:
     """Build a disposable process environment with hostile legacy authorization values."""
     env = dict(os.environ)
-    env.update({
-        "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
-        "DELTA_MCP_MODE": "trade",
-        "DELTA_MCP_ENV": "india_prod",
-        "DELTA_API_KEY": "ambient",
-        "DELTA_API_SECRET": "ambient",
-        "DELTA_MCP_DEBUG": "1",
-        "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
-        "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
-        "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
-    })
+    env.update(
+        {
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "DELTA_MCP_MODE": "trade",
+            "DELTA_MCP_ENV": "india_prod",
+            "DELTA_API_KEY": "ambient",
+            "DELTA_API_SECRET": "ambient",
+            "DELTA_MCP_DEBUG": "1",
+            "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
+            "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
+            "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
+        }
+    )
     return env
 
 
@@ -164,7 +174,15 @@ def handshake(
 ) -> dict[str, dict]:
     """Discover one fresh unpack and return its tools by name."""
     proc = subprocess.Popen(
-        ["uv", "run", "--directory", str(extracted), "--frozen", "python", "server/main.py"],
+        [
+            "uv",
+            "run",
+            "--directory",
+            str(extracted),
+            "--frozen",
+            "python",
+            "server/main.py",
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -178,7 +196,9 @@ def handshake(
     readers = [
         threading.Thread(target=_pump, args=(proc.stdout, replies.put), daemon=True),
         threading.Thread(
-            target=_pump, args=(proc.stderr, lambda line: line and errors.append(line)), daemon=True
+            target=_pump,
+            args=(proc.stderr, lambda line: line and errors.append(line)),
+            daemon=True,
         ),
     ]
     for reader in readers:
@@ -288,6 +308,29 @@ def mutation_names(tools: dict[str, dict]) -> list[str]:
     )
 
 
+def unpack_installations(mcpb: Path, workdir: Path) -> tuple[dict, Path, Path]:
+    """Extract independent bundle installations for modern and legacy discovery."""
+    modern_dir = workdir / "modern"
+    legacy_dir = workdir / "legacy"
+    modern_dir.mkdir()
+    legacy_dir.mkdir()
+    with zipfile.ZipFile(mcpb) as archive:
+        archive.extractall(modern_dir)
+        archive.extractall(legacy_dir)
+
+    manifest = json.loads((modern_dir / "manifest.json").read_text())
+    return manifest, modern_dir, legacy_dir
+
+
+def discover_tools(
+    modern_dir: Path, legacy_dir: Path
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Run protocol discovery with independent installation and state directories."""
+    modern = handshake(modern_dir, modern=True, env=launch_env(modern_dir))
+    legacy = handshake(legacy_dir, modern=False, env=launch_env(legacy_dir))
+    return modern, legacy
+
+
 def main() -> None:
     mcpb = Path(sys.argv[1]).resolve()
     print(f"verifying {mcpb.name}")
@@ -295,18 +338,18 @@ def main() -> None:
 
     tmp = Path(tempfile.mkdtemp(prefix="mcpb-verify-"))
     try:
-        with zipfile.ZipFile(mcpb) as z:
-            z.extractall(tmp)
-        manifest = json.loads((tmp / "manifest.json").read_text())
+        manifest, modern_dir, legacy_dir = unpack_installations(mcpb, tmp)
 
         if "user_config" in manifest:
-            raise SystemExit("the browser-configured bundle must not declare user_config prompts")
+            raise SystemExit(
+                "the browser-configured bundle must not declare user_config prompts"
+            )
         if "env" in manifest["server"]["mcp_config"]:
-            raise SystemExit("the browser-configured bundle must not inject launch credentials")
+            raise SystemExit(
+                "the browser-configured bundle must not inject launch credentials"
+            )
 
-        env = launch_env(tmp)
-        modern = handshake(tmp, modern=True, env=env)
-        legacy = handshake(tmp, modern=False, env=env)
+        modern, legacy = discover_tools(modern_dir, legacy_dir)
         if not modern:
             raise SystemExit("no tools registered")
         if set(modern) != set(legacy):
@@ -319,9 +362,7 @@ def main() -> None:
         runtime = set(modern)
         retired = (declared | runtime) & RETIRED_TOOL_NAMES
         if retired:
-            raise SystemExit(
-                f"retired setup tools must stay absent: {sorted(retired)}"
-            )
+            raise SystemExit(f"retired setup tools must stay absent: {sorted(retired)}")
         if declared != runtime:
             raise SystemExit(
                 "manifest and runtime tool lists differ: "
