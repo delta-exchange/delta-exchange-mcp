@@ -3,15 +3,11 @@
 import asyncio
 import threading
 import time
-from collections.abc import Mapping
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp_types import CLIENT_INFO_META_KEY, Implementation
 
 from delta_exchange_mcp import credentials as credential_check
 from delta_exchange_mcp import setup, store
@@ -33,65 +29,13 @@ from delta_exchange_mcp.auth.store import (
 )
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
-
-
-def context(name: str, version: str = "1") -> Context:
-    request = SimpleNamespace(
-        meta={
-            CLIENT_INFO_META_KEY: Implementation(name=name, version=version),
-        },
-        protocol_version="2026-07-28",
-    )
-    return Context(request_context=cast(Any, request))
-
-
-def stores(*, persistent: bool = True) -> tuple[CredentialStore, ConsentStore]:
-    source = CredentialSource.OS_STORE if persistent else CredentialSource.MEMORY
-    credentials = CredentialStore(
-        MemorySecretBackend(),
-        MemoryMetadata(),
-        source,
-    )
-    consent = ConsentStore(
-        store.path().with_name("consent.json"),
-        secure_backend_available=persistent,
-        memory_backend=MemoryConsentBackend(),
-    )
-    return credentials, consent
-
-
-def service(
-    validator: Any,
-    *,
-    persistent: bool = True,
-) -> ConnectionService:
-    credentials, consent = stores(persistent=persistent)
-    return ConnectionService.open(
-        credentials=credentials,
-        consent=consent,
-        validator=validator,
-    )
-
-
-def action(
-    connection: ConnectionService,
-    client_name: str,
-    name: str,
-    arguments: Mapping[str, Any],
-    revision: setup.Revision | None = None,
-) -> setup.ActionResult:
-    expected = connection._revision(client_name) if revision is None else revision
-    return connection._actions(client_name)(name, arguments, expected)
-
-
-async def verified(
-    environment: str, api_key: str, api_secret: str
-) -> credential_check.Check:
-    return credential_check.Check(
-        ok=True,
-        reachable=True,
-        detail="42",
-    )
+from tests.connection_support import (
+    action,
+    context,
+    service,
+    stores,
+    verified,
+)
 
 
 @pytest.mark.parametrize(
@@ -728,255 +672,6 @@ def test_status_and_results_never_contain_credential_material() -> None:
     assert "visible-only-to-store-secret" not in rendered
 
 
-@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
-def test_broken_consent_store_preserves_account_access_and_reports_error(
-    monkeypatch,
-    failure: str,
-) -> None:
-    connection = service(verified)
-    connection.credentials.replace(
-        "india_prod",
-        "key",
-        "secret",
-        state=CredentialState.VERIFIED,
-    )
-    if failure == "malformed":
-        store.path().with_name("consent.json").write_text("not-json")
-    else:
-
-        def unreadable(*args, **kwargs):
-            raise ConsentStorageError("cannot read consent metadata")
-
-        monkeypatch.setattr(connection.consent, "status", unreadable)
-
-    access = asyncio.run(connection.access_state(context("Codex")))
-    status = connection.status(context("Codex"))
-    reads: list[tuple[str, bool]] = []
-
-    async def get(path: str, params=None, *, auth: bool = False):
-        reads.append((path, auth))
-        return {"success": True, "result": {"id": 42}}
-
-    monkeypatch.setattr(connection.client, "get", get)
-    app = build_server(connection_service=connection)
-    account_result = asyncio.run(
-        app.call_tool("get_wallet_balances", {}, context("Codex"))
-    )
-
-    assert access.credentials_ready is True
-    assert access.trading_enabled is False
-    assert access.final_trading_check() is False
-    assert status["credentials_configured"] is True
-    assert status["account_tools_available"] is True
-    assert status["trading"]["enabled"] is False
-    assert status["connection_error"] == "consent_store_unavailable"
-    assert status["consent_error"] == "consent_store_unavailable"
-    assert account_result.is_error is False
-    assert reads == [("/wallet/balances", True)]
-
-
-def test_consent_write_failure_survives_reads_until_a_write_succeeds(
-    monkeypatch,
-) -> None:
-    connection = service(verified)
-    connection.credentials.replace("india_prod", "key", "secret")
-    original_enable = connection.consent.enable
-
-    def unavailable(*args, **kwargs):
-        raise ConsentStorageError("consent metadata is read-only")
-
-    monkeypatch.setattr(connection.consent, "enable", unavailable)
-    failed = action(
-        connection,
-        "Codex",
-        "consent",
-        {
-            "environment": "india_prod",
-            "enabled": True,
-            "acknowledged": True,
-        },
-    )
-
-    assert failed.content["status"] == "rejected"
-    assert connection.consent_error == "consent_store_unavailable"
-    assert connection.status(context("Codex"))["consent_error"] == (
-        "consent_store_unavailable"
-    )
-
-    monkeypatch.setattr(connection.consent, "enable", original_enable)
-    enabled = action(
-        connection,
-        "Codex",
-        "consent",
-        {
-            "environment": "india_prod",
-            "enabled": True,
-            "acknowledged": True,
-        },
-    )
-
-    assert enabled.content["status"] == "enabled"
-    assert connection.status(context("Codex"))["consent_error"] == ""
-
-
-@pytest.mark.parametrize(
-    ("failed_client", "other_client"),
-    [("Codex", ""), ("", "Codex")],
-    ids=[
-        "persistent-failure-survives-memory-write",
-        "memory-failure-survives-persistent-write",
-    ],
-)
-def test_consent_write_recovery_is_scoped_to_the_selected_backend(
-    monkeypatch,
-    failed_client: str,
-    other_client: str,
-) -> None:
-    connection = service(verified)
-    connection.credentials.replace("india_prod", "key", "secret")
-    original_enable = connection.consent.enable
-    failed_persistent = bool(failed_client)
-
-    def fail_selected_backend(binding, **kwargs):
-        if binding.persistent is failed_persistent:
-            raise ConsentStorageError("selected consent backend is read-only")
-        return original_enable(binding, **kwargs)
-
-    monkeypatch.setattr(connection.consent, "enable", fail_selected_backend)
-    arguments = {
-        "environment": "india_prod",
-        "enabled": True,
-        "acknowledged": True,
-    }
-
-    failed = action(connection, failed_client, "consent", arguments)
-    recovered_other = action(connection, other_client, "consent", arguments)
-
-    assert failed.content["status"] == "rejected"
-    assert recovered_other.content["status"] == "enabled"
-    assert connection.status(context(failed_client))["consent_error"] == (
-        "consent_store_unavailable"
-    )
-
-    monkeypatch.setattr(connection.consent, "enable", original_enable)
-    recovered_failed = action(connection, failed_client, "consent", arguments)
-
-    assert recovered_failed.content["status"] == "enabled"
-    assert connection.status(context(failed_client))["consent_error"] == ""
-
-
-@pytest.mark.parametrize(
-    ("failed_client", "other_client"),
-    [("Codex", ""), ("", "Codex")],
-    ids=["persistent", "memory"],
-)
-def test_failed_disable_blocks_trading_but_preserves_reads(
-    monkeypatch,
-    failed_client: str,
-    other_client: str,
-) -> None:
-    connection = service(verified)
-    connection.credentials.replace("india_prod", "key", "secret")
-    arguments = {
-        "environment": "india_prod",
-        "enabled": True,
-        "acknowledged": True,
-    }
-    enabled = action(connection, failed_client, "consent", arguments)
-    captured = asyncio.run(connection.access_state(context(failed_client)))
-    original_disable = connection.consent.disable
-    failed_persistent = bool(failed_client)
-
-    def fail_selected_backend(binding, **kwargs):
-        if binding.persistent is failed_persistent:
-            raise ConsentStorageError("selected consent backend is read-only")
-        return original_disable(binding, **kwargs)
-
-    monkeypatch.setattr(connection.consent, "disable", fail_selected_backend)
-    failed = action(
-        connection,
-        failed_client,
-        "consent",
-        {**arguments, "enabled": False},
-    )
-    healthy_other = action(connection, other_client, "consent", arguments)
-    current = asyncio.run(connection.access_state(context(failed_client)))
-    other = asyncio.run(connection.access_state(context(other_client)))
-    status = connection.status(context(failed_client))
-
-    assert enabled.content["status"] == "enabled"
-    assert captured.trading_enabled is True
-    assert failed.content["status"] == "rejected"
-    assert healthy_other.content["status"] == "enabled"
-    assert current.credentials_ready is True
-    assert current.trading_enabled is False
-    assert current.final_trading_check() is False
-    assert other.trading_enabled is True
-    assert status["trading"]["enabled"] is False
-    assert status["consent_error"] == "consent_store_unavailable"
-
-    gate = trading.TradeGate()
-    mcp = MCPServer("failed-disable")
-    trading.register(mcp, connection.client, None, gate)
-    mutations: list[str] = []
-
-    async def post(
-        path: str,
-        payload: dict[str, Any],
-        *,
-        auth: bool = False,
-    ) -> dict[str, Any]:
-        del payload, auth
-        mutations.append(path)
-        return {}
-
-    monkeypatch.setattr(connection.client, "post", post)
-
-    async def invoke() -> object:
-        gate.bind_final_check(captured.final_trading_check)
-        return await mcp.call_tool(
-            "place_order",
-            {
-                "product_id": 27,
-                "size": 1,
-                "side": "buy",
-                "order_type": "market_order",
-            },
-        )
-
-    with pytest.raises(ToolError, match="trading was disabled"):
-        asyncio.run(invoke())
-    assert mutations == []
-
-    reads: list[tuple[str, bool]] = []
-
-    async def get(path: str, params=None, *, auth: bool = False):
-        del params
-        reads.append((path, auth))
-        return {"success": True, "result": {"id": 42}}
-
-    monkeypatch.setattr(connection.client, "get", get)
-    app = build_server(connection_service=connection)
-
-    async def read_tools() -> tuple[object, object]:
-        try:
-            public = await app.call_tool(
-                "get_ticker", {"symbol": "BTCUSD"}, context(failed_client)
-            )
-            account = await app.call_tool(
-                "get_wallet_balances", {}, context(failed_client)
-            )
-            return public, account
-        finally:
-            await app.close_live_client()
-
-    public, account = asyncio.run(read_tools())
-
-    assert public.is_error is False
-    assert account.is_error is False
-    assert reads == [("/tickers/BTCUSD", False), ("/wallet/balances", True)]
-
-
 @pytest.mark.parametrize("disable_fails", [False, True], ids=["disabled", "failed"])
 def test_consent_change_during_final_check_blocks_the_mutation(
     monkeypatch,
@@ -1056,9 +751,7 @@ def test_consent_change_during_final_check_blocks_the_mutation(
             "consent",
             {**arguments, "enabled": False},
         )
-        assert result.content["status"] == (
-            "rejected" if disable_fails else "disabled"
-        )
+        assert result.content["status"] == ("rejected" if disable_fails else "disabled")
     finally:
         release.set()
         thread.join(5)
