@@ -865,6 +865,294 @@ def test_consent_write_recovery_is_scoped_to_the_selected_backend(
     assert connection.status(context(failed_client))["consent_error"] == ""
 
 
+@pytest.mark.parametrize(
+    ("failed_client", "other_client"),
+    [("Codex", ""), ("", "Codex")],
+    ids=["persistent", "memory"],
+)
+def test_failed_disable_blocks_trading_but_preserves_reads(
+    monkeypatch,
+    failed_client: str,
+    other_client: str,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    enabled = action(connection, failed_client, "consent", arguments)
+    captured = asyncio.run(connection.access_state(context(failed_client)))
+    original_disable = connection.consent.disable
+    failed_persistent = bool(failed_client)
+
+    def fail_selected_backend(binding, **kwargs):
+        if binding.persistent is failed_persistent:
+            raise ConsentStorageError("selected consent backend is read-only")
+        return original_disable(binding, **kwargs)
+
+    monkeypatch.setattr(connection.consent, "disable", fail_selected_backend)
+    failed = action(
+        connection,
+        failed_client,
+        "consent",
+        {**arguments, "enabled": False},
+    )
+    healthy_other = action(connection, other_client, "consent", arguments)
+    current = asyncio.run(connection.access_state(context(failed_client)))
+    other = asyncio.run(connection.access_state(context(other_client)))
+    status = connection.status(context(failed_client))
+
+    assert enabled.content["status"] == "enabled"
+    assert captured.trading_enabled is True
+    assert failed.content["status"] == "rejected"
+    assert healthy_other.content["status"] == "enabled"
+    assert current.credentials_ready is True
+    assert current.trading_enabled is False
+    assert current.final_trading_check() is False
+    assert other.trading_enabled is True
+    assert status["trading"]["enabled"] is False
+    assert status["consent_error"] == "consent_store_unavailable"
+
+    gate = trading.TradeGate()
+    mcp = MCPServer("failed-disable")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(captured.final_trading_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    with pytest.raises(ToolError, match="trading was disabled"):
+        asyncio.run(invoke())
+    assert mutations == []
+
+    reads: list[tuple[str, bool]] = []
+
+    async def get(path: str, params=None, *, auth: bool = False):
+        del params
+        reads.append((path, auth))
+        return {"success": True, "result": {"id": 42}}
+
+    monkeypatch.setattr(connection.client, "get", get)
+    app = build_server(connection_service=connection)
+
+    async def read_tools() -> tuple[object, object]:
+        try:
+            public = await app.call_tool(
+                "get_ticker", {"symbol": "BTCUSD"}, context(failed_client)
+            )
+            account = await app.call_tool(
+                "get_wallet_balances", {}, context(failed_client)
+            )
+            return public, account
+        finally:
+            await app.close_live_client()
+
+    public, account = asyncio.run(read_tools())
+
+    assert public.is_error is False
+    assert account.is_error is False
+    assert reads == [("/tickers/BTCUSD", False), ("/wallet/balances", True)]
+
+
+@pytest.mark.parametrize("disable_fails", [False, True], ids=["disabled", "failed"])
+def test_consent_change_during_final_check_blocks_the_mutation(
+    monkeypatch,
+    disable_fails: bool,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    action(connection, "Codex", "consent", arguments)
+    captured = asyncio.run(connection.access_state(context("Codex")))
+    original_accepts = connection.consent.accepts
+    entered = threading.Event()
+    release = threading.Event()
+
+    def paused_accepts(*args, **kwargs):
+        accepted = original_accepts(*args, **kwargs)
+        entered.set()
+        assert release.wait(5)
+        return accepted
+
+    monkeypatch.setattr(connection.consent, "accepts", paused_accepts)
+    gate = trading.TradeGate()
+    mcp = MCPServer("failed-disable-race")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+    outcome: list[BaseException | object] = []
+
+    def invoke() -> None:
+        async def run() -> object:
+            gate.bind_final_check(captured.final_trading_check)
+            return await mcp.call_tool(
+                "place_order",
+                {
+                    "product_id": 27,
+                    "size": 1,
+                    "side": "buy",
+                    "order_type": "market_order",
+                },
+            )
+
+        try:
+            outcome.append(asyncio.run(run()))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    try:
+        assert entered.wait(5)
+
+        if disable_fails:
+
+            def fail_disable(*args, **kwargs):
+                del args, kwargs
+                raise ConsentStorageError("persistent consent backend is read-only")
+
+            monkeypatch.setattr(connection.consent, "disable", fail_disable)
+        result = action(
+            connection,
+            "Codex",
+            "consent",
+            {**arguments, "enabled": False},
+        )
+        assert result.content["status"] == (
+            "rejected" if disable_fails else "disabled"
+        )
+    finally:
+        release.set()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ToolError)
+    assert "trading was disabled" in str(outcome[0])
+    assert mutations == []
+
+
+def test_partial_revocation_clears_each_backend_that_was_updated(monkeypatch) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    enabled = action(connection, "", "consent", arguments)
+    credential = connection.credentials.get("india_prod")
+    memory_binding = connection._binding("", credential)
+    assert enabled.content["status"] == "enabled"
+    assert memory_binding is not None
+
+    original_enable = connection.consent.enable
+
+    def fail_memory_backend(binding, **kwargs):
+        if not binding.persistent:
+            raise ConsentStorageError("memory consent backend is unavailable")
+        return original_enable(binding, **kwargs)
+
+    monkeypatch.setattr(connection.consent, "enable", fail_memory_backend)
+    failed = action(connection, "", "consent", arguments)
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    assert failed.content["status"] == "rejected"
+
+    consent_path = store.path().with_name("consent.json")
+    consent_path.write_text("not-json")
+    disconnected = action(
+        connection,
+        "",
+        "credentials",
+        {"operation": "disconnect", "environment": "india_prod"},
+    )
+
+    assert disconnected.content["status"] == "disconnected"
+    assert connection.consent.status(memory_binding).enabled is False
+    assert consent_path.read_text() == "not-json"
+
+    consent_path.unlink()
+    connection.credentials.replace("india_prod", "next-key", "next-secret")
+    persistent_recovered = action(connection, "Codex", "consent", arguments)
+
+    assert persistent_recovered.content["status"] == "enabled"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+@pytest.mark.parametrize(
+    ("failed_client", "other_client"),
+    [("Codex", ""), ("", "Codex")],
+    ids=[
+        "persistent-failure-survives-memory-read",
+        "memory-failure-survives-persistent-read",
+    ],
+)
+def test_consent_read_recovery_is_scoped_to_the_selected_backend(
+    monkeypatch,
+    failed_client: str,
+    other_client: str,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "key", "secret")
+    original_status = connection.consent.status
+    failed_persistent = bool(failed_client)
+
+    def fail_selected_backend(binding):
+        if binding.persistent is failed_persistent:
+            raise ConsentStorageError("selected consent backend is unreadable")
+        return original_status(binding)
+
+    monkeypatch.setattr(connection.consent, "status", fail_selected_backend)
+
+    assert connection.status(context(failed_client))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+    assert connection.status(context(other_client))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    monkeypatch.setattr(connection.consent, "status", original_status)
+    assert connection.status(context(failed_client))["consent_error"] == ""
+
+
 def test_consent_read_recovery_clears_only_the_read_failure(monkeypatch) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "key", "secret")
