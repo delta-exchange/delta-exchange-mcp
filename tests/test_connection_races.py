@@ -16,6 +16,7 @@ from delta_exchange_mcp.auth.consent import (
 )
 from tests.connection_support import (
     action,
+    assert_place_order_allowed,
     assert_place_order_blocked,
     context,
     service,
@@ -331,4 +332,131 @@ def test_process_identity_is_not_retired_by_an_environment_switch(
         monkeypatch,
         connection,
         current.final_trading_check,
+    )
+
+
+def test_memory_first_failure_blocks_unchecked_persistent_consent(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    action(connection, "Codex", "consent", arguments)
+    captured = asyncio.run(connection.access_state(context("Codex")))
+    original_revoke = connection.consent._memory_backend.revoke
+
+    def fail_memory(matches: Callable[[object], bool]) -> bool:
+        del matches
+        raise ConsentStorageError("memory consent backend is unavailable")
+
+    monkeypatch.setattr(connection.consent._memory_backend, "revoke", fail_memory)
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(
+        connection.consent._memory_backend,
+        "revoke",
+        original_revoke,
+    )
+    current = asyncio.run(connection.access_state(context("Codex")))
+
+    assert failed.content["status"] == "rejected"
+    assert captured.trading_enabled is True
+    assert captured.final_trading_check() is False
+    assert current.trading_enabled is False
+    assert current.final_trading_check() is False
+    assert connection.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+    assert_place_order_blocked(
+        monkeypatch,
+        connection,
+        current.final_trading_check,
+    )
+
+
+def test_process_recovery_keeps_a_hidden_stored_identity_denied(
+    monkeypatch,
+) -> None:
+    target = service(verified, persistent=False)
+    concurrent = ConnectionService.open(
+        credentials=target.credentials,
+        consent=target.consent,
+        validator=verified,
+    )
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    saved = action(
+        concurrent,
+        "Codex",
+        "credentials",
+        {
+            "operation": "replace",
+            "environment": "india_prod",
+            "api_key": "stored-key",
+            "api_secret": "stored-secret",
+        },
+    )
+    stored_enabled = action(concurrent, "Codex", "consent", arguments)
+    monkeypatch.setenv("DELTA_API_KEY", "process-key")
+    original_revoke = target.consent.revoke_environment
+
+    def fail_memory(environment: str) -> frozenset[ConsentBackend]:
+        if environment != "india_prod":
+            return original_revoke(environment)
+        raise ConsentRevocationError(
+            "memory consent backend is unavailable",
+            failed_backend=ConsentBackend.MEMORY,
+            written=frozenset(),
+            checked=frozenset(),
+        )
+
+    monkeypatch.setattr(target.consent, "revoke_environment", fail_memory)
+    failed = action(
+        target,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(target.consent, "revoke_environment", original_revoke)
+    monkeypatch.setenv("DELTA_API_SECRET", "process-secret")
+    process_enabled = action(target, "Codex", "consent", arguments)
+    process_access = asyncio.run(target.access_state(context("Codex")))
+
+    assert saved.content["status"] == "saved"
+    assert stored_enabled.content["status"] == "enabled"
+    assert failed.content["status"] == "rejected"
+    assert process_enabled.content["status"] == "enabled"
+    assert process_access.trading_enabled is True
+    assert process_access.final_trading_check() is True
+    assert_place_order_allowed(
+        monkeypatch,
+        target,
+        process_access.final_trading_check,
+    )
+
+    monkeypatch.delenv("DELTA_API_KEY")
+    monkeypatch.delenv("DELTA_API_SECRET")
+    stored_access = asyncio.run(target.access_state(context("Codex")))
+
+    assert stored_access.trading_enabled is False
+    assert stored_access.final_trading_check() is False
+    assert target.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+    assert_place_order_blocked(
+        monkeypatch,
+        target,
+        stored_access.final_trading_check,
     )

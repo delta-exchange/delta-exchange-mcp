@@ -18,7 +18,6 @@ from delta_exchange_mcp.auth.consent import (
     ConsentBackend,
     ConsentBinding,
     ConsentLease,
-    ConsentRevocationError,
     ConsentState,
     ConsentStorageError,
     ConsentStore,
@@ -188,7 +187,11 @@ class ConnectionService:
                     migration.environment, migration.credential.generation
                 )
             except ConsentStorageError as exc:
-                consent_health.revocation_failed(exc, scope, risk)
+                consent_health.revocation_failed(
+                    exc,
+                    scope,
+                    {backend: risk for backend in consent_store.backends},
+                )
             else:
                 consent_health.revocation_succeeded(
                     written,
@@ -454,7 +457,11 @@ class ConnectionService:
                 scope,
             )
         except ConsentStorageError as exc:
-            self._consent_health.revocation_failed(exc, scope, risk)
+            self._consent_health.revocation_failed(
+                exc,
+                scope,
+                {backend: risk for backend in self.consent.backends},
+            )
             self._consent_health.credential_changed(scope)
             self._reconcile()
             return self._rejected(
@@ -545,7 +552,11 @@ class ConnectionService:
                 scope,
             )
         except ConsentStorageError as exc:
-            self._consent_health.revocation_failed(exc, scope, risk)
+            self._consent_health.revocation_failed(
+                exc,
+                scope,
+                {backend: risk for backend in self.consent.backends},
+            )
             self._consent_health.credential_changed(scope)
         self._reconcile()
         return setup.ActionResult(
@@ -767,12 +778,11 @@ class ConnectionService:
                 try:
                     written = self.consent.revoke_environment(revoked_environment)
                 except ConsentStorageError as exc:
-                    risk = self._environment_revocation_failure_risk(
+                    risks = self._environment_revocation_failure_risks(
                         revoked_environment,
                         expected_generation,
-                        exc,
                     )
-                    self._consent_health.revocation_failed(exc, scope, risk)
+                    self._consent_health.revocation_failed(exc, scope, risks)
                     raise
                 self._consent_health.revocation_succeeded(
                     written,
@@ -793,42 +803,54 @@ class ConnectionService:
             self._consent_health.expire(expected_generation + 1, None)
         return ""
 
-    def _environment_revocation_failure_risk(
+    def _environment_revocation_failure_risks(
         self,
         environment: str,
         environment_generation: int,
-        error: ConsentStorageError,
-    ) -> IdentityRisk | CoverageRisk:
-        if (
-            isinstance(error, ConsentRevocationError)
-            and error.failed_backend is ConsentBackend.MEMORY
-        ):
-            credential, credential_error = _resolve_credential(
-                self.credentials,
+    ) -> dict[ConsentBackend, IdentityRisk | CoverageRisk]:
+        risks: dict[ConsentBackend, IdentityRisk | CoverageRisk] = {}
+        if ConsentBackend.MEMORY in self.consent.backends:
+            risks[ConsentBackend.MEMORY] = self._memory_revocation_risk(
                 environment,
-                self.credential_environ,
+                environment_generation,
             )
-            if credential_error not in {"", "incomplete_process_credentials"}:
-                return CoverageRisk(environment_generation)
-            if credential is None:
-                try:
-                    metadata = self.credentials.metadata(environment)
-                except CredentialStoreError:
-                    return CoverageRisk(environment_generation)
-                return CoverageRisk(
-                    environment_generation,
-                    metadata.generation,
-                    self.credentials.process_generation(environment),
-                )
-            return IdentityRisk(
-                (
-                    environment,
-                    credential.revision,
-                    credential.generation,
-                    credential.session_generation,
-                    environment_generation,
-                )
+        if ConsentBackend.PERSISTENT in self.consent.backends:
+            risks[ConsentBackend.PERSISTENT] = self._persistent_revocation_risk(
+                environment,
+                environment_generation,
             )
+        return risks
+
+    def _memory_revocation_risk(
+        self,
+        environment: str,
+        environment_generation: int,
+    ) -> IdentityRisk | CoverageRisk:
+        credential, credential_error = _resolve_credential(
+            self.credentials,
+            environment,
+            self.credential_environ,
+        )
+        if credential_error or credential is None:
+            return self._memory_revocation_coverage(
+                environment,
+                environment_generation,
+            )
+        return IdentityRisk(
+            (
+                environment,
+                credential.revision,
+                credential.generation,
+                credential.session_generation,
+                environment_generation,
+            )
+        )
+
+    def _persistent_revocation_risk(
+        self,
+        environment: str,
+        environment_generation: int,
+    ) -> IdentityRisk | CoverageRisk:
         try:
             metadata = self.credentials.metadata(environment)
         except CredentialStoreError:
@@ -844,6 +866,26 @@ class ConnectionService:
                 )
             )
         return CoverageRisk(environment_generation, metadata.generation)
+
+    def _memory_revocation_coverage(
+        self,
+        environment: str,
+        environment_generation: int,
+    ) -> CoverageRisk:
+        """Bound process risk even when stored credential metadata is unavailable."""
+        try:
+            metadata = self.credentials.metadata(environment)
+        except CredentialStoreError:
+            credential_generation = None
+        else:
+            credential_generation = (
+                metadata.generation if metadata.revision is None else None
+            )
+        return CoverageRisk(
+            environment_generation,
+            credential_generation,
+            self.credentials.process_generation(environment),
+        )
 
     def _activate_credential(self, credential: Credential | None) -> None:
         base = self._base_config()
@@ -875,7 +917,11 @@ class ConnectionService:
                     scope,
                 )
             except ConsentStorageError as exc:
-                self._consent_health.revocation_failed(exc, scope, risk)
+                self._consent_health.revocation_failed(
+                    exc,
+                    scope,
+                    {backend: risk for backend in self.consent.backends},
+                )
         _, environment_generation = self._environment_state()
         retired_identity = (
             previous.identity

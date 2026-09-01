@@ -1,6 +1,6 @@
 """Fail-closed health state for consent reads, writes, and revocations."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from delta_exchange_mcp.auth.consent import (
@@ -107,6 +107,7 @@ class ConsentHealth:
     _read_unavailable: set[ConsentBackend] = field(default_factory=set, repr=False)
     _write_unavailable: set[ConsentBackend] = field(default_factory=set, repr=False)
     _denied_bindings: set[ConsentBinding] = field(default_factory=set, repr=False)
+    _write_proofs: set[ConsentBinding] = field(default_factory=set, repr=False)
     _failed_revocations: set[_FailedRevocation] = field(
         default_factory=set,
         repr=False,
@@ -141,6 +142,7 @@ class ConsentHealth:
     ) -> None:
         """Deny the exact binding after its direct write fails."""
         self._write_failed(backend)
+        self._write_proofs.discard(binding)
         self._denied_bindings.add(binding)
 
     def direct_write_succeeded(
@@ -151,28 +153,28 @@ class ConsentHealth:
         """Recover only the exact binding written successfully."""
         self._writes_succeeded(frozenset({backend}))
         self._denied_bindings.discard(binding)
+        self._write_proofs.add(binding)
 
     def revocation_failed(
         self,
         error: ConsentStorageError,
         scope: RevocationScope,
-        risk: RevocationRisk,
+        risks: Mapping[ConsentBackend, RevocationRisk],
     ) -> None:
         """Record completed checks and the failed backend for one revocation."""
+        self._clear_write_proofs(scope)
         if isinstance(error, ConsentRevocationError):
             self._writes_succeeded(error.written)
             recovered = error.written | error.checked
             self._clear_bindings(scope, recovered)
             self._clear_revocations(scope, recovered)
-            self._failed_revocations.add(
-                _FailedRevocation(error.failed_backend, scope, risk)
-            )
-            self._write_failed(error.failed_backend)
-            return
-        self._failed_revocations.add(
-            _FailedRevocation(ConsentBackend.PERSISTENT, scope, risk)
-        )
-        self._write_failed(ConsentBackend.PERSISTENT)
+        else:
+            recovered = frozenset()
+        for backend, risk in risks.items():
+            if backend in recovered:
+                continue
+            self._failed_revocations.add(_FailedRevocation(backend, scope, risk))
+            self._write_failed(backend)
 
     def revocation_succeeded(
         self,
@@ -181,12 +183,14 @@ class ConsentHealth:
         scope: RevocationScope,
     ) -> None:
         """Recover every binding checked and each backend written successfully."""
+        self._clear_write_proofs(scope)
         self._writes_succeeded(written)
         self._clear_bindings(scope, checked)
         self._clear_revocations(scope, checked)
 
     def credential_changed(self, scope: GenerationRevocationScope) -> None:
         """Expire failures for credential identities that cannot return."""
+        self._clear_write_proofs(scope)
         self._clear_bindings(scope)
         self._failed_revocations = {
             failed
@@ -214,6 +218,19 @@ class ConsentHealth:
                 )
             )
         }
+        self._write_proofs = {
+            proven
+            for proven in self._write_proofs
+            if not (
+                proven.environment_generation < environment_generation
+                or proven.identity == retired_identity
+                or (
+                    binding is not None
+                    and proven.environment == binding.environment
+                    and _identity_supersedes(binding.identity, proven.identity)
+                )
+            )
+        }
         self._failed_revocations = {
             failed
             for failed in self._failed_revocations
@@ -235,7 +252,9 @@ class ConsentHealth:
             backend not in self._write_unavailable
             and binding not in self._denied_bindings
             and not any(
-                failed.backend is backend and failed.denies(binding)
+                failed.backend is backend
+                and failed.denies(binding)
+                and binding not in self._write_proofs
                 for failed in self._failed_revocations
             )
         )
@@ -279,6 +298,11 @@ class ConsentHealth:
             )
         }
 
+    def _clear_write_proofs(self, scope: RevocationScope) -> None:
+        self._write_proofs = {
+            binding for binding in self._write_proofs if not scope.covers(binding)
+        }
+
     def _clear_revocations(
         self,
         scope: RevocationScope,
@@ -309,25 +333,39 @@ def _failure_obsolete(
         return False
     if isinstance(failed.risk, IdentityRisk):
         return _identity_supersedes(binding.identity, failed.risk.identity)
-    if (
-        failed.risk.through_credential_generation is not None
-        and binding.credential_generation is not None
-        and binding.credential_generation > failed.risk.through_credential_generation
-    ):
-        return True
-    if (
-        failed.risk.through_session_generation is not None
-        and binding.credential_session_generation is not None
-        and binding.credential_session_generation
-        > failed.risk.through_session_generation
-    ):
-        return True
     if isinstance(failed.scope, GenerationRevocationScope):
         return bool(
             binding.credential_generation is not None
             and binding.credential_generation >= failed.scope.generation
         )
-    return False
+    return _coverage_obsolete(failed, binding)
+
+
+def _coverage_obsolete(
+    failed: _FailedRevocation,
+    binding: ConsentBinding,
+) -> bool:
+    risk = failed.risk
+    if not isinstance(risk, CoverageRisk):
+        return False
+    session_generation = binding.credential_session_generation
+    if session_generation is not None:
+        return bool(
+            failed.backend is ConsentBackend.MEMORY
+            and risk.through_session_generation is not None
+            and session_generation > risk.through_session_generation
+            and risk.through_credential_generation is not None
+        )
+    credential_generation = binding.credential_generation
+    return bool(
+        credential_generation is not None
+        and risk.through_credential_generation is not None
+        and credential_generation > risk.through_credential_generation
+        and (
+            failed.backend is ConsentBackend.PERSISTENT
+            or risk.through_session_generation is not None
+        )
+    )
 
 
 def _recovery_covers(

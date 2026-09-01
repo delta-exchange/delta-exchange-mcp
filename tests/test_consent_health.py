@@ -46,6 +46,15 @@ def _failed_persistent_revocation() -> ConsentRevocationError:
     )
 
 
+def _failed_memory_revocation() -> ConsentRevocationError:
+    return ConsentRevocationError(
+        "memory consent backend is unavailable",
+        failed_backend=ConsentBackend.MEMORY,
+        written=frozenset(),
+        checked=frozenset(),
+    )
+
+
 def test_temporary_process_identity_does_not_expire_a_persistent_risk() -> None:
     denied = _persistent_binding("Codex", 1)
     other = _persistent_binding("Claude", 1)
@@ -56,7 +65,7 @@ def test_temporary_process_identity_does_not_expire_a_persistent_risk() -> None:
     health.revocation_failed(
         _failed_persistent_revocation(),
         scope,
-        IdentityRisk(denied.identity),
+        {ConsentBackend.PERSISTENT: IdentityRisk(denied.identity)},
     )
     health.direct_write_succeeded(ConsentBackend.PERSISTENT, other)
     health.expire(0, temporary)
@@ -78,7 +87,7 @@ def test_environment_retry_recovers_a_prior_identity_risk() -> None:
     health.revocation_failed(
         _failed_persistent_revocation(),
         scope,
-        IdentityRisk(denied.identity),
+        {ConsentBackend.PERSISTENT: IdentityRisk(denied.identity)},
     )
     health.revocation_succeeded(
         frozenset(),
@@ -93,6 +102,7 @@ def test_environment_retry_recovers_a_prior_identity_risk() -> None:
 
 def test_new_stored_generation_expires_coverage_after_a_process_override() -> None:
     successor = _persistent_binding("", 1)
+    other = _persistent_binding("Claude", 1)
     temporary = _process_binding("Codex", 1)
     health = ConsentHealth(_backend_for)
     scope = EnvironmentRevocationScope("india_prod")
@@ -100,9 +110,9 @@ def test_new_stored_generation_expires_coverage_after_a_process_override() -> No
     health.revocation_failed(
         _failed_persistent_revocation(),
         scope,
-        CoverageRisk(0, 0),
+        {ConsentBackend.PERSISTENT: CoverageRisk(0, 0)},
     )
-    health.direct_write_succeeded(ConsentBackend.PERSISTENT, successor)
+    health.direct_write_succeeded(ConsentBackend.PERSISTENT, other)
     health.expire(0, temporary)
 
     assert health.available(ConsentBackend.PERSISTENT, successor) is False
@@ -115,15 +125,40 @@ def test_new_stored_generation_expires_coverage_after_a_process_override() -> No
 
 def test_unbounded_coverage_survives_credential_store_recovery() -> None:
     successor = _persistent_binding("", 1)
+    other = _persistent_binding("Claude", 1)
     health = ConsentHealth(_backend_for)
 
     health.revocation_failed(
         _failed_persistent_revocation(),
         EnvironmentRevocationScope("india_prod"),
-        CoverageRisk(0),
+        {ConsentBackend.PERSISTENT: CoverageRisk(0)},
     )
-    health.direct_write_succeeded(ConsentBackend.PERSISTENT, successor)
+    health.direct_write_succeeded(ConsentBackend.PERSISTENT, other)
     health.expire(0, successor)
 
     assert health.available(ConsentBackend.PERSISTENT, successor) is False
     assert health.unavailable is True
+
+
+def test_exact_write_proof_does_not_clear_unbounded_coverage() -> None:
+    proven = _process_binding("Codex", 1)
+    other = _process_binding("Claude", 1)
+    stored = _persistent_binding("", 1)
+    health = ConsentHealth(_backend_for)
+    scope = EnvironmentRevocationScope("india_prod")
+    risks = {ConsentBackend.MEMORY: CoverageRisk(0, None, 0)}
+
+    health.revocation_failed(_failed_memory_revocation(), scope, risks)
+    health.direct_write_succeeded(ConsentBackend.MEMORY, proven)
+    health.expire(0, proven)
+
+    assert health.available(ConsentBackend.MEMORY, proven) is True
+    assert health.available(ConsentBackend.MEMORY, other) is False
+    assert health.available(ConsentBackend.MEMORY, stored) is False
+    assert health.unavailable is True
+
+    health.revocation_failed(_failed_memory_revocation(), scope, risks)
+    health.direct_write_succeeded(ConsentBackend.MEMORY, other)
+
+    assert health.available(ConsentBackend.MEMORY, proven) is False
+    assert health.available(ConsentBackend.MEMORY, other) is True

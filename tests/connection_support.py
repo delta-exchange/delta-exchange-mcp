@@ -122,3 +122,41 @@ def assert_place_order_blocked(
     with pytest.raises(ToolError, match="trading was disabled"):
         asyncio.run(invoke())
     assert mutations == []
+
+
+def assert_place_order_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+    connection: ConnectionService,
+    final_check: Callable[[], bool],
+) -> None:
+    gate = trading.TradeGate()
+    mcp = MCPServer("allowed-place-order")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(final_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    asyncio.run(invoke())
+    assert mutations == ["/orders"]
