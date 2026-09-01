@@ -18,6 +18,8 @@ from delta_exchange_mcp import setup, store
 from delta_exchange_mcp.auth import connection as connection_mod
 from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.auth.consent import (
+    ConsentBackend,
+    ConsentRevocationError,
     ConsentStorageError,
     ConsentStore,
     MemoryConsentBackend,
@@ -27,6 +29,7 @@ from delta_exchange_mcp.auth.store import (
     CredentialSource,
     CredentialState,
     CredentialStore,
+    CredentialStoreError,
     MetadataError,
     MemoryMetadata,
     MemorySecretBackend,
@@ -977,6 +980,441 @@ def test_failed_disable_blocks_trading_but_preserves_reads(
     assert reads == [("/tickers/BTCUSD", False), ("/wallet/balances", True)]
 
 
+@pytest.mark.parametrize(
+    "persistent",
+    [True, False],
+    ids=["persistent-backend", "memory-backend"],
+)
+def test_failed_disable_stays_denied_after_another_binding_recovers_backend(
+    monkeypatch,
+    persistent: bool,
+) -> None:
+    connection = service(verified, persistent=persistent)
+    connection.credentials.replace("india_prod", "key", "secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    action(connection, "Codex", "consent", arguments)
+    action(connection, "Claude", "consent", arguments)
+    captured = asyncio.run(connection.access_state(context("Codex")))
+    original_disable = connection.consent.disable
+
+    def fail_codex(binding, **kwargs):
+        if binding.client_name == "Codex":
+            raise ConsentStorageError("Codex consent backend is read-only")
+        return original_disable(binding, **kwargs)
+
+    monkeypatch.setattr(connection.consent, "disable", fail_codex)
+    failed = action(
+        connection,
+        "Codex",
+        "consent",
+        {**arguments, "enabled": False},
+    )
+    monkeypatch.setattr(connection.consent, "disable", original_disable)
+    other = action(
+        connection,
+        "Claude",
+        "consent",
+        {**arguments, "enabled": False},
+    )
+
+    current = asyncio.run(connection.access_state(context("Codex")))
+    status = connection.status(context("Codex"))
+    assert failed.content["status"] == "rejected"
+    assert other.content["status"] == "disabled"
+    assert captured.final_trading_check() is False
+    assert current.trading_enabled is False
+    assert status["trading"]["enabled"] is False
+    assert status["consent_error"] == "consent_store_unavailable"
+
+    gate = trading.TradeGate()
+    mcp = MCPServer("same-backend-failed-disable")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(captured.final_trading_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    with pytest.raises(ToolError, match="trading was disabled"):
+        asyncio.run(invoke())
+    assert mutations == []
+
+    recovered = action(
+        connection,
+        "Codex",
+        "consent",
+        {**arguments, "enabled": False},
+    )
+    reenabled = action(connection, "Codex", "consent", arguments)
+    allowed = asyncio.run(connection.access_state(context("Codex")))
+
+    assert recovered.content["status"] == "disabled"
+    assert reenabled.content["status"] == "enabled"
+    assert allowed.trading_enabled is True
+    assert allowed.final_trading_check() is True
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+@pytest.mark.parametrize(
+    "persistent",
+    [True, False],
+    ids=["persistent-backend", "memory-backend"],
+)
+def test_credential_rotation_drops_an_obsolete_binding_denial(
+    monkeypatch,
+    persistent: bool,
+) -> None:
+    connection = service(verified, persistent=persistent)
+    connection.credentials.replace("india_prod", "old-key", "old-secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    original_enable = connection.consent.enable
+
+    def fail_enable(*args, **kwargs):
+        raise ConsentStorageError("consent backend is read-only")
+
+    monkeypatch.setattr(connection.consent, "enable", fail_enable)
+    failed = action(connection, "Codex", "consent", arguments)
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    rotated = action(
+        connection,
+        "Codex",
+        "credentials",
+        {
+            "operation": "replace",
+            "environment": "india_prod",
+            "api_key": "new-key",
+            "api_secret": "new-secret",
+        },
+    )
+    enabled = action(
+        connection,
+        "Codex",
+        "consent",
+        arguments,
+        rotated.revision,
+    )
+
+    assert failed.content["status"] == "rejected"
+    assert rotated.content["status"] == "saved"
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+def test_failed_environment_revocation_survives_backend_recovery(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    action(connection, "Codex", "consent", arguments)
+    action(connection, "Claude", "consent", arguments)
+    captured = asyncio.run(connection.access_state(context("Codex")))
+    original_revoke = connection.consent.revoke_environment
+
+    def fail_prod(environment: str) -> frozenset[ConsentBackend]:
+        if environment == "india_prod":
+            raise ConsentRevocationError(
+                "persistent consent metadata is read-only",
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(),
+                checked=frozenset({ConsentBackend.MEMORY}),
+            )
+        return original_revoke(environment)
+
+    monkeypatch.setattr(connection.consent, "revoke_environment", fail_prod)
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(connection.consent, "revoke_environment", original_revoke)
+    recovered_backend = action(
+        connection,
+        "Claude",
+        "consent",
+        {**arguments, "enabled": False},
+    )
+
+    current = asyncio.run(connection.access_state(context("Codex")))
+    assert failed.content["status"] == "rejected"
+    assert recovered_backend.content["status"] == "disabled"
+    assert captured.final_trading_check() is False
+    assert current.trading_enabled is False
+    assert connection.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    gate = trading.TradeGate()
+    mcp = MCPServer("failed-environment-revocation")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(captured.final_trading_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    with pytest.raises(ToolError, match="trading was disabled"):
+        asyncio.run(invoke())
+    assert mutations == []
+
+    recovered_scope = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+
+    assert recovered_scope.content["status"] == "selected"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+def test_successful_empty_environment_revocation_clears_failed_scope(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    original_revoke = connection.consent.revoke_environment
+
+    def fail_testnet(environment: str) -> frozenset[ConsentBackend]:
+        if environment == "india_testnet":
+            raise ConsentRevocationError(
+                "persistent consent metadata is read-only",
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(),
+                checked=frozenset({ConsentBackend.MEMORY}),
+            )
+        return original_revoke(environment)
+
+    monkeypatch.setattr(connection.consent, "revoke_environment", fail_testnet)
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(connection.consent, "revoke_environment", original_revoke)
+    enabled = action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+
+    assert failed.content["status"] == "rejected"
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Codex"))["consent_error"] == (
+        "consent_store_unavailable"
+    )
+
+    recovered = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+
+    assert recovered.content["status"] == "selected"
+    assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+def test_environment_generation_drops_denials_after_active_binding_was_lost(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    original_enable = connection.consent.enable
+
+    def fail_enable(*args, **kwargs):
+        raise ConsentStorageError("persistent consent metadata is read-only")
+
+    monkeypatch.setattr(connection.consent, "enable", fail_enable)
+    failed = action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
+    )
+    monkeypatch.setattr(connection.consent, "enable", original_enable)
+    connection._active_binding = None
+
+    assert store.write({"DELTA_MCP_ENV": "india_testnet"}) is None
+    enabled = action(
+        connection,
+        "Claude",
+        "consent",
+        {"environment": "india_testnet", "enabled": True},
+    )
+
+    assert failed.content["status"] == "rejected"
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Claude"))["consent_error"] == ""
+
+
+def test_environment_scope_expires_after_active_binding_was_unavailable(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    original_revoke_environment = connection.consent.revoke_environment
+
+    def fail_prod(environment: str) -> frozenset[ConsentBackend]:
+        if environment == "india_prod":
+            raise ConsentRevocationError(
+                "persistent consent metadata is read-only",
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(),
+                checked=frozenset({ConsentBackend.MEMORY}),
+            )
+        return original_revoke_environment(environment)
+
+    monkeypatch.setattr(connection.consent, "revoke_environment", fail_prod)
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(
+        connection.consent,
+        "revoke_environment",
+        original_revoke_environment,
+    )
+    original_resolve = connection.credentials.resolve
+    original_revoke_identity = connection.consent.revoke_identity
+
+    def fail_resolve(*args, **kwargs):
+        raise CredentialStoreError("credential metadata is temporarily unavailable")
+
+    def fail_identity(*args, **kwargs):
+        raise ConsentRevocationError(
+            "persistent consent metadata is read-only",
+            failed_backend=ConsentBackend.PERSISTENT,
+            written=frozenset(),
+            checked=frozenset({ConsentBackend.MEMORY}),
+        )
+
+    monkeypatch.setattr(connection.credentials, "resolve", fail_resolve)
+    monkeypatch.setattr(connection.consent, "revoke_identity", fail_identity)
+    connection._reconcile()
+    monkeypatch.setattr(connection.credentials, "resolve", original_resolve)
+    monkeypatch.setattr(connection.consent, "revoke_identity", original_revoke_identity)
+
+    assert store.write({"DELTA_MCP_ENV": "india_testnet"}) is None
+    enabled = action(
+        connection,
+        "Claude",
+        "consent",
+        {"environment": "india_testnet", "enabled": True},
+    )
+
+    assert failed.content["status"] == "rejected"
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Claude"))["consent_error"] == ""
+
+
+def test_environment_generation_expires_a_failed_disconnect_scope(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "prod-key", "prod-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    original_revoke = connection.consent.revoke_before
+
+    def fail_revoke(*args, **kwargs):
+        raise ConsentRevocationError(
+            "persistent consent metadata is read-only",
+            failed_backend=ConsentBackend.PERSISTENT,
+            written=frozenset(),
+            checked=frozenset({ConsentBackend.MEMORY}),
+        )
+
+    monkeypatch.setattr(connection.consent, "revoke_before", fail_revoke)
+    disconnected = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "disconnect", "environment": "india_prod"},
+    )
+    monkeypatch.setattr(connection.consent, "revoke_before", original_revoke)
+
+    assert store.write({"DELTA_MCP_ENV": "india_testnet"}) is None
+    enabled = action(
+        connection,
+        "Claude",
+        "consent",
+        {"environment": "india_testnet", "enabled": True},
+    )
+
+    assert disconnected.content["status"] == "disconnected"
+    assert enabled.content["status"] == "enabled"
+    assert connection.status(context("Claude"))["consent_error"] == ""
+
+
 @pytest.mark.parametrize("disable_fails", [False, True], ids=["disabled", "failed"])
 def test_consent_change_during_final_check_blocks_the_mutation(
     monkeypatch,
@@ -1056,9 +1494,7 @@ def test_consent_change_during_final_check_blocks_the_mutation(
             "consent",
             {**arguments, "enabled": False},
         )
-        assert result.content["status"] == (
-            "rejected" if disable_fails else "disabled"
-        )
+        assert result.content["status"] == ("rejected" if disable_fails else "disabled")
     finally:
         release.set()
         thread.join(5)

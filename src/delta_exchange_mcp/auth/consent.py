@@ -49,10 +49,12 @@ class ConsentRevocationError(ConsentStorageError):
         *,
         failed_backend: ConsentBackend,
         written: frozenset[ConsentBackend],
+        checked: frozenset[ConsentBackend] = frozenset(),
     ) -> None:
         super().__init__(message)
         self.failed_backend = failed_backend
         self.written = written
+        self.checked = checked
 
 
 @dataclass(frozen=True)
@@ -402,6 +404,14 @@ class ConsentStore:
             else ConsentBackend.MEMORY
         )
 
+    @property
+    def backends(self) -> frozenset[ConsentBackend]:
+        """Return the backends checked by one successful broad revocation."""
+        backends = {ConsentBackend.MEMORY}
+        if self._secure_backend_available:
+            backends.add(ConsentBackend.PERSISTENT)
+        return frozenset(backends)
+
     def enable(
         self,
         binding: ConsentBinding,
@@ -490,15 +500,18 @@ class ConsentStore:
         )
 
     def _revoke(self, matches: Callable[[_Record], bool]) -> frozenset[ConsentBackend]:
+        checked: set[ConsentBackend] = set()
         written: set[ConsentBackend] = set()
         try:
             if self._memory_backend.revoke(matches):
                 written.add(ConsentBackend.MEMORY)
+            checked.add(ConsentBackend.MEMORY)
         except ConsentStorageError as exc:
             raise ConsentRevocationError(
                 str(exc),
                 failed_backend=ConsentBackend.MEMORY,
                 written=frozenset(written),
+                checked=frozenset(checked),
             ) from exc
         if not self._secure_backend_available:
             return frozenset(written)
@@ -518,6 +531,7 @@ class ConsentStore:
                 str(exc),
                 failed_backend=ConsentBackend.PERSISTENT,
                 written=frozenset(written),
+                checked=frozenset(checked),
             ) from exc
         return frozenset(written)
 
