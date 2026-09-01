@@ -20,6 +20,8 @@ SCHEMA_VERSION = 1
 SUPPORTED_ENVIRONMENTS = frozenset({"india_prod", "india_testnet"})
 logger = logging.getLogger(__name__)
 
+type ConsentIdentity = tuple[str, int | None, int | None, int | None, int]
+
 
 class ConsentBackend(StrEnum):
     """The storage backend selected for one consent binding."""
@@ -108,7 +110,7 @@ class ConsentBinding:
             raise ValueError("environment_generation must be a non-negative integer")
 
     @property
-    def identity(self) -> tuple[str, int | None, int | None, int | None, int]:
+    def identity(self) -> ConsentIdentity:
         """Credential and environment selection shared by client approvals."""
         return (
             self.environment,

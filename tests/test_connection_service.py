@@ -3,7 +3,7 @@
 import asyncio
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -19,6 +19,7 @@ from delta_exchange_mcp.auth import connection as connection_mod
 from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.auth.consent import (
     ConsentBackend,
+    ConsentBinding,
     ConsentRevocationError,
     ConsentStorageError,
     ConsentStore,
@@ -95,6 +96,45 @@ async def verified(
         reachable=True,
         detail="42",
     )
+
+
+def _assert_place_order_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    connection: ConnectionService,
+    final_check: Callable[[], bool],
+) -> None:
+    gate = trading.TradeGate()
+    mcp = MCPServer("blocked-place-order")
+    trading.register(mcp, connection.client, None, gate)
+    mutations: list[str] = []
+
+    async def post(
+        path: str,
+        payload: dict[str, Any],
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        del payload, auth
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(connection.client, "post", post)
+
+    async def invoke() -> object:
+        gate.bind_final_check(final_check)
+        return await mcp.call_tool(
+            "place_order",
+            {
+                "product_id": 27,
+                "size": 1,
+                "side": "buy",
+                "order_type": "market_order",
+            },
+        )
+
+    with pytest.raises(ToolError, match="trading was disabled"):
+        asyncio.run(invoke())
+    assert mutations == []
 
 
 @pytest.mark.parametrize(
@@ -918,38 +958,11 @@ def test_failed_disable_blocks_trading_but_preserves_reads(
     assert status["trading"]["enabled"] is False
     assert status["consent_error"] == "consent_store_unavailable"
 
-    gate = trading.TradeGate()
-    mcp = MCPServer("failed-disable")
-    trading.register(mcp, connection.client, None, gate)
-    mutations: list[str] = []
-
-    async def post(
-        path: str,
-        payload: dict[str, Any],
-        *,
-        auth: bool = False,
-    ) -> dict[str, Any]:
-        del payload, auth
-        mutations.append(path)
-        return {}
-
-    monkeypatch.setattr(connection.client, "post", post)
-
-    async def invoke() -> object:
-        gate.bind_final_check(captured.final_trading_check)
-        return await mcp.call_tool(
-            "place_order",
-            {
-                "product_id": 27,
-                "size": 1,
-                "side": "buy",
-                "order_type": "market_order",
-            },
-        )
-
-    with pytest.raises(ToolError, match="trading was disabled"):
-        asyncio.run(invoke())
-    assert mutations == []
+    _assert_place_order_blocked(
+        monkeypatch,
+        connection,
+        captured.final_trading_check,
+    )
 
     reads: list[tuple[str, bool]] = []
 
@@ -1030,38 +1043,11 @@ def test_failed_disable_stays_denied_after_another_binding_recovers_backend(
     assert status["trading"]["enabled"] is False
     assert status["consent_error"] == "consent_store_unavailable"
 
-    gate = trading.TradeGate()
-    mcp = MCPServer("same-backend-failed-disable")
-    trading.register(mcp, connection.client, None, gate)
-    mutations: list[str] = []
-
-    async def post(
-        path: str,
-        payload: dict[str, Any],
-        *,
-        auth: bool = False,
-    ) -> dict[str, Any]:
-        del payload, auth
-        mutations.append(path)
-        return {}
-
-    monkeypatch.setattr(connection.client, "post", post)
-
-    async def invoke() -> object:
-        gate.bind_final_check(captured.final_trading_check)
-        return await mcp.call_tool(
-            "place_order",
-            {
-                "product_id": 27,
-                "size": 1,
-                "side": "buy",
-                "order_type": "market_order",
-            },
-        )
-
-    with pytest.raises(ToolError, match="trading was disabled"):
-        asyncio.run(invoke())
-    assert mutations == []
+    _assert_place_order_blocked(
+        monkeypatch,
+        connection,
+        captured.final_trading_check,
+    )
 
     recovered = action(
         connection,
@@ -1178,38 +1164,11 @@ def test_failed_environment_revocation_survives_backend_recovery(
         "consent_store_unavailable"
     )
 
-    gate = trading.TradeGate()
-    mcp = MCPServer("failed-environment-revocation")
-    trading.register(mcp, connection.client, None, gate)
-    mutations: list[str] = []
-
-    async def post(
-        path: str,
-        payload: dict[str, Any],
-        *,
-        auth: bool = False,
-    ) -> dict[str, Any]:
-        del payload, auth
-        mutations.append(path)
-        return {}
-
-    monkeypatch.setattr(connection.client, "post", post)
-
-    async def invoke() -> object:
-        gate.bind_final_check(captured.final_trading_check)
-        return await mcp.call_tool(
-            "place_order",
-            {
-                "product_id": 27,
-                "size": 1,
-                "side": "buy",
-                "order_type": "market_order",
-            },
-        )
-
-    with pytest.raises(ToolError, match="trading was disabled"):
-        asyncio.run(invoke())
-    assert mutations == []
+    _assert_place_order_blocked(
+        monkeypatch,
+        connection,
+        captured.final_trading_check,
+    )
 
     recovered_scope = action(
         connection,
@@ -1220,6 +1179,145 @@ def test_failed_environment_revocation_survives_backend_recovery(
 
     assert recovered_scope.content["status"] == "selected"
     assert connection.status(context("Codex"))["consent_error"] == ""
+
+
+def test_environment_revocation_expires_for_an_external_credential_successor(
+    monkeypatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_prod", "old-key", "old-secret")
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    action(connection, "Codex", "consent", arguments)
+    action(connection, "Claude", "consent", arguments)
+    captured = asyncio.run(connection.access_state(context("Codex")))
+    original_environment_revoke = connection.consent.revoke_environment
+
+    def fail_environment(environment: str) -> frozenset[ConsentBackend]:
+        if environment == "india_prod":
+            raise ConsentRevocationError(
+                "persistent consent metadata is read-only",
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(),
+                checked=frozenset({ConsentBackend.MEMORY}),
+            )
+        return original_environment_revoke(environment)
+
+    monkeypatch.setattr(
+        connection.consent,
+        "revoke_environment",
+        fail_environment,
+    )
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(
+        connection.consent,
+        "revoke_environment",
+        original_environment_revoke,
+    )
+    recovered_backend = action(
+        connection,
+        "Claude",
+        "consent",
+        {**arguments, "enabled": False},
+    )
+    same_identity = asyncio.run(connection.access_state(context("Codex")))
+
+    assert failed.content["status"] == "rejected"
+    assert recovered_backend.content["status"] == "disabled"
+    assert same_identity.trading_enabled is False
+    assert captured.final_trading_check() is False
+    assert store.environment_state("india_prod") == ("india_prod", 0)
+
+    connection.credentials.replace("india_prod", "new-key", "new-secret")
+    original_identity_revoke = connection.consent.revoke_identity
+
+    def fail_identity(binding: ConsentBinding) -> frozenset[ConsentBackend]:
+        del binding
+        raise ConsentRevocationError(
+            "persistent consent metadata is read-only",
+            failed_backend=ConsentBackend.PERSISTENT,
+            written=frozenset(),
+            checked=frozenset({ConsentBackend.MEMORY}),
+        )
+
+    monkeypatch.setattr(connection.consent, "revoke_identity", fail_identity)
+    rotated = connection.status(context("Codex"))
+    monkeypatch.setattr(
+        connection.consent,
+        "revoke_identity",
+        original_identity_revoke,
+    )
+    enabled = action(connection, "Codex", "consent", arguments)
+    successor = asyncio.run(connection.access_state(context("Codex")))
+
+    assert rotated["trading"]["enabled"] is False
+    assert rotated["consent_error"] == "consent_store_unavailable"
+    assert enabled.content["status"] == "enabled"
+    assert successor.trading_enabled is True
+    assert successor.final_trading_check() is True
+    assert captured.final_trading_check() is False
+    assert connection.status(context("Codex"))["consent_error"] == ""
+    assert store.environment_state("india_prod") == ("india_prod", 0)
+
+
+def test_environment_revocation_expires_for_the_first_external_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = service(verified)
+    connection.credentials.replace("india_testnet", "test-key", "test-secret")
+    original_environment_revoke = connection.consent.revoke_environment
+
+    def fail_prod(environment: str) -> frozenset[ConsentBackend]:
+        if environment == "india_prod":
+            raise ConsentRevocationError(
+                "persistent consent metadata is read-only",
+                failed_backend=ConsentBackend.PERSISTENT,
+                written=frozenset(),
+                checked=frozenset({ConsentBackend.MEMORY}),
+            )
+        return original_environment_revoke(environment)
+
+    monkeypatch.setattr(connection.consent, "revoke_environment", fail_prod)
+    failed = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_testnet"},
+    )
+    monkeypatch.setattr(
+        connection.consent,
+        "revoke_environment",
+        original_environment_revoke,
+    )
+    credential = connection.credentials.replace(
+        "india_prod",
+        "new-key",
+        "new-secret",
+    )
+    arguments = {
+        "environment": "india_prod",
+        "enabled": True,
+        "acknowledged": True,
+    }
+    enabled = action(connection, "Codex", "consent", arguments)
+    current = asyncio.run(connection.access_state(context("Codex")))
+
+    assert failed.content["status"] == "rejected"
+    assert credential.generation == 1
+    assert enabled.content["status"] == "enabled"
+    assert current.trading_enabled is True
+    assert current.final_trading_check() is True
+    assert connection.status(context("Codex"))["consent_error"] == ""
+    assert store.environment_state("india_prod") == ("india_prod", 0)
 
 
 def test_successful_empty_environment_revocation_clears_failed_scope(
