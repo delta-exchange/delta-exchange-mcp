@@ -14,8 +14,8 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +35,7 @@ _REPORT_PRIVACY_ERROR = (
     "owner-only evaluation reports are unavailable on Windows; "
     "run again with --no-report"
 )
+_TEMP_NAME_ATTEMPTS = 128
 
 
 def _private_reports_supported() -> bool:
@@ -46,29 +47,51 @@ def _require_private_reports() -> None:
         raise RuntimeError(_REPORT_PRIVACY_ERROR)
 
 
+def _open_private_temp(directory_fd: int, target_name: str) -> tuple[int, str]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _ in range(_TEMP_NAME_ATTEMPTS):
+        temp_name = f".{target_name}.{secrets.token_hex(16)}.tmp"
+        try:
+            return os.open(temp_name, flags, 0o600, dir_fd=directory_fd), temp_name
+        except FileExistsError:
+            continue
+    raise FileExistsError("could not create a unique evaluation report temporary file")
+
+
 def _write_private_report(path: Path, contents: str) -> None:
     """Write one report without exposing account data to other local users."""
     _require_private_reports()
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temp_path = Path(temp_name)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    fd = -1
+    temp_name = None
     replace_succeeded = False
     try:
+        fd, temp_name = _open_private_temp(directory_fd, path.name)
         os.fchmod(fd, 0o600)
         report = os.fdopen(fd, "w", encoding="utf-8")
         fd = -1
         with report:
             report.write(contents)
-        os.replace(temp_path, path)
+        os.replace(
+            temp_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
         replace_succeeded = True
     finally:
         try:
             if fd != -1:
                 os.close(fd)
         finally:
-            if not replace_succeeded:
-                temp_path.unlink(missing_ok=True)
+            try:
+                if temp_name is not None and not replace_succeeded:
+                    try:
+                        os.unlink(temp_name, dir_fd=directory_fd)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                os.close(directory_fd)
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,9 +156,7 @@ async def run_mode_group(
         }
         for case in cases:
             missing = {
-                expected.name
-                for turn in case.turns
-                for expected in turn.expect
+                expected.name for turn in case.turns for expected in turn.expect
             } - available
             if missing:
                 results.append(
