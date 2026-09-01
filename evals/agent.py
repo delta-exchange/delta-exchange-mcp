@@ -65,6 +65,16 @@ def mutating_tools(tools: Sequence[Tool]) -> frozenset[str]:
     )
 
 
+def blocked_tools(tools: Sequence[Tool]) -> frozenset[str]:
+    """Return tools that are neither explicitly read-only nor protected by dry-run."""
+    return frozenset(
+        tool.name
+        for tool in tools
+        if (tool.annotations is None or tool.annotations.read_only_hint is not True)
+        and "dry_run" not in (tool.input_schema.get("properties") or {})
+    )
+
+
 @dataclass(frozen=True)
 class ToolCall:
     name: str
@@ -150,7 +160,13 @@ async def _call(
     mutating: frozenset[str],
     name: str,
     args: dict[str, Any],
+    *,
+    blocked: frozenset[str] = frozenset(),
 ) -> ToolCall:
+    if name in blocked:
+        raise RuntimeError(
+            f"{name} is not read-only and has no dry_run; refusing to run it in evaluations"
+        )
     wire_args = {**args, "dry_run": True} if name in mutating else args
     res = await session.call_tool(name, wire_args)
     parsed = _parse_result(res)
@@ -185,6 +201,7 @@ async def run_case(
 ) -> Transcript:
     tool_list = (await session.list_tools()).tools
     mutating = mutating_tools(tool_list)
+    blocked = blocked_tools(tool_list)
     anthropic_tools = [
         {
             "name": tool.name,
@@ -216,7 +233,13 @@ async def run_case(
                 break
             results = []
             for block in tool_uses:
-                call = await _call(session, mutating, block.name, block.input)
+                call = await _call(
+                    session,
+                    mutating,
+                    block.name,
+                    block.input,
+                    blocked=blocked,
+                )
                 calls.append(call)
                 results.append(
                     {
