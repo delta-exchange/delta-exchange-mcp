@@ -6,7 +6,7 @@ import json
 import os
 import stat
 import sys
-from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -100,8 +100,8 @@ def test_existing_reader_cannot_observe_replacement_report(tmp_path) -> None:
 def test_failed_report_replace_removes_private_temp_file(tmp_path, monkeypatch) -> None:
     path = tmp_path / "report.json"
 
-    def fail_replace(source, destination) -> None:
-        del source, destination
+    def fail_replace(source, destination, **kwargs) -> None:
+        del source, destination, kwargs
         raise OSError("replace failed")
 
     monkeypatch.setattr(run_mod.os, "replace", fail_replace)
@@ -120,10 +120,17 @@ def test_successful_report_replace_preserves_reused_temp_path(
     real_replace = run_mod.os.replace
     recreated_paths = []
 
-    def replace_and_recreate(source, destination) -> None:
-        real_replace(source, destination)
-        recreated_path = Path(source)
-        recreated_path.write_text("unrelated concurrent file")
+    def replace_and_recreate(source, destination, **kwargs) -> None:
+        real_replace(source, destination, **kwargs)
+        recreated_path = tmp_path / source
+        recreated_fd = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=kwargs["src_dir_fd"],
+        )
+        with os.fdopen(recreated_fd, "w", encoding="utf-8") as recreated_file:
+            recreated_file.write("unrelated concurrent file")
         recreated_paths.append(recreated_path)
 
     monkeypatch.setattr(run_mod.os, "replace", replace_and_recreate)
@@ -133,6 +140,51 @@ def test_successful_report_replace_preserves_reused_temp_path(
     assert path.read_text() == "private account data"
     assert len(recreated_paths) == 1
     assert recreated_paths[0].read_text() == "unrelated concurrent file"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX owner-only mode")
+def test_parent_symlink_retarget_cannot_redirect_report(tmp_path, monkeypatch) -> None:
+    original_parent = tmp_path / "original"
+    redirected_parent = tmp_path / "redirected"
+    original_parent.mkdir()
+    redirected_parent.mkdir()
+    linked_parent = tmp_path / "reports"
+    linked_parent.symlink_to(original_parent, target_is_directory=True)
+    report = linked_parent / "report.json"
+    temp_created = threading.Event()
+    parent_retargeted = threading.Event()
+    failures = []
+    real_fchmod = run_mod.os.fchmod
+
+    def pause_after_temp_creation(fd, mode) -> None:
+        real_fchmod(fd, mode)
+        temp_created.set()
+        if not parent_retargeted.wait(timeout=5):
+            raise TimeoutError("parent symlink was not retargeted")
+
+    monkeypatch.setattr(run_mod.os, "fchmod", pause_after_temp_creation)
+
+    def write_report() -> None:
+        try:
+            run_mod._write_private_report(report, "private account data")
+        except BaseException as exc:
+            failures.append(exc)
+
+    writer = threading.Thread(target=write_report)
+    writer.start()
+    assert temp_created.wait(timeout=5)
+    linked_parent.unlink()
+    linked_parent.symlink_to(redirected_parent, target_is_directory=True)
+    redirected_report = redirected_parent / report.name
+    redirected_report.write_text("unrelated concurrent file")
+    parent_retargeted.set()
+    writer.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert failures == []
+    assert (original_parent / report.name).read_text() == "private account data"
+    assert redirected_report.read_text() == "unrelated concurrent file"
+    assert not list(original_parent.glob(f".{report.name}.*.tmp"))
 
 
 @pytest.mark.parametrize("writer", ["write_report", "_write_private_report"])
