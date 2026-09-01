@@ -19,14 +19,16 @@ class Element {
 
   querySelector(selector) {
     const radios = this.children.flatMap((label) => label.children);
-    if (selector.includes(":checked")) return radios.find((radio) => radio.checked);
+    // A real radio group clears the prior choice. This small DOM keeps plain objects, so
+    // prefer the last checked radio to model the programmatic selection made by render().
+    if (selector.includes(":checked")) return radios.findLast((radio) => radio.checked);
     const value = selector.match(/input\[value="([^"]+)"\]/);
     assert.ok(value, `Unexpected selector: ${selector}`);
     return radios.find((radio) => radio.value === value[1]);
   }
 }
 
-async function run(html, reconnect) {
+async function run(html, reconnect, devnet = false) {
   const script = html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)]
     .map((match) => [match[1], new Element()]));
@@ -48,14 +50,20 @@ async function run(html, reconnect) {
     },
   };
   let isConnected = !reconnect;
+  const activeEnvironment = devnet ? "india_devnet" : "india_prod";
   const connection = (enabled) => ({
-    environment: "india_prod",
+    environment: activeEnvironment,
     client_name: "Browser test",
     environments: {
       india_prod: {
-        active: true, connected: isConnected, validation_state: "verified",
+        active: !devnet, connected: !devnet && isConnected, validation_state: "verified",
         account_id: "test-account", credential_source: "operating_system",
-        reconnect_required: !isConnected,
+        reconnect_required: !devnet && !isConnected, browser_manageable: true,
+      },
+      india_devnet: {
+        active: devnet, connected: false, validation_state: "not_connected",
+        account_id: "", credential_source: "not_connected",
+        reconnect_required: false, browser_manageable: false,
       },
     },
     trading: { enabled },
@@ -86,6 +94,20 @@ async function run(html, reconnect) {
 
   vm.runInNewContext(script, { document, fetch });
   await new Promise(setImmediate);
+  if (devnet) {
+    assert.equal(elements.get("connection-state").textContent, "Not connected");
+    assert.equal(elements.get("storage-state").textContent, "not_connected");
+    assert.equal(elements.get("key").disabled, true);
+    assert.equal(elements.get("secret").disabled, true);
+    assert.equal(elements.get("show").disabled, true);
+    assert.equal(elements.get("connect").disabled, true);
+    assert.equal(elements.get("disconnect").disabled, true);
+    assert.equal(elements.get("dashboard").disabled, true);
+    const devnetLabel = elements.get("envs").children.find((label) =>
+      label.children.some((child) => child.value === "india_devnet"));
+    assert.equal(devnetLabel.hidden, false);
+    return;
+  }
   assert.equal(elements.get("reconnect-note").hidden, !reconnect);
   if (reconnect) {
     assert.equal(elements.get("connection-state").textContent, "Not connected");
@@ -119,6 +141,7 @@ async function main() {
   const html = fs.readFileSync(0, "utf8");
   await run(html, false);
   await run(html, true);
+  await run(html, false, true);
 }
 
 main().catch((error) => {

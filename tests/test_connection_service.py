@@ -595,9 +595,12 @@ def test_fixed_devnet_credentials_support_session_only_consent() -> None:
     assert connection.credential_error == ""
     assert status["environment"] == "india_devnet"
     assert status["credentials_configured"] is True
+    assert status["environments"]["india_prod"]["browser_manageable"] is True
+    assert status["environments"]["india_testnet"]["browser_manageable"] is True
     assert status["environments"]["india_devnet"] == {
         "connected": True,
         "active": True,
+        "browser_manageable": False,
         "credential_metadata_present": False,
         "credential_source": "process_environment",
         "reconnect_required": False,
