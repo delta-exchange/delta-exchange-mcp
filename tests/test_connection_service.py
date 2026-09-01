@@ -165,6 +165,23 @@ def test_rotation_disconnect_and_environment_round_trip_revoke_consent() -> None
     assert connection._status(client_name, "").as_dict()["trading"]["enabled"] is False
 
 
+def test_browser_can_return_from_shared_devnet_to_managed_environment() -> None:
+    store.path().write_text(
+        "DELTA_MCP_ENV=india_devnet\nDELTA_MCP_ENV_GENERATION=7\n"
+    )
+    connection = service(verified)
+
+    selected = action(
+        connection,
+        "Codex",
+        "credentials",
+        {"operation": "activate", "environment": "india_prod"},
+    )
+
+    assert selected.content["status"] == "selected"
+    assert store.environment_state("india_prod") == ("india_prod", 8)
+
+
 def test_two_services_serialize_environment_selection_with_page_cas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
