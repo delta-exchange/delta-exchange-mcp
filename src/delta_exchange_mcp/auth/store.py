@@ -276,6 +276,12 @@ class CredentialStore:
         """Read the revocation generation without accessing the keyring."""
         return self.metadata(environment).generation
 
+    def process_generation(self, environment: str) -> int:
+        """Return the current process-credential session generation."""
+        env = normalize_environment(environment)
+        with self._process_lock:
+            return self._process_generations.get(env, 0)
+
     def get(self, environment: str) -> Credential | None:
         """Read the active credential for an environment."""
         env = normalize_environment(environment)

@@ -78,6 +78,7 @@ class CoverageRisk:
 
     through_environment_generation: int
     through_credential_generation: int | None = None
+    through_session_generation: int | None = None
 
 
 type RevocationRisk = IdentityRisk | CoverageRisk
@@ -197,6 +198,7 @@ class ConsentHealth:
         self,
         environment_generation: int,
         binding: ConsentBinding | None,
+        retired_identity: ConsentIdentity | None = None,
     ) -> None:
         """Expire failures made obsolete by the current environment and identity."""
         self._denied_bindings = {
@@ -204,6 +206,7 @@ class ConsentHealth:
             for denied in self._denied_bindings
             if not (
                 denied.environment_generation < environment_generation
+                or denied.identity == retired_identity
                 or (
                     binding is not None
                     and denied.environment == binding.environment
@@ -214,7 +217,12 @@ class ConsentHealth:
         self._failed_revocations = {
             failed
             for failed in self._failed_revocations
-            if not _failure_obsolete(failed, environment_generation, binding)
+            if not _failure_obsolete(
+                failed,
+                environment_generation,
+                binding,
+                retired_identity,
+            )
         }
 
     def available(
@@ -287,8 +295,15 @@ def _failure_obsolete(
     failed: _FailedRevocation,
     environment_generation: int,
     binding: ConsentBinding | None,
+    retired_identity: ConsentIdentity | None,
 ) -> bool:
     if failed.risk.through_environment_generation < environment_generation:
+        return True
+    if (
+        retired_identity is not None
+        and isinstance(failed.risk, IdentityRisk)
+        and failed.risk.identity == retired_identity
+    ):
         return True
     if binding is None or binding.environment != failed.scope.environment:
         return False
@@ -298,6 +313,13 @@ def _failure_obsolete(
         failed.risk.through_credential_generation is not None
         and binding.credential_generation is not None
         and binding.credential_generation > failed.risk.through_credential_generation
+    ):
+        return True
+    if (
+        failed.risk.through_session_generation is not None
+        and binding.credential_session_generation is not None
+        and binding.credential_session_generation
+        > failed.risk.through_session_generation
     ):
         return True
     if isinstance(failed.scope, GenerationRevocationScope):
