@@ -37,6 +37,12 @@ class Session:
     async def tool_names(self):
         return {t.name for t in (await self.client.list_tools()).tools}
 
+    async def resource_uris(self) -> set[str]:
+        return {str(r.uri) for r in (await self.client.list_resources()).resources}
+
+    async def prompt_names(self) -> set[str]:
+        return {p.name for p in (await self.client.list_prompts()).prompts}
+
     async def call(self, name, **arguments):
         result = await self.client.call_tool(name, arguments)
         if result.structuredContent is not None:
@@ -53,6 +59,16 @@ class Session:
     def saw_tool_list_changed(self):
         return any(
             isinstance(n, types.ToolListChangedNotification) for n in self.notifications
+        )
+
+    def saw_resource_list_changed(self) -> bool:
+        return any(
+            isinstance(n, types.ResourceListChangedNotification) for n in self.notifications
+        )
+
+    def saw_prompt_list_changed(self) -> bool:
+        return any(
+            isinstance(n, types.PromptListChangedNotification) for n in self.notifications
         )
 
 
@@ -126,16 +142,17 @@ async def save(session, **overrides):
 # --- what the server promises at startup ---------------------------------------------
 
 
-async def test_the_server_declares_that_its_tool_list_can_change():
-    """Without this the notification is one a client was told never to expect.
+async def test_the_server_declares_that_its_catalogs_can_change():
+    """Without these flags the notifications contradict initialization.
 
-    A client reads `tools/list` once and re-reads it only when told the list changed, so
-    declaring `listChanged: false` and then sending the notification means the account
-    tools stay invisible and the restart is unavoidable — with nothing failing anywhere
-    to say so.
+    A client reads each list once and re-reads it only when told the list changed. If the
+    server declares `listChanged: false`, hot credential changes stay invisible even when
+    it sends a notification.
     """
     async with connected() as session:
         assert session.initialized.capabilities.tools.listChanged is True
+        assert session.initialized.capabilities.resources.listChanged is True
+        assert session.initialized.capabilities.prompts.listChanged is True
 
 
 async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
@@ -172,6 +189,46 @@ async def test_a_saved_key_makes_the_account_tools_reachable_without_a_restart(a
         after = await session.tool_names()
         assert "get_positions" in after
         assert "get_wallet_balances" in after
+
+
+async def test_a_saved_key_refreshes_skill_resources_prompts_and_tools(
+    accepted: None,
+) -> None:
+    async with connected() as session:
+        assert "skill://delta/pnl-analytics" not in await session.resource_uris()
+        assert "pnl_analytics" not in await session.prompt_names()
+        listed = await session.call("list_skills")
+        assert "pnl-analytics" not in {s["name"] for s in listed["skills"]}
+
+        await save(session)
+
+        assert session.saw_resource_list_changed()
+        assert session.saw_prompt_list_changed()
+        assert "skill://delta/pnl-analytics" in await session.resource_uris()
+        assert "pnl_analytics" in await session.prompt_names()
+        listed = await session.call("list_skills")
+        assert "pnl-analytics" in {s["name"] for s in listed["skills"]}
+
+
+async def test_external_key_removal_hides_account_skills_without_a_restart() -> None:
+    credentialled()
+    async with connected() as session:
+        await session.tool_names()
+        assert "skill://delta/pnl-analytics" in await session.resource_uris()
+        assert "pnl_analytics" in await session.prompt_names()
+
+        store.write({"DELTA_API_KEY": "", "DELTA_API_SECRET": ""})
+        status = await session.call("get_connection_status")
+
+        assert status["credentials_configured"] is False
+        assert "skill://delta/pnl-analytics" not in await session.resource_uris()
+        assert "pnl_analytics" not in await session.prompt_names()
+        assert session.saw_resource_list_changed()
+        assert session.saw_prompt_list_changed()
+        hidden = await session.client.call_tool(
+            "get_skill", {"name": "pnl-analytics"}
+        )
+        assert hidden.isError is True
 
 
 async def test_the_saved_message_leads_with_carrying_on_rather_than_restarting(accepted):

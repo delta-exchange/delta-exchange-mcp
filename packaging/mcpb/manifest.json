@@ -172,6 +172,10 @@
       "description": "Historical settlement prices for expired/settled derivatives."
     },
     {
+      "name": "get_skill",
+      "description": "The full text of a skill, or of one of its supporting files."
+    },
+    {
       "name": "get_ticker",
       "description": "Get 24h ticker (price, volume, OI, mark/spot) for one symbol."
     },
@@ -198,6 +202,10 @@
     {
       "name": "list_products",
       "description": "List tradable products on Delta Exchange with optional filters. Returns paginated result + meta cursors."
+    },
+    {
+      "name": "list_skills",
+      "description": "The procedures this server knows how to run, and when to use each."
     },
     {
       "name": "list_tickers",

@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
+from typing import Any
 
 import anyio
+import mcp.types as types
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
+from pydantic import AnyUrl
 
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials, debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import skills
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
@@ -66,6 +71,13 @@ Never ask for an API key or secret in the conversation, and never accept one sen
 message — anything sent that way is stored in the conversation and visible to you.
 get_connection_status reports whether a key is configured, which environment it points
 at, what this client may do now, what it may do after a restart, and whether one is due.
+
+This server ships skills: written procedures for the multi-step jobs people actually
+ask for, such as a full P&L review, a position risk check, or a funding carry scan.
+Before you answer any question about trading performance, open positions, risk, or
+funding, call list_skills, then get_skill on the match. The skill carries the method —
+which tools to call in which order, the formulas, and the output shape. Do not
+improvise a procedure a skill already defines.
 """
 
 
@@ -78,8 +90,11 @@ class DeltaMCP(FastMCP):
     """FastMCP with a supported pre-list hook for session-scoped entitlements."""
 
     def __init__(self) -> None:
-        self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = None
+        self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = (
+            None
+        )
         self.live_client: DeltaClient | None = None
+        self.skill_catalog: skills.Catalog | None = None
         super().__init__("delta-exchange", instructions=INSTRUCTIONS)
 
     def before_list_tools(
@@ -104,6 +119,46 @@ class DeltaMCP(FastMCP):
         if self.live_client is not None:
             await self.live_client.aclose()
 
+    async def list_resources(self) -> list[types.Resource]:
+        """List only skill resources allowed by the live credential state."""
+        resources = await super().list_resources()
+        if self.skill_catalog is None:
+            return resources
+        return [
+            resource
+            for resource in resources
+            if self.skill_catalog.allows_uri(str(resource.uri))
+        ]
+
+    async def read_resource(self, uri: AnyUrl | str) -> Iterable[ReadResourceContents]:
+        """Reject direct reads of skills hidden by the live credential state."""
+        if self.skill_catalog is not None and not self.skill_catalog.allows_uri(
+            str(uri)
+        ):
+            raise ValueError(f"resource unavailable: {uri}")
+        return await super().read_resource(uri)
+
+    async def list_prompts(self) -> list[types.Prompt]:
+        """List only skill prompts allowed by the live credential state."""
+        prompts = await super().list_prompts()
+        if self.skill_catalog is None:
+            return prompts
+        return [
+            prompt
+            for prompt in prompts
+            if self.skill_catalog.allows_prompt(prompt.name)
+        ]
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> types.GetPromptResult:
+        """Reject direct prompt reads hidden by the live credential state."""
+        if self.skill_catalog is not None and not self.skill_catalog.allows_prompt(
+            name
+        ):
+            raise ValueError(f"prompt unavailable: {name}")
+        return await super().get_prompt(name, arguments)
+
 
 def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     cfg = cfg or config_mod.load()
@@ -119,6 +174,10 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     mcp.live_client = client
     log_path = debug_log.configure(cfg)
     market.register(mcp, client)
+
+    # After the tools, so the skills only ever point at a surface that exists.
+    skill_catalog = skills.register(mcp, cfg)
+    mcp.skill_catalog = skill_catalog
 
     account_registered = False
     trade_audit = None
@@ -202,6 +261,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         next_config = config_mod.load_for_client(client_name, shared)
         identity_changed = http_identity(live) != http_identity(next_config)
         tools_changed = False
+        skills_changed = skill_catalog.set_credentials(next_config.has_credentials)
         transitions: list[str] = []
 
         if live.mode == "trade" and (identity_changed or next_config.mode != "trade"):
@@ -255,6 +315,9 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             announce_transition("+".join(transitions))
         if notify and tools_changed:
             await session.send_tool_list_changed()
+        if notify and skills_changed:
+            await session.send_resource_list_changed()
+            await session.send_prompt_list_changed()
         return next_config, shared
 
     if cfg.has_credentials:
@@ -276,17 +339,15 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         # even for a protocol peer that called the opener directly before its first list.
         entitlement_checked.add(session)
         next_config, shared = await reconcile(session, allow_trade=False, notify=True)
-        identity_current = (
-            expected.environment is None
-            or (
-                (shared.get("DELTA_MCP_ENV") or "").strip() == expected.environment
-                and (shared.get("DELTA_API_KEY") or "").strip() == expected.api_key
-                and (shared.get("DELTA_API_SECRET") or "").strip() == expected.api_secret
-            )
+        identity_current = expected.environment is None or (
+            (shared.get("DELTA_MCP_ENV") or "").strip() == expected.environment
+            and (shared.get("DELTA_API_KEY") or "").strip() == expected.api_key
+            and (shared.get("DELTA_API_SECRET") or "").strip() == expected.api_secret
         )
         mode_current = (
             not expected.mode_setting
-            or (shared.get(expected.mode_setting) or "").strip().lower() == expected.mode
+            or (shared.get(expected.mode_setting) or "").strip().lower()
+            == expected.mode
         )
         return form.Activation(
             account_ready=account_registered,
@@ -320,9 +381,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             # Credential/environment overrides cannot be repaired by restarting. A mode
             # override is different: if it says trade, restart is exactly what will arm it,
             # so retain that warning while also naming the override below.
-            "restart_required": not (
-                set(overridden) - {"DELTA_MCP_MODE"}
-            )
+            "restart_required": not (set(overridden) - {"DELTA_MCP_MODE"})
             and restart_required(next_config),
             "overridden_by_client": overridden,
             "client_name": client_name,
@@ -358,16 +417,16 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
 
 
 def initialization_options(mcp: FastMCP) -> InitializationOptions:
-    """What this server tells a client about itself, declaring a changeable tool list.
+    """Declare the tool, resource, and prompt catalogs as changeable.
 
     FastMCP's own `run_stdio_async` builds these with every notification flag off, so the
-    server would advertise `tools.listChanged: false`. A client told that has no reason to
-    re-read the tool list, which makes the notification sent when a saved credential
-    brings the account tools up a no-op — leaving the restart it exists to avoid as the
-    only way through.
+    server would advertise each `listChanged` capability as false. A client told that has
+    no reason to re-read a catalog when a saved credential changes the account surface.
     """
     return mcp._mcp_server.create_initialization_options(
-        NotificationOptions(tools_changed=True)
+        NotificationOptions(
+            prompts_changed=True, resources_changed=True, tools_changed=True
+        )
     )
 
 
@@ -438,7 +497,9 @@ def main(argv: list[str] | None = None) -> None:
         banner += f" audit={audit.path if audit else 'off'}"
     if cfg.debug:
         log_path = debug_log.configure(cfg)  # idempotent — returns the same path
-        if log_path is not None:  # configure returns None if the log file can't be opened
+        if (
+            log_path is not None
+        ):  # configure returns None if the log file can't be opened
             banner += f" debug=on log={log_path}"
     print(banner, file=sys.stderr)
     insecure = store.insecure_permissions()

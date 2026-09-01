@@ -58,6 +58,41 @@ Three things here are load-bearing:
 
 `FastMCP` is constructed with `instructions=INSTRUCTIONS`, which is the only channel that reaches the model when no key is configured — there is no account tool then to carry a hint on its own description.
 
+### Skills — procedures shipped as package data
+
+`skills.py` publishes the contents of `skills_data/` on three MCP surfaces. `server.build_server()`
+calls `skills.register(mcp, cfg)` after the tool registrations, so a skill never points at a tool
+that is not there. The `INSTRUCTIONS` block in `server.py` carries the line telling the model to
+call `list_skills` first for performance, risk, and funding questions; it is the only channel
+that reaches the model before it has seen any tool.
+
+**To add a skill**: create `skills_data/<name>/SKILL.md` with `name`, `description` and `requires`
+(`public` or `credentials`) in `---` frontmatter. Optional `references/*.md` and `assets/*` are
+picked up automatically, one level deep. Nothing else to register.
+
+Four constraints to respect when changing this module:
+
+1. **All three surfaces live in one file on purpose.** The `mcp` 2.x migration (PR #39) moves the
+   resource and prompt decorators. One file to fix, not four.
+2. **Resources are registered statically, not as templates.** FastMCP's `ResourceTemplate.matches`
+   builds its regex with `[^/]+`, so a `{path}` parameter cannot hold `references/algorithm.md`.
+   Discovery walks the tree once and adds a `FunctionResource` per file.
+3. **`get_skill(name, path)` is a dict lookup** into the map built at discovery, so traversal
+   cannot resolve. Regression test: `test_get_skill_rejects_traversal_path`.
+4. **`requires: credentials` skills are hidden without keys**, mirroring `account.register`, and
+   `get_skill` will not serve them by name either. Otherwise the model calls a skill whose tools
+   are absent and blames the exchange.
+
+The frontmatter parser is a flat `key: value` reader, not YAML. Three keys do not justify a
+runtime dependency. `skills_data` deliberately has no `__init__.py`: it is inert data read through
+`importlib.resources`, not an importable package. `uv_build` ships it in the wheel with no
+`pyproject.toml` change — verify with `uv build && unzip -l dist/*.whl | grep skills_data` after
+touching packaging.
+
+`pnl-analytics` ports the trade-matching and metric definitions from ck's delta-pnl-analytics web
+app (`analytics-engine.ts`, `api/advice.py`). Its `assets/dashboard.html` is read into the model's
+context on every run, so keep it small — no base64 fonts, no chart library.
+
 ### DeltaClient — single point for HTTP concerns
 
 `src/delta_exchange_mcp/client.py` centralizes the cross-cutting behaviors every tool depends on. Read this file before touching any tool logic:

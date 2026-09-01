@@ -104,6 +104,8 @@ Show the options chain for BTC expiring this Friday.
 What positions do I have open and what's my total unrealized PnL?
 List my fills from the last 24 hours grouped by symbol.
 How much USDT do I have free vs blocked in margin?
+Show me my P&L analytics.
+Which perps are worth the carry right now?
 ```
 
 The assistant picks the right tool based on the question — you never name a tool. A real
@@ -172,6 +174,36 @@ Safety features:
 - **Audit log.** Every mutation (real or dry-run) is appended as one JSON line to `~/.delta-exchange-mcp/audit/` (owner-only `0600`). On by default in trade mode; disable with `DELTA_MCP_AUDIT=off`. The log records the tool, params, and result/order id — **never** credentials. Ask the assistant "where is the audit log?".
 - **No silent retries.** Unlike GET reads, mutations are never auto-retried on timeout or rate-limit — a failure is surfaced, not re-sent.
 - **API key permission.** The key must have Trading enabled in Delta API management, and the requesting IP whitelisted.
+
+## Skills
+
+A tool exposes one endpoint. A **skill** is a written procedure for a multi-step job: which
+tools to call in what order, the formulas to apply, and what the answer should look like. The
+server ships three. Your assistant loads them on its own, so you just ask the question.
+
+| Skill | Ask for | Needs a key |
+|---|---|---|
+| `pnl-analytics` | "Show me my P&L analytics" | yes |
+| `position-risk` | "Summarise my open positions and risk" | yes |
+| `funding-carry` | "Which perps are worth the carry?" | no |
+
+**`pnl-analytics`** is the big one. It reads your fills, matches them into round trips, and
+produces a full performance review across seven views (overview, P&L, instruments, funding,
+risk, charges, portfolio), plus a trader persona and an A+ to D- grade. It writes a
+**self-contained HTML dashboard** to `~/.delta-exchange-mcp/reports/` that opens offline in any
+browser, and gives you the headline numbers in chat. The installed `delta-exchange-pnl`
+calculator performs the FIFO matching and metrics locally from the exported CSV, so the raw
+fill history does not need to enter the conversation.
+
+Skills reach your client three ways, so it does not matter which client you use:
+
+- **Resources** under `skill://delta/<name>`, for clients that browse resources.
+- **Two tools**, `list_skills` and `get_skill`, for clients that only call tools.
+- **A prompt per skill**, which Claude Code surfaces as `/mcp__delta-exchange__pnl_analytics`.
+
+Skills that read your account are hidden unless an API key and secret are configured, so a
+public-data-only install never offers you something it cannot run. No skill places an
+order; they read and describe.
 
 ## Add your API key
 
