@@ -316,15 +316,39 @@ def test_rollback_continues_when_metadata_cannot_be_restored(
 
     assert observed == [2, 1]
     assert set(backend.values) == {record_name(credentials, 1)}
+    if persistent:
+        with pytest.raises(auth_store.MetadataError, match="metadata write failed"):
+            credentials.get("india_prod")
     restarted = CredentialStore(
         backend, FileMetadata(tmp_path / "credentials.json"), CredentialSource.OS_STORE
     )
     if persistent:
-        # The pointer cannot be repaired while metadata is unwritable. A later read
-        # must refuse the missing candidate without deleting the previous secret.
-        with pytest.raises(CredentialCorruptError, match="missing revision 2"):
-            restarted.get("india_prod")
+        # Once metadata recovers, disconnect instead of restoring authorization by
+        # inference. Preserve the old secret and allow an explicit reconnect.
+        assert restarted.get("india_prod") is None
+        recovered = restarted.metadata("india_prod")
+        assert recovered.reconnect_required
+        assert recovered.generation > first.generation + 1
         assert set(backend.values) == {record_name(credentials, 1)}
+        for stale_generation in (first.generation, first.generation + 1):
+            with pytest.raises(CredentialConflictError, match="generation"):
+                restarted.replace(
+                    "india_prod",
+                    "retry-key",
+                    "retry-secret",
+                    expected_generation=stale_generation,
+                )
+        reconnected = restarted.replace(
+            "india_prod",
+            "retry-key",
+            "retry-secret",
+            expected_generation=recovered.generation,
+        )
+        assert reconnected.revision == 3
+        assert reconnected.generation > recovered.generation
+        assert restarted.get("india_prod") == reconnected
+        assert not restarted.metadata("india_prod").reconnect_required
+        assert record_name(credentials, 1) in backend.values
     else:
         assert restarted.get("india_prod") == first
 

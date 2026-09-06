@@ -31,6 +31,7 @@ from delta_exchange_mcp.auth.backend import (
     SecretBackend,
     SystemKeyringBackend as SystemKeyringBackend,
     _decode_secret,
+    _detach_records,
     _encode_secret,
     _record_name,
     default_metadata_path as default_metadata_path,
@@ -618,9 +619,17 @@ class CredentialStore:
             return
 
         if previous.active_revision is not None:
-            # A failed rollback can remove the candidate while metadata still names
-            # it. Preserve the old pending record for recovery in that state.
-            self._get_locked(environment, values)
+            try:
+                self._get_locked(environment, values)
+            except CredentialCorruptError:
+                # Failed rollback can remove the candidate before metadata recovers.
+                # Preserve its old records and require explicit reconnect rather than
+                # guessing which credential should regain authorization.
+                values[environment] = _detach_records(
+                    environment, previous, self._metadata.namespace
+                )
+                self._metadata.write(values)
+                return
 
         remaining: list[int] = []
         for revision in previous.pending_revisions:
