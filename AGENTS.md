@@ -1,198 +1,211 @@
 # AGENTS.md
 
-Guidance for any coding agent working in this repository. `CLAUDE.md` is a symlink to this
-file, so Claude Code and the tools that read `AGENTS.md` get the same content and it cannot
-drift into two versions.
+Guidance for coding agents that work in this repository. `CLAUDE.md` is a symlink to this
+file, so keep all repository guidance here.
 
 ## Project in one line
 
-MCP server (stdio only, built on the `mcp` SDK's `MCPServer`) that wraps Delta Exchange India's REST API as MCP tools — public market data unconditionally, authenticated read-only account tools when `DELTA_API_KEY`/`DELTA_API_SECRET` are set, plus authenticated trading mutations when `DELTA_MCP_MODE=trade` is also set.
+This is a local stdio MCP server for Delta Exchange India. It always discovers market,
+account, export, status, and trading tools. It checks credentials and trading consent when
+a tool is called.
 
 ## Style
 
-Don't add typing slop. In particular:
+Do not add typing that hides the real interface.
 
-- Don't annotate pytest fixtures (`tmp_path`, `monkeypatch`, etc.) — pytest discovers them by name, the annotation adds nothing.
-- Don't write `**kwargs: Any` / `-> Any` on internal test helpers. If the only honest type is `Any`, leave it off.
-- Use `Any` only when it carries real information: a public boundary that genuinely accepts arbitrary JSON, a return type that is genuinely heterogeneous. Otherwise prefer the real type or no annotation at all.
-- Don't add `from typing import Any` just to satisfy a redundant annotation.
+- Do not annotate pytest fixtures such as `tmp_path` or `monkeypatch`.
+- Do not add `**kwargs: Any` or `-> Any` to an internal test helper when no type is useful.
+- Use `Any` only for a public JSON boundary or a genuinely heterogeneous result.
+- Keep authorization, credential storage, consent, and HTTP transport as separate domain
+  boundaries.
 
 ## Commands
 
 ```bash
-uv sync                                        # install deps (runtime + dev)
-uv run pytest                                  # run full suite (asyncio_mode=auto)
-uv run pytest tests/test_market_tools.py::test_429_retries_then_succeeds  # single test
-uv run ruff check src tests scripts            # lint
-uv run ruff check --fix src tests scripts      # lint + autofix
+uv sync --locked
+uv run pytest
+uv run ruff check src tests scripts packaging
+actionlint
 
-uv run delta-exchange-mcp                      # stdio (the only transport)
-
-uv run python scripts/smoke.py                 # live smoke against DELTA_MCP_ENV
+uv run delta-exchange-mcp
+uv run delta-exchange-mcp login             # optional browser-opening convenience
 
 bash scripts/inspect.sh --cli --method tools/list
 bash scripts/inspect.sh --cli --method tools/call --tool-name get_ticker --tool-arg symbol=BTCUSD
-bash scripts/inspect.sh                                                          # Inspector web UI on :6274
+bash packaging/mcpb/build.sh
 ```
 
-**Rebuilding the editable install after changing `pyproject.toml` or entry points**: `uv sync` again — `uv run` caches the build.
+Run Python 3.12 and 3.13 before a release. Re-run `uv sync` after `pyproject.toml` or an
+entry point changes.
 
-## Architecture
+## MCP protocol
 
-### Tool registration pattern
+The server uses the current MCP 2026 protocol and keeps legacy compatibility where the SDK
+supports it.
 
-Each tool module exposes `register(mcp: MCPServer, client: DeltaClient) -> None` that attaches `@mcp.tool()`-decorated closures. `server.py::build_server()` instantiates `DeltaClient` once and passes it into every `register` call. **To add a tool group**: create `src/delta_exchange_mcp/tools/<group>.py` with a `register(mcp, client)`, then call it from `build_server`.
+- The modern connection starts with `server/discover`. Do not add an initialize-only
+  dependency.
+- Modern client information and capabilities are request metadata. Read them from the
+  request `Context`. Do not treat a request session as a durable client identity.
+- `request.context_client(ctx)` is the shared reader for the exact client-provided name and
+  version. An older protocol can use the session fallback.
+- The client name is self-reported. It partitions consent records. It does not authenticate
+  a client. Client-name impersonation by another local process is outside this threat model.
+- The setup URL is a capability that the MCP returns to the local client for URL elicitation,
+  MCP Apps, and the clickable-link fallback. A malicious local MCP client that uses this URL
+  without separate browser user presence is outside this threat model. Host, Origin, cookie,
+  and CSRF checks protect the browser boundary; they do not authenticate a local URL holder.
+- `setup_credentials` has no secret arguments. It opens Manage Connection through URL
+  elicitation, an MCP App open-link result, or a clickable text link.
+- A resumed authorization request reports state. It never executes the pending trade.
+- Register every tool before serving. Credentials and consent must not change `tools/list`.
+  An account or trading call that lacks authorization returns `input_required`.
+- Keep `get_connection_status`, `get_trading_status`, and `get_debug_status` stable. Their
+  output must not contain a key, secret, signature, digest, or credential fingerprint.
 
-`market.register` always runs; `account.register` starts only when `cfg.has_credentials` is true (both `DELTA_API_KEY` **and** `DELTA_API_SECRET` set), and reconciliation can add or remove that whole manifest later.
+Primary regression tests are in `tests/test_activation.py`.
 
-### Bringing the account surface up without a restart
+## Connection service
 
-A credential saved through the in-chat form arrives in the running process, so `build_server` closes over an `activate(session)` callback and hands it to `form.register`. Every tool closure holds the same rebindable `DeltaClient`: reconciliation swaps one immutable `{config, signing path, http client}` state so market and account calls move to a new environment or credential pair together. It then adds or removes the complete account-tool manifest, disarms trading before any identity change, and sends `session.send_tool_list_changed()` whenever the surface changes. `activate` returns the account and trading surfaces that are actually live, which is what drives the form's carry-on/restart copy.
+`auth/connection.py::ConnectionService` coordinates the active environment, credentials,
+consent, the rebindable `DeltaClient`, and one Manage Connection page. It is the composition
+boundary. Keep storage transactions in `auth/store.py` and consent transactions in
+`auth/consent.py`.
 
-These are load-bearing:
+The service supports one credential record for production and one for testnet. A browser
+environment change selects which record is active. The request-pinned client configuration
+must stay constant through a tool call, including preflight requests and the final mutation.
 
-- **The capability has to be declared.** `serve()` runs stdio with `initialization_options(mcp)`, which passes `NotificationOptions(tools_changed=True)`. The SDK's own `run_stdio_async` leaves every flag off, so the server would advertise `tools.listChanged: false` and a client would never re-read the tool list — the notification would be silently useless. `main` therefore calls `anyio.run(serve, mcp)`, **not** `mcp.run()`. Regression test: `test_the_server_declares_that_its_tool_list_can_change`.
-- **Trade mode is never armed by a form save.** `activate` hot-applies reads and the safe trade→read direction, but read→trade waits for a new session's first `tools/list`. Regression tests: `test_trade_mode_still_waits_for_a_restart`, `test_mode_only_read_disarms_live_trading_immediately`.
-- **Rotation and environment changes are coherent hot changes.** The shared client swaps its entire request identity before the next call; an in-flight request keeps the state it captured. If trading was live, its tools are removed before that swap and require a restart to re-arm. Regression tests: `test_a_rotated_key_signs_the_next_account_request`, `test_the_first_save_rebinds_market_and_account_tools_to_one_environment`, `test_external_identity_drift_disarms_trading_before_hot_rebind`.
-- **Trading is re-checked before every order, not only at the start.** `reconcile` used to run at a session's first `tools/list`, on `get_connection_status`, and on a form save. Anything that changed the settings by another route stayed invisible for the rest of the session, so trading turned off by a hand edit of the settings file, or by a second client writing its own scoped key, left order placement armed until a restart. `DeltaMCP.before_mutation` now runs the same reconciliation before any tool in `trading.TOOL_NAMES` executes, which refuses at the point of use rather than at the point of the save. Two conditions on it are load-bearing. It passes `allow_trade=False`, so catching up can only stop mutations and never arm them. It runs **only for the connection the trade gate is bound to**, because `reconcile` resolves the mode of whichever client is asking — running it for any other caller would let one client's settings tear down another client's live entitlement, and that caller is already refused by the gate with a message that explains why. Regression tests: `test_turning_trading_off_anywhere_stops_the_next_order`, `test_catching_up_before_a_mutation_never_arms_trading`, `test_another_session_cannot_call_a_globally_registered_trade_tool`.
-- **Runtime transitions are observable without secrets.** Startup and each trade arm/disarm write one structured line to stderr with environment, live mode, registered surface, and audit path. Never add keys, secrets, signatures, or credential fingerprints to this output.
+Process environment credentials remain a compatibility source. A complete
+`DELTA_API_KEY` and `DELTA_API_SECRET` pair is externally managed. The MCP can use it but
+cannot rotate or remove its source. A partial pair fails closed for account access.
 
-`get_connection_status` is registered unconditionally, reconciles safe external file changes, and reports `{environment, credentials_configured, account_tools_available, mode, mode_after_restart, restart_required, overridden_by_client, client_name, client_version, mode_setting, client_identity, version, view_build}` — never a key, secret, or fingerprint. `client_name` is self-reported convenience scope, explicitly not authenticated identity. `client_version` is the build behind that name, and it is the field that makes a "the form did not render" report actionable — one client name spans versions that differ in whether they render an MCP App at all. `view_build` is `form.build_id()`, a 10-character SHA-256 prefix of the exact `VIEW_HTML` bytes the process would serve. It exists because `version` is identical on every commit of a branch and so cannot distinguish a client that fetched from one that reused a cached build — a question that cost several round trips of reading package caches, and once cost them against the wrong machine entirely. Ask the assistant for the connection status and compare `view_build` against `uv run python -c "from delta_exchange_mcp import form; print(form.build_id())"` before drawing any conclusion from how a rendered form looks. It exists because the save tools are hidden from the model, so after a save the model cannot see whether it worked; without this it has no way to answer "am I connected?".
+`DELTA_MCP_MODE` never authorizes trading. Do not add it back to runtime authorization,
+the bundle manifest, or installation instructions.
 
-`MCPServer` is constructed with `instructions=INSTRUCTIONS`, which is the only channel that reaches the model when no key is configured — there is no account tool then to carry a hint on its own description.
+## Credential storage and migration
 
-### DeltaClient — single point for HTTP concerns
+`auth/store.py::CredentialStore` stores secrets only in an approved operating-system
+credential service:
 
-`src/delta_exchange_mcp/client.py` centralizes the cross-cutting behaviors every tool depends on. Read this file before touching any tool logic:
+- macOS Keychain;
+- Windows Credential Manager;
+- Linux Secret Service.
 
-1. **None-param stripping** — `filtered_params` is computed once and fed to **both** the signing payload (`query_str`) and `httpx.request(params=...)`. Delta's API rejects `?expiry=` as "invalid date"; this is why the same filter applies in two places. Regression test: `test_none_params_are_stripped_before_send`.
-2. **Retry policy** — 429 backs off using the `X-RATE-LIMIT-RESET` header (ms); 5xx uses exponential backoff; transport errors retry too. All three retry paths are GET-only — POST/PUT/DELETE never auto-retry, because a mutation whose response was lost may already be applied and a resend can place a duplicate order. A mutation transport failure raises `DeltaApiError` with `execution_outcome_unknown` (sent, response lost — reconcile before resubmitting) or `upstream_unreachable` (connect failure — nothing was sent), wrapped so `_finish` records it to the audit log. Regression tests: `test_a_mutation_is_never_resent_after_a_transport_failure`, `test_a_mutation_connect_failure_says_nothing_was_sent`, `test_audit_records_an_unknown_outcome`, `test_get_transport_errors_still_retry`.
-3. **Error-envelope unwrapping** — `{success: false, error: {code, context}}` is raised as `DeltaApiError` (see `errors.py`). `errors.py` carries a hint table for documented auth codes (`SignatureExpired`, `InvalidApiKey`, `UnauthorizedApiAccess`, `ip_not_whitelisted_for_api_key`, `Signature Mismatch`) and extracts the request IP from the error context for the IP-whitelist case.
-4. **HMAC-SHA256 signing** — `sign()` concatenates `method + timestamp + path + query + body`. The signing path **must include the `/v2` prefix** per Delta's spec; the client derives it once from `urlparse(base_url).path` and prepends it before calling `sign()`. Don't pass `path="/v2/..."` from callers — they pass relative paths like `/orders`, the client adds the prefix.
-5. **Body signing (POST/PUT/DELETE)** — the signed `body` must be the **exact bytes sent on the wire**. `_request` serializes `json_body` once with `json.dumps(..., separators=(",", ":"))`, signs that string, and sends the **same** string via `httpx.request(content=...)`. Do **not** switch back to `json=json_body` — httpx would re-serialize with different spacing and the signature would mismatch. Same "compute once, feed both" rule as None-param stripping (#1). Regression test: `test_place_order_signs_exact_body_bytes`. Convenience methods: `post()` / `put()` / `delete()`.
-6. **User-Agent header is required by Delta** — a missing one returns 403. Do not remove it.
-7. **Hot rebind is one atomic state swap** — `_request` captures `_ClientState` before its first await, and `rebind()` replaces the config, signing prefix, and transport together. A retired transport closes when its final active request or pinned operation exits, with server shutdown as the backstop. Every dispatched trading tool also enters `client.pin()`: helpers such as tick-size lookup may await before the mutation, and every request in that one tool call must stay on the account that was armed when it began. `TradeGate` is the separate permission lease: it is bound to the entitled connection and checked on every `tools/call` because the SDK's tool registry is process-global; disarming invalidates its generation, and `_finish` fails closed if a mutation was still in preflight.
+Reject null, fail, and plaintext keyring backends. If no approved backend is available,
+keep credentials and consent in process memory. Never add a plaintext fallback.
 
-### Auth surface registration
+The non-secret metadata file holds active revisions, validation state, account labels,
+timestamps, pending cleanup, and revocation generations. Writes are atomic and serialized.
+A replacement validates the candidate, writes a new version, reads it back, publishes the
+active pointer, rebinds the client, and then retires the old version. A crash or a missing
+keyring record must leave recoverable metadata.
 
-`tools/account.py` exposes the authenticated read-only tools (positions / margined-positions / wallet-balances / wallet-transactions / fills / bulk-fills-export / open-orders / order-history / order-by-id / product-leverage / trading-stats / trading-preferences / profile). All call `client.get(..., auth=True)`.
+OS record names are scoped to the canonical metadata path. Metadata copied to a different
+path and records from the old draft format require a browser reconnect. Keep their record
+names in `preserved_records`, which is recovery information, not a cleanup queue. Never
+read, adopt, or delete a record whose metadata location cannot establish ownership.
 
-`server.build_server()` registers them only when both creds are present. Without creds, the server runs in pure-public mode — same behaviour as before this surface existed.
+The first connection automatically migrates a complete legacy `config.env` credential
+pair. Migration writes and reads the OS record before it removes only the key and secret
+lines. A failure before publication leaves the file unchanged. Reject a symlink migration
+target. Never migrate legacy trading mode into consent.
 
-### Credential entry
+The validation endpoint is `GET /v2/users/trading_preferences`. It supplies the account
+`user_id` used by `close_all_positions`. `UnauthorizedApiAccess` is a permission failure,
+not proof of an invalid key. Only explicit invalid-key and invalid-signature responses
+reject a candidate as invalid. An unreachable candidate can be stored as `unverified`.
 
-Three front-ends fill one file, `~/.delta-exchange-mcp/config.env`:
+## Manage Connection browser
 
-- `store.py` owns the file — `path/read/ensure/write/insecure_permissions`. `ensure` creates it `0600` from a commented `TEMPLATE` on first run; `write` goes through dotenv's `set_key` so comments and unrelated settings survive. `config.setting(name)` resolves the process environment first and this file second, with empty meaning unanswered (a bundle substitutes every declared variable whether or not the field was filled).
-- `credentials.py` is the shared domain: `check(env, key, secret)` makes one `/profile` call, and `save(...)` writes the key, secret and environment together. Neither front-end owns these. `Check.code` carries Delta's own error code beside the rendered message so a caller can branch on which failure it was without matching on that message's text.
-- `store.write()` holds an OS-backed advisory lock around its complete copy-modify-replace transaction. This matters now that different clients can save disjoint scoped mode keys: without serialization, a stale staging copy can undo another client's successful trade-to-read de-escalation. The hidden lock file is persistent by design and contains no settings; the kernel releases its lock after a crash.
-- `credentials.overridden_by_client()` names the settings in the shared file that the process environment is beating, and both front-ends report it — `login` as a note on stderr, the form as an `overridden` status. Without it a save is silently useless: `config` resolves the environment first, so a client passing its own key (the bundle's `user_config`, VS Code's `inputs`, an edited Cursor entry) wins on every launch, and the form would verify one account, name it, and leave the server signing with another. **It asks whether the process environment supplies a value that differs from what the file holds** — presence alone is not enough, because the Cursor install link sets `DELTA_MCP_ENV` for everyone and a presence test would tell every Cursor user their working key was ignored. Two things follow that are easy to get wrong. **An empty file is not an exemption**: the first save is exactly when the file holds nothing, so a client's own key has to lock the field then too, and comparing the file against the resolved value misses precisely that case. **The key and the secret lock together**, because `config._credentials` reads both from whichever source holds either — a client naming only `DELTA_API_KEY` also decides the secret, and the secret it decides is nothing. Regression tests: `test_a_client_pinning_the_same_environment_is_not_reported`, `test_a_client_key_is_reported_even_when_the_file_holds_none`, `test_a_client_supplying_only_the_key_locks_the_secret_too`.
-- `login.py` is the terminal front-end. It refuses a non-TTY stdin on purpose — `getpass` reads a pipe rather than rejecting it, so `echo $KEY | ... login` would put the secret in shell history.
-- `form.py` is the in-chat front-end, an **MCP App** (SEP-1865): a `ui://` HTML resource with mime `text/html;profile=mcp-app`, opened by `setup_credentials` via `_meta.ui.resourceUri`, submitting to the app-only `save_credentials` or mode-only `save_mode`. Opening issues a random ten-minute, one-use grant in tool-result `_meta`; it is bound to the exact protocol session and never appears in model-visible content or structured content. Invalid input releases it for correction, a durable write consumes it before notification, and a new session cannot inherit it. This is defence in depth for a host that mistakenly exposes an app-only schema, not authenticated user presence. Its `register(mcp)` takes no `DeltaClient` — `credentials.check` builds its own from the candidate key. Three constraints were established empirically against Claude Desktop and Codex desktop and must not regress: **inline every asset** (both hosts' CSP blocks external fetches, and one CDN reference blanks the frame); **complete the `ui/initialize` → `ui/notifications/initialized` handshake** or the frame stays collapsed; and **never feature-test on the `io.modelcontextprotocol/ui` capability** — Claude Desktop 1.0.0 rendered these views without advertising it, and while build 1.30096.5 does advertise it (read 2026-08-16), gating would still turn the form off for anyone on the older build and buys nothing either way. The view must never call `ui/message` or `ui/update-model-context`, which would hand the typed credential to the model. Regression tests: `tests/test_form.py`, `test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one`.
+`setup.py` owns the loopback listener. `form.py` owns the shared inline HTML. The listener
+binds only to `127.0.0.1` on an operating-system-selected port and stops after ten minutes,
+completion, or explicit close.
 
-### The view
+Keep these controls together:
 
-Its constraints are recorded where they apply rather than here: the module docstring in
-`src/delta_exchange_mcp/form.py` for the ones that decide whether it renders at all, and an
-inline comment on each rule that was wrong once. Most were measured against a real host and
-cost a round of guessing each, so read them before changing the stylesheet.
+- exact `Host` and `Origin` checks;
+- JSON-only POST requests with a bounded body;
+- an HTTP-only session cookie and rotating one-use CSRF values;
+- `Cache-Control: no-store`, a restrictive CSP, no-referrer policy, frame protection, and
+  content-type protection;
+- serialized mutations with an expected credential and consent revision;
+- no key or secret in a URL, MCP tool argument, result, log, or model context.
 
-Three things to know before opening it. **`src/spec.types.ts` in
-`modelcontextprotocol/ext-apps` is the only authority on which `_meta.ui` fields exist** —
-inventing one that reads plausibly is how `preferredSize` came to be declared while doing
-nothing. **The height has a ceiling of 500px and roughly 5px spare**, so anything added
-takes its room from something already there. And **the view never names a type size or a
-width of its own**; both come from the host's tokens, and a px literal in a font
-declaration fails `test_the_view_names_no_type_size_of_its_own`.
+A stale or duplicate tab cannot replace newer credentials or restore revoked consent.
+Browser action tests in `tests/test_setup_page.py` must cover replay, hostile origins,
+invalid content types and JSON, oversized bodies, stale revisions, expiry, response
+headers, and secret-free logs.
 
-To see and measure it:
+The view is an MCP App with all assets inline. Complete the `ui/initialize` handshake. Do
+not call `ui/message` or `ui/update-model-context`; either call can expose typed credentials
+to the model. Use `uv run python scripts/host.py --open` to inspect the host layout.
 
-```bash
-uv run python scripts/host.py --open
-```
+## Trading consent and mutations
 
-That frames the view in a stand-in host, answers the `ui/initialize` handshake with a
-palette and the host's font rules, and reports the height the view asks for against the
-ceiling. `chrome=tight` reproduces Codex, which draws a border and insets by nothing;
-`chrome=host` reproduces Claude Desktop, which insets. The touch control injects the view's
-own coarse-pointer rules, which is the only way to see that layout, because
-`(pointer: coarse)` answers to the device rather than to the page — and that layout is the
-one at risk, since larger targets are what make it taller.
+One approval enables all 13 trading tools for one exact client name, environment, and
+credential revision. Production also requires an unchecked real-orders acknowledgement
+before the user can enable trading.
 
-`save_credentials` returns `account`, `path`, `next_step`, `effective_mode`, `client_name`, and `mode_setting` as fields alongside `message` on a clean save, because the view renders its own connected state from them rather than printing the sentence. `save_mode` changes only the scoped mode and never reads or rewrites stored credentials. `message` stays for clients that show no view.
+Persistent consent has no time expiry. Rotation, migration, environment selection,
+disconnect, manual disable, a credential generation change, or a changed client name
+revokes it. An unnamed client receives process-session consent only.
 
-Those `_meta` arguments need `meta=` on both the tool and the resource decorator, which 2.x carries on `MCPServer`.
+Every trading tool has `dry_run`. A dry run validates and returns the request payload. It
+does not need credentials or consent and must send no POST, PUT, or DELETE request.
 
-### Trading surface (mutations)
+Register mutations through the shared `mutation_tool` decorator. It publishes
+`_meta["delta.exchange/mutating"] = true` and pins the client state. A real mutation needs a
+current `TradeGate` lease. Check the consent generation again immediately before the
+mutation and after any preflight request. Revocation during preflight must stop the request.
 
-`tools/trading.py` exposes the authenticated write tools (place/edit/cancel order, cancel-all, place/edit/cancel batch, place/edit bracket, set-leverage, change-margin, close-all, auto-topup). Its `register(mcp, client, audit)` is gated on `(cfg.has_credentials and cfg.mode == "trade")` in `build_server`; `DELTA_MCP_MODE` defaults to `read`, so the surface is off unless explicitly opted into.
+Mutations never retry automatically. A lost mutation response has an unknown execution
+outcome and requires reconciliation before a user retries.
 
-### Trading is enabled per client, and that is load-bearing
+## Delta client
 
-`DELTA_MCP_MODE` is read **only from the process environment**, never from the shared file, because every MCP client on the machine reads that file and one value in it would arm order placement in all of them. The in-chat form can still turn trading on, because it writes a *scoped* name instead: `config.mode_key(client)` produces `DELTA_MCP_MODE_<READABLE>_<DIGEST>` from the exact name the client gave in the MCP handshake. The readable ASCII slug is only a label; a truncated SHA-256 digest is the collision-resistant binding, so punctuation variants cannot inherit one another's choice. This is convenience scope, not authentication: a client can still claim the same exact name. `config.mode_for_client(name)` resolves the process environment first and that scoped key second.
+`client.py::DeltaClient` owns HTTP behavior for every tool.
 
-`request.client(session)` is the one reader of that handshake identity, returning `name`, `title` and `version`. Read it there rather than reaching into `session.client_params`, which is what both call sites used to do separately. Two properties of it are load-bearing. **An empty name never occurs over a real connection**: the SDK substitutes `DEFAULT_CLIENT_INFO` (`mcp/0.1.0`) for a client that sends no identity, so every such client scopes its mode under the single name `mcp` and shares that entitlement with the others — consistent with the convenience-scope model, but not what the empty-name guard alone suggests. Only a call with no session, as the tests make, yields an empty name. **`title` is never used as a key and never sent anywhere**, because a host may let the person edit it. Regression tests: `test_the_status_tool_reports_the_client_that_asked`, `test_a_client_that_names_itself_nothing_still_arrives_named`.
+- Strip `None` query values once and use the same query for signing and sending.
+- Include `/v2` in the HMAC signing path. Tool callers pass paths such as `/orders`.
+- Serialize a mutation body once. Sign and send the same bytes.
+- Keep the required User-Agent header.
+- Retry rate limits, server failures, and transport failures for GET requests only.
+- Capture one immutable client state for each request. `rebind()` replaces the complete
+  state and retires the old transport after its active requests finish.
+- Convert a valid Delta error envelope into `DeltaApiError`. Treat a malformed envelope as
+  `invalid_response` without putting its body in a credential or permission decision.
 
-A client only identifies itself during the handshake, which happens after `build_server` has finished assembling the tool list, so the entitlement is applied at the **first `tools/list` of a session**. `DeltaMCP` does that from a `ServerMiddleware` the SDK is constructed with; do not mutate its private request-handler table. `MCPServer.list_tools()` takes no context, so an override there cannot see who is asking. The mutating tools therefore appear in that first listing rather than behind a later notification. It is decided once per session on purpose: choosing trade in the form writes the key but must not arm order placement in the session that asked for it. Regression tests: `test_trading_arms_only_for_the_client_it_was_enabled_for`, `test_choosing_trade_does_not_arm_it_in_the_session_that_chose_it`, `test_a_client_env_var_still_outranks_the_scoped_setting`.
+Account tools use authenticated GET requests. The `get_profile` tool and `/v2/profile`
+API-key call are retired and must not return.
 
-A `ServerSession` is built **per request**, so it is not the identity of a client. Three things have to outlive one call — the entitlement decided once per client, the trade lease, and the form's one-use grant — and all three key on `request.peer(session)`, the connection behind the session. `request.session` is the contextvar the middleware publishes for the trade gate, which cannot declare a `Context` parameter for the tool functions it wraps. Reaching the connection reads a private attribute, because the SDK's public `connection` accessor hangs off a context class its runner does not build yet. The fallback fails closed: a per-request identity refuses a lease rather than sharing one. Regression tests: `test_another_session_cannot_call_a_globally_registered_trade_tool`, `test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one`.
+## Logs
 
-`get_connection_status` reports `mode` (live now) and `mode_after_restart` (what this client is entitled to), and folds the difference into `restart_required` — otherwise it would report nothing outstanding while trading was still waiting, which is the contradiction the field exists to prevent.
+Debug logs can contain account response data, but never authentication headers or secrets.
+`debug_log.shutdown()` must restore the prior logger levels and propagation settings.
 
-Conventions in `trading.py`:
-- Register every mutation through the shared `@mutation_tool` decorator. It publishes
-  `_meta["delta.exchange/mutating"] = true`, which the bundle verifier uses instead of
-  inferring safety from tool-name prefixes.
-- Every mutating tool takes `dry_run: bool`. The shared `_finish(tool, method, path, payload, dry_run)` helper strips `None` keys, and when `dry_run` returns `{dry_run, method, path, payload}` **without** any HTTP call; otherwise it sends via `client.post/put/delete` and records to the audit log on both success and `DeltaApiError`.
-- Order-level boolean flags (`post_only`, `reduce_only`, `cancel_*`) are Delta **string enums** — convert with `_bs()` to `"true"`/`"false"`. Position-level flags (`auto_topup`, `close_all_*`) are real JSON booleans.
-- `close_all_positions` needs `user_id`; it is auto-resolved from `/profile` once and cached per-process in the `register` closure — never a tool param.
-- Batch tools cap at `_MAX_BATCH = 50`.
+Audit logs are partitioned by environment and use the request-pinned client configuration.
+They contain mutation payloads and summarized outcomes, never credentials. Keep the cache
+partitioned; a testnet audit writer must not label a production request or the reverse.
 
-### Audit logging
+## Distribution and release gates
 
-`audit_log.py` exposes `configure(cfg) -> AuditLog | None` (returns `None` unless `mode == "trade"`; `DELTA_MCP_AUDIT=off|false|0|no` is a kill switch). `AuditLog.record(...)` appends one JSON line per mutation to `~/.delta-exchange-mcp/audit/audit-<ts>-<pid>.log`, created `0600`. **Invariant: no credentials** — only the request body (which carries none) and a summarized result are recorded. `configure` caches a single `_INSTANCE` per process so `build_server` and `main`'s banner share one file. `server.py` registers `get_trading_status` (trade mode only) to report `{mode, audit_log_path}`. Regression test: `test_audit_records_success_and_error_without_secrets`.
+This project is local stdio only. Do not add a shared hosted MCP, HTTP transport, Docker
+image, or OAuth flow without a separate design review.
 
-### Debug logging
+The MCPB manifest is generated from the live stable tool list. It must not ask for an API
+key, secret, environment, or trading mode. The browser is the configuration interface.
 
-`debug_log.py` exposes `configure(cfg) -> Path | None`, called from `build_server`. When
-`DELTA_MCP_DEBUG` is truthy it attaches a `FileHandler` to the `delta_exchange_mcp` and `httpx`
-loggers (INFO, `propagate=False`, **never** `logging.basicConfig`) so request URLs + response
-bodies land in `~/.delta-exchange-mcp/logs/debug-<ts>-<pid>.log`. `client.py` emits the `→`/`←`/`✗`
-lines. **Invariant: credentials (api-key / api_secret / signature / timestamp) are never logged** —
-only headers carry them and we never log the headers dict. Regression test:
-`test_logs_request_and_body_but_no_secrets`. The module is deliberately **not** named `logging.py`
-(would shadow the stdlib `logging` import). `server.py` registers a `get_debug_status` tool (only
-when debug is on) so the assistant can report the log path; the path is also in the stderr startup
-banner.
+Before release:
 
-### Environment naming
-
-`DELTA_MCP_ENV` values are `india_prod` / `india_testnet` (not `mainnet`/`testnet`) to match Delta's own URL naming (`api.india.delta.exchange`, `cdn-ind.testnet.deltaex.org`). `india_prod` is the default — users ask "what's BTCUSD mid", they mean prod, not testnet.
-
-API keys are env-scoped on Delta's side: prod keys created at delta.exchange only work against `india_prod`; demo keys at demo.delta.exchange only work against `india_testnet`. Mismatch → `InvalidApiKey`.
-
-`DELTA_MCP_MODE` is `read` (default) or `trade`; only `trade` registers `tools/trading.py`. `DELTA_MCP_AUDIT` (kill switch) and `DELTA_MCP_AUDIT_FILE` (path override) govern the audit log.
-
-## Reference — Delta Exchange API
-
-The upstream source of truth for endpoint shapes is the **Slate docs repo at `/Users/anuj/Documents/work/Delta/slate`**, specifically `swagger_v2.json` and `source/includes/_*.md`. When adding or fixing a tool:
-
-```bash
-jq '.paths["/products"].get.parameters' /Users/anuj/Documents/work/Delta/slate/swagger_v2.json
-```
-
-Auth spec lives at `source/includes/_authentication.md` (signing payload format, ±5 sec timestamp window, documented error codes).
-
-## Distribution
-
-**Local stdio only.** Each user runs the server as a subprocess of their MCP client via `uvx`:
-
-```bash
-uvx delta-exchange-mcp
-```
-
-There is intentionally **no HTTP transport, no Docker image, and no shared hosted endpoint**. Per-user API keys can't safely route through a shared HTTP server, and the financial-tool nature of this MCP means users should be able to read the code that runs against their account. If you find yourself adding `streamable-http`, `transport=` flags, or a `Dockerfile`, stop and discuss first.
+- run tests on Ubuntu, macOS, and Windows with Python 3.12 and 3.13;
+- run the opt-in real system-keyring contract test on each operating system;
+- build and verify the MCPB, including modern discovery and the legacy compatibility path;
+- run the authenticated testnet permission matrix with separate Read Data and Trading
+  keys. Do not claim Read Data compatibility until each Read Data cell reports `allowed`.
 
 ## Tests
 
-`respx` mocks httpx for unit tests (no live network). Live verification happens through `scripts/smoke.py` (Python-level) and `scripts/inspect.sh --cli` (MCP-protocol-level) — both hit real testnet/prod and are run manually, not in CI. When fixing a bug surfaced by live use, add a `respx` regression test (see `test_none_params_are_stripped_before_send` and `test_signing_payload_includes_v2_prefix` for the pattern).
+`respx` mocks Delta HTTP calls. Add a regression test for each observed failure. Keep live
+credentials out of the unit suite and CI logs. The testnet permission matrix is an explicit
+manual release gate, not a CI secret.

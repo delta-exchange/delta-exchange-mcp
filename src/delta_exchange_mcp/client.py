@@ -88,6 +88,11 @@ class DeltaClient:
         """Identify the HTTP destination and signing pair pinned to this task."""
         return (self._pinned_state.get() or self._state).generation
 
+    @property
+    def binding_config(self) -> Config:
+        """Return the HTTP destination and signing configuration pinned to this task."""
+        return (self._pinned_state.get() or self._state).config
+
     def rebind(self, config: Config) -> None:
         """Atomically move future calls to ``config`` without disrupting current calls.
 
@@ -128,7 +133,7 @@ class DeltaClient:
     async def pin(self) -> AsyncIterator[None]:
         """Keep a multi-request operation on one destination and signing identity.
 
-        A trading tool may await a product or profile lookup before sending its mutation.
+        A trading tool may await a product or account lookup before sending its mutation.
         Reconciliation can happen during that await; task-local pinning prevents the later
         request from jumping to the newly rebound account.
         """
@@ -253,7 +258,10 @@ class DeltaClient:
 
         if auth:
             if not config.has_credentials:
-                raise DeltaApiError("credentials_missing", context="set DELTA_API_KEY and DELTA_API_SECRET")
+                raise DeltaApiError(
+                    "credentials_missing",
+                    context="open Manage Connection and connect a Delta account",
+                )
             ts = str(int(time.time()))
             signature = sign(
                 config.api_secret or "",  # guarded by has_credentials
@@ -281,6 +289,19 @@ class DeltaClient:
                 )
             except httpx.HTTPError as e:
                 last_error = e
+                if method != "GET":
+                    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        raise DeltaApiError(
+                            "upstream_unreachable",
+                            context="the connection failed before the mutation was sent",
+                        ) from e
+                    raise DeltaApiError(
+                        "execution_outcome_unknown",
+                        context=(
+                            "the mutation response was not received; reconcile account "
+                            "state before retrying"
+                        ),
+                    ) from e
                 if attempt == 2:
                     raise
                 continue
@@ -292,6 +313,16 @@ class DeltaClient:
             if 500 <= resp.status_code < 600 and method == "GET" and attempt < 2:
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
+
+            if method != "GET" and 500 <= resp.status_code < 600:
+                raise DeltaApiError(
+                    "execution_outcome_unknown",
+                    context=(
+                        "Delta returned a server failure after receiving the mutation; "
+                        "reconcile account state before retrying"
+                    ),
+                    status=resp.status_code,
+                )
 
             if raw:
                 ctype = resp.headers.get("content-type", "")
@@ -309,13 +340,31 @@ class DeltaClient:
                         method, path, resp.status_code, ctype, len(resp.content),
                     )
             else:
-                logger.info(
-                    "← %s %s %s body=%s", method, path, resp.status_code, resp.text[:_BODY_LOG_CAP]
-                )
+                if method == "GET":
+                    logger.info(
+                        "← %s %s %s body=%s",
+                        method,
+                        path,
+                        resp.status_code,
+                        resp.text[:_BODY_LOG_CAP],
+                    )
+                else:
+                    logger.info("← %s %s %s", method, path, resp.status_code)
             try:
+                if method != "GET":
+                    return self._unwrap_mutation(resp)
                 return self._unwrap_raw(resp) if raw else self._unwrap(resp)
             except DeltaApiError as e:
                 logger.info("✗ %s %s code=%s status=%s", method, path, e.code, e.status)
+                if method != "GET" and e.code == "invalid_response":
+                    raise DeltaApiError(
+                        "execution_outcome_unknown",
+                        context=(
+                            "Delta returned a malformed mutation response; reconcile "
+                            "account state before retrying"
+                        ),
+                        status=e.status,
+                    ) from e
                 raise
 
         assert last_error is not None
@@ -359,5 +408,46 @@ class DeltaClient:
         if resp.status_code >= 400:
             raise DeltaApiError("http_error", context=data, status=resp.status_code)
         if isinstance(data, dict) and "result" in data:
+            return {"result": data["result"], "meta": data.get("meta")}
+        return data
+
+    @staticmethod
+    def _unwrap_mutation(resp: httpx.Response) -> Any:
+        """Require the documented Delta envelope for a mutation response."""
+        try:
+            data = resp.json()
+        except ValueError:
+            raise DeltaApiError(
+                "invalid_response",
+                context="the mutation response was not valid JSON",
+                status=resp.status_code,
+            ) from None
+
+        if not isinstance(data, dict) or not isinstance(data.get("success"), bool):
+            raise DeltaApiError(
+                "invalid_response",
+                context="the mutation response did not contain a success flag",
+                status=resp.status_code,
+            )
+        if data["success"] is False:
+            error = data.get("error") or {}
+            if not isinstance(error, dict):
+                raise DeltaApiError(
+                    "invalid_response",
+                    context="the mutation rejection was malformed",
+                    status=resp.status_code,
+                )
+            raise DeltaApiError(
+                code=error.get("code", "unknown"),
+                context=error.get("context"),
+                status=resp.status_code,
+            )
+        if resp.status_code >= 400:
+            raise DeltaApiError(
+                "http_error",
+                context="Delta rejected the mutation",
+                status=resp.status_code,
+            )
+        if "result" in data:
             return {"result": data["result"], "meta": data.get("meta")}
         return data

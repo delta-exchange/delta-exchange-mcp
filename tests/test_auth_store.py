@@ -606,6 +606,25 @@ def test_process_credentials_remain_external_and_have_no_persistent_revision(tmp
     assert "process-secret" not in repr(resolved)
 
 
+def test_devnet_accepts_only_process_credentials(tmp_path):
+    credentials, backend = make_store(tmp_path)
+
+    resolved = credentials.resolve(
+        "india_devnet",
+        {"DELTA_API_KEY": "dev-key", "DELTA_API_SECRET": "dev-secret"},
+    )
+
+    assert resolved is not None
+    assert resolved.environment == "india_devnet"
+    assert resolved.source is CredentialSource.PROCESS
+    assert resolved.session_generation == 1
+    assert resolved.revision is None
+    assert resolved.generation is None
+    assert credentials.process_generation("india_devnet") == 1
+    assert credentials.resolve("india_devnet", {}) is None
+    assert backend.values == {}
+
+
 def test_process_pair_changes_advance_a_process_only_generation(tmp_path):
     credentials, _ = make_store(tmp_path)
     first_values = {

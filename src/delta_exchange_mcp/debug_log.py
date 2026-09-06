@@ -25,7 +25,7 @@ LOGGER_NAMES = ("delta_exchange_mcp", "httpx")
 _FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
 # Marker so we don't attach a second handler if build_server runs twice in one process.
 _MARKER = "_delta_debug_handler"
-_PREVIOUS_STATE = "_delta_debug_previous_state"
+_STATE_MARKER = "_delta_debug_logger_states"
 
 
 def _resolve_path() -> Path:
@@ -77,14 +77,11 @@ def configure(cfg: Config) -> Path | None:
         return None
 
     setattr(handler, _MARKER, True)
-    setattr(
-        handler,
-        _PREVIOUS_STATE,
-        {
-            name: (logging.getLogger(name).level, logging.getLogger(name).propagate)
-            for name in LOGGER_NAMES
-        },
-    )
+    prior_states = {
+        name: (logging.getLogger(name).level, logging.getLogger(name).propagate)
+        for name in LOGGER_NAMES
+    }
+    setattr(handler, _STATE_MARKER, prior_states)
     handler.setFormatter(logging.Formatter(_FORMAT))
     for name in LOGGER_NAMES:
         logger = logging.getLogger(name)
@@ -105,16 +102,19 @@ def configure(cfg: Config) -> Path | None:
 def shutdown() -> None:
     """Detach and close the debug handler attached by this module, if any."""
     handlers: set[logging.Handler] = set()
+    prior_states: dict[str, tuple[int, bool]] = {}
     for name in LOGGER_NAMES:
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
             if getattr(handler, _MARKER, False):
+                prior_states.update(getattr(handler, _STATE_MARKER, {}))
                 logger.removeHandler(handler)
                 handlers.add(handler)
-                previous = getattr(handler, _PREVIOUS_STATE, {}).get(name)
-                if previous is not None:
-                    logger.setLevel(previous[0])
-                    logger.propagate = previous[1]
+
+    for name, (level, propagate) in prior_states.items():
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        logger.propagate = propagate
 
     # The same handler is attached to both module loggers. Close it only after it has been
     # detached everywhere, and only once, so Windows can remove its containing directory.
