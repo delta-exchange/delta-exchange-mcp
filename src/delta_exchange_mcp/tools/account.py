@@ -275,6 +275,9 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Your trade fills (executed trades). Paginated. Timestamps are microseconds.
 
+        This is the authoritative record of what actually executed — no need to cross-check
+        get_order_history, which tracks order lifecycle, not executions.
+
         If start_time_us is omitted the API returns only the last ~90 days — pass start_time_us
         for older/full history. When omitted, the result carries a `notice` field saying so.
         """
@@ -326,7 +329,10 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         page_size: int = Field(default=50, ge=1, le=200),
         after: str | None = None,
     ) -> dict[str, Any]:
-        """Closed / cancelled orders, filterable + paginated. Timestamps are microseconds."""
+        """Closed or cancelled order records. Use get_fills for executed trades.
+
+        Results are filterable and paginated. Timestamps are microseconds.
+        """
         return await client.get(
             "/orders/history",
             params={

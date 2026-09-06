@@ -209,3 +209,18 @@ Before release:
 `respx` mocks Delta HTTP calls. Add a regression test for each observed failure. Keep live
 credentials out of the unit suite and CI logs. The testnet permission matrix is an explicit
 manual release gate, not a CI secret.
+
+## Tool-selection evals
+
+`evals/` checks whether a model selects the correct stable MCP tool and arguments. Run it
+after a tool name, description, or schema changes. The runner negotiates MCP 2026 through
+`server/discover`, rejects production, and forces `dry_run=true` for every trading tool.
+It never exports `DELTA_MCP_MODE`. Missing required tools fail the deterministic gate.
+
+```bash
+uv sync --group evals
+uv run --group evals python -m evals.run --list
+uv run --group evals python -m evals.run --case ticker_basic --no-judge
+```
+
+The full run uses paid model calls. Do not add it to CI.
