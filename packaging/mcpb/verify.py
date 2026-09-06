@@ -1,4 +1,4 @@
-"""Check a built .mcpb: archive structure, then a real MCP handshake from a fresh unpack.
+"""Check a built .mcpb: archive structure, then real MCP handshakes from fresh unpacks.
 
 Packing successfully is not evidence the bundle works. This unpacks the artifact the way a
 client would and speaks the protocol to it, so a bundle that installs but cannot start
@@ -24,6 +24,54 @@ LEGACY_PROTOCOL = "2025-06-18"
 PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
+EXPECTED_TOOL_NAMES = frozenset(
+    {
+        "adjust_position_margin",
+        "bulk_fills_export",
+        "cancel_all_orders",
+        "cancel_batch_orders",
+        "cancel_order",
+        "close_all_positions",
+        "configure_auto_topup",
+        "edit_batch_orders",
+        "edit_bracket_order",
+        "edit_order",
+        "get_candles",
+        "get_connection_status",
+        "get_debug_status",
+        "get_fills",
+        "get_funding_history",
+        "get_indices",
+        "get_margined_positions",
+        "get_mark_price_history",
+        "get_oi_history",
+        "get_open_orders",
+        "get_options_chain",
+        "get_order_by_id",
+        "get_order_history",
+        "get_orderbook",
+        "get_positions",
+        "get_product",
+        "get_product_leverage",
+        "get_recent_trades",
+        "get_reference_data",
+        "get_settlement_prices",
+        "get_ticker",
+        "get_trading_preferences",
+        "get_trading_stats",
+        "get_trading_status",
+        "get_wallet_balances",
+        "get_wallet_transactions",
+        "list_products",
+        "list_tickers",
+        "place_batch_orders",
+        "place_bracket_order",
+        "place_order",
+        "set_product_leverage",
+        "setup_credentials",
+    }
+)
+RETIRED_TOOL_NAMES = frozenset({"get_profile", "save_credentials", "save_mode"})
 
 
 def check_archive(mcpb: Path) -> None:
@@ -53,7 +101,13 @@ def check_archive(mcpb: Path) -> None:
 
     # Assert the payload rather than trusting .mcpbignore. Build tooling sits beside the
     # payload in this directory, so one missed ignore rule would otherwise ship it silently.
-    required = {"manifest.json", "pyproject.toml", "uv.lock", "icon.png", "server/main.py"}
+    required = {
+        "manifest.json",
+        "pyproject.toml",
+        "uv.lock",
+        "icon.png",
+        "server/main.py",
+    }
     missing = required - names
     if missing:
         raise SystemExit(f"missing from the bundle: {', '.join(sorted(missing))}")
@@ -69,36 +123,39 @@ def check_archive(mcpb: Path) -> None:
             f".mcpbignore?): {', '.join(sorted(unexpected))}"
         )
 
-    print(f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid")
+    print(
+        f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid"
+    )
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
 def check_connection_contract(manifest: dict) -> None:
     """Require the bundle to defer credentials and consent to Manage Connection."""
-    if manifest.get("user_config"):
-        raise SystemExit("bundle must not request credentials, environment, or mode")
-    injected = manifest["server"]["mcp_config"].get("env", {})
-    prohibited = {
-        "DELTA_API_KEY",
-        "DELTA_API_SECRET",
-        "DELTA_MCP_ENV",
-        "DELTA_MCP_MODE",
-    }
-    if prohibited.intersection(injected):
+    if "user_config" in manifest:
         raise SystemExit(
-            "bundle must not inject credentials, environment, or legacy mode"
+            "the browser-configured bundle must not declare user_config prompts"
+        )
+    if "env" in manifest["server"]["mcp_config"]:
+        raise SystemExit(
+            "the browser-configured bundle must not inject launch settings"
         )
     print("  connection: no install-time secrets or authorization settings")
 
 
 def launch_env(workdir: Path, *, hostile: bool) -> dict[str, str]:
-    """Build an isolated public or externally managed process environment."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("DELTA_")}
+    """Build an isolated public or hostile process environment."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("DELTA_")
+    }
     env.update(
         {
-            "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "DELTA_MCP_DEBUG": "1",
             "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
             "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
+            "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
         }
     )
     if hostile:
@@ -108,7 +165,6 @@ def launch_env(workdir: Path, *, hostile: bool) -> dict[str, str]:
                 "DELTA_MCP_ENV": "india_devnet",
                 "DELTA_API_KEY": "synthetic-key",
                 "DELTA_API_SECRET": "synthetic-secret",
-                "DELTA_MCP_DEBUG": "1",
             }
         )
     return env
@@ -140,7 +196,15 @@ def handshake(
 ) -> dict[str, dict]:
     """Discover one fresh unpack and return its tools by name."""
     proc = subprocess.Popen(
-        ["uv", "run", "--directory", str(extracted), "--frozen", "python", "server/main.py"],
+        [
+            "uv",
+            "run",
+            "--directory",
+            str(extracted),
+            "--frozen",
+            "python",
+            "server/main.py",
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -154,7 +218,9 @@ def handshake(
     readers = [
         threading.Thread(target=_pump, args=(proc.stdout, replies.put), daemon=True),
         threading.Thread(
-            target=_pump, args=(proc.stderr, lambda line: line and errors.append(line)), daemon=True
+            target=_pump,
+            args=(proc.stderr, lambda line: line and errors.append(line)),
+            daemon=True,
         ),
     ]
     for reader in readers:
@@ -264,6 +330,37 @@ def mutation_names(tools: dict[str, dict]) -> list[str]:
     )
 
 
+def unpack_installations(mcpb: Path, workdir: Path) -> tuple[dict, Path, Path]:
+    """Extract independent bundle installations for modern and legacy discovery."""
+    modern_dir = workdir / "modern"
+    legacy_dir = workdir / "legacy"
+    modern_dir.mkdir()
+    legacy_dir.mkdir()
+    with zipfile.ZipFile(mcpb) as archive:
+        archive.extractall(modern_dir)
+        archive.extractall(legacy_dir)
+
+    manifest = json.loads((modern_dir / "manifest.json").read_text())
+    return manifest, modern_dir, legacy_dir
+
+
+def discover_tools(
+    modern_dir: Path, legacy_dir: Path
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Run protocol discovery with independent installation and state directories."""
+    modern = handshake(
+        modern_dir,
+        modern=True,
+        env=launch_env(modern_dir, hostile=False),
+    )
+    legacy = handshake(
+        legacy_dir,
+        modern=False,
+        env=launch_env(legacy_dir, hostile=True),
+    )
+    return modern, legacy
+
+
 def main() -> None:
     mcpb = Path(sys.argv[1]).resolve()
     print(f"verifying {mcpb.name}")
@@ -271,37 +368,33 @@ def main() -> None:
 
     tmp = Path(tempfile.mkdtemp(prefix="mcpb-verify-"))
     try:
-        with zipfile.ZipFile(mcpb) as z:
-            z.extractall(tmp)
-        manifest = json.loads((tmp / "manifest.json").read_text())
+        manifest, modern_dir, legacy_dir = unpack_installations(mcpb, tmp)
         check_connection_contract(manifest)
-
-        modern = handshake(
-            tmp,
-            modern=True,
-            env=launch_env(tmp, hostile=False),
-        )
-        legacy = handshake(
-            tmp,
-            modern=False,
-            env=launch_env(tmp, hostile=True),
-        )
+        modern, legacy = discover_tools(modern_dir, legacy_dir)
+        if not modern:
+            raise SystemExit("no tools registered")
         if set(modern) != set(legacy):
             raise SystemExit(
                 "modern and legacy discovery returned different tool lists: "
                 f"modern-only={sorted(set(modern) - set(legacy))}, "
                 f"legacy-only={sorted(set(legacy) - set(modern))}"
             )
-        if not modern:
-            raise SystemExit("no tools registered")
-
         declared = {t["name"] for t in manifest["tools"]}
         runtime = set(modern)
+        retired = (declared | runtime) & RETIRED_TOOL_NAMES
+        if retired:
+            raise SystemExit(f"retired setup tools must stay absent: {sorted(retired)}")
         if declared != runtime:
             raise SystemExit(
                 "manifest and runtime tool lists differ: "
                 f"runtime-only={sorted(runtime - declared)}, "
                 f"manifest-only={sorted(declared - runtime)}"
+            )
+        if runtime != EXPECTED_TOOL_NAMES:
+            raise SystemExit(
+                "runtime tool list differs from the approved stable registry: "
+                f"new={sorted(runtime - EXPECTED_TOOL_NAMES)}, "
+                f"missing={sorted(EXPECTED_TOOL_NAMES - runtime)}"
             )
         mutations = mutation_names(modern)
         if len(mutations) != 13:
