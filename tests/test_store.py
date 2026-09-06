@@ -37,7 +37,8 @@ def test_template_is_created_on_first_load_owner_only():
     path = store.path()
     assert cfg.config_file == path
     assert path.exists()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     # The instructions someone needs are in the file, because the moment they open it
     # is the moment they are asking these exact questions.
     body = path.read_text()
@@ -241,6 +242,7 @@ def test_blank_entries_in_the_template_are_not_credentials():
     assert cfg.env == "india_prod"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
 def test_world_readable_file_is_reported_not_fatal():
     path = write_store("DELTA_API_KEY=k\nDELTA_API_SECRET=s\n")
     os.chmod(path, 0o644)
@@ -370,6 +372,7 @@ def test_a_failed_write_leaves_nothing_behind_beside_the_config(monkeypatch):
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
 def test_write_never_publishes_a_secret_into_a_file_others_can_read():
     """Saving is the one moment a new secret enters this file.
 
@@ -384,6 +387,7 @@ def test_write_never_publishes_a_secret_into_a_file_others_can_read():
     assert store.insecure_permissions() is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
 def test_write_keeps_the_owner_bits_the_file_already_had():
     """Masking group and other, not forcing 0600 — an owner who chose 0400 keeps it."""
     path = write_store("DELTA_API_KEY=old\n")
@@ -392,6 +396,7 @@ def test_write_keeps_the_owner_bits_the_file_already_had():
     assert stat.S_IMODE(path.stat().st_mode) == 0o400
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod does not make a Windows directory read-only")
 def test_write_reports_a_read_only_directory_rather_than_raising():
     """A caller may be a tool answering a form, where an exception is not actionable."""
     path = write_store("DELTA_API_KEY=\n")
