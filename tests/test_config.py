@@ -128,21 +128,7 @@ def test_partial_credentials_detects_a_half_supplied_pair(monkeypatch, key, secr
     assert cfg.has_credentials is (key is not None and secret is not None)
 
 
-def test_scoped_mode_keys_bind_the_exact_reported_client_name():
-    variants = ["foo-bar", "foo bar", "foo.bar", " foo-bar", "foo-bar "]
-    keys = {config_mod.mode_key(name) for name in variants}
-    assert len(keys) == len(variants)
-    assert all(key.startswith("DELTA_MCP_MODE_") for key in keys)
-
-
-def test_punctuation_only_client_names_still_make_legal_distinct_keys():
-    first = config_mod.mode_key("!!!")
-    second = config_mod.mode_key("???")
-    assert first != second
-    assert first.startswith("DELTA_MCP_MODE_CLIENT_")
-    assert first.isascii() and first.replace("_", "").isalnum()
-
-
-@pytest.mark.parametrize("client", ["", " ", "\n\t"])
-def test_an_absent_or_whitespace_only_client_has_no_mode_binding(client):
-    assert config_mod.mode_key(client) == ""
+@pytest.mark.parametrize("value", ["trade", "invalid", " TRADE "])
+def test_legacy_mode_is_ignored_for_authorization(monkeypatch, value):
+    monkeypatch.setenv("DELTA_MCP_MODE", value)
+    assert config_mod.load().mode == "read"

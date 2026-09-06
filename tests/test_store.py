@@ -1,6 +1,5 @@
 import os
 import stat
-import threading
 
 import pytest
 
@@ -39,12 +38,11 @@ def test_template_is_created_on_first_load_owner_only():
     assert path.exists()
     if os.name != "nt":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    # The instructions someone needs are in the file, because the moment they open it
-    # is the moment they are asking these exact questions.
+    # New files keep only non-secret settings. The browser owns credential setup.
     body = path.read_text()
-    assert "Read Data" in body
-    assert "india_testnet" in body
-    assert "DELTA_API_KEY=" in body
+    assert "browser" in body
+    assert "DELTA_API_KEY" not in body
+    assert "DELTA_API_SECRET" not in body
 
 
 def test_existing_file_is_never_overwritten():
@@ -64,12 +62,12 @@ def test_unwritable_location_does_not_stop_the_server(tmp_path, monkeypatch):
     assert cfg.has_credentials is False
 
 
-def test_store_supplies_settings_when_the_environment_is_silent():
+def test_store_supplies_environment_but_not_legacy_credentials():
     write_store("DELTA_API_KEY=k\nDELTA_API_SECRET=s\nDELTA_MCP_ENV=india_testnet\n")
     cfg = config_mod.load()
     assert cfg.env == "india_testnet"
     assert cfg.base_url == config_mod.INDIA_TESTNET_REST
-    assert (cfg.api_key, cfg.api_secret) == ("k", "s")
+    assert (cfg.api_key, cfg.api_secret) == (None, None)
 
 
 def test_one_load_uses_one_complete_store_snapshot(monkeypatch):
@@ -100,45 +98,9 @@ def test_one_load_uses_one_complete_store_snapshot(monkeypatch):
     assert reads == 1
     assert (cfg.env, cfg.api_key, cfg.api_secret, cfg.debug) == (
         "india_testnet",
-        "before-key",
-        "before-secret",
+        None,
+        None,
         False,
-    )
-
-
-def test_client_entitlement_uses_the_same_snapshot_as_its_identity(monkeypatch):
-    """A concurrent replace cannot pair an old account with a new trade grant."""
-    client = "Claude Desktop"
-    scoped = config_mod.mode_key(client)
-    before = {
-        "DELTA_MCP_ENV": "india_testnet",
-        "DELTA_API_KEY": "before-key",
-        "DELTA_API_SECRET": "before-secret",
-        scoped: "read",
-    }
-    after = {
-        "DELTA_MCP_ENV": "india_prod",
-        "DELTA_API_KEY": "after-key",
-        "DELTA_API_SECRET": "after-secret",
-        scoped: "trade",
-    }
-    reads = 0
-
-    def changing_store():
-        nonlocal reads
-        reads += 1
-        return before if reads == 1 else after
-
-    monkeypatch.setattr(store, "read", changing_store)
-
-    cfg = config_mod.load_for_client(client)
-
-    assert reads == 1
-    assert (cfg.env, cfg.api_key, cfg.api_secret, cfg.mode) == (
-        "india_testnet",
-        "before-key",
-        "before-secret",
-        "read",
     )
 
 
@@ -151,20 +113,15 @@ def test_client_environment_beats_the_store(monkeypatch):
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_client_values_fall_through_to_the_store(monkeypatch, blank):
-    """A bundle substitutes every variable it declares, filled in or not.
-
-    Leaving the API key field empty in the Claude Desktop form puts "" in the
-    environment. Treating that as an answer would mean the shared file could never
-    reach a bundle user at all.
-    """
+def test_blank_process_credentials_do_not_restore_file_credentials(monkeypatch, blank):
+    """Blank process values do not make a legacy plaintext pair active."""
     write_store("DELTA_API_KEY=k\nDELTA_API_SECRET=s\nDELTA_MCP_ENV=india_testnet\n")
     monkeypatch.setenv("DELTA_API_KEY", blank)
     monkeypatch.setenv("DELTA_API_SECRET", blank)
     monkeypatch.setenv("DELTA_MCP_ENV", blank)
     cfg = config_mod.load()
     assert cfg.env == "india_testnet"
-    assert (cfg.api_key, cfg.api_secret) == ("k", "s")
+    assert (cfg.api_key, cfg.api_secret) == (None, None)
 
 
 def test_a_stray_key_never_pairs_with_the_stores_secret(monkeypatch):
@@ -193,13 +150,13 @@ def test_trade_mode_is_never_read_from_the_store():
     write_store("DELTA_API_KEY=k\nDELTA_API_SECRET=s\nDELTA_MCP_MODE=trade\n")
     cfg = config_mod.load()
     assert cfg.mode == "read"
-    assert cfg.has_credentials is True
+    assert cfg.has_credentials is False
 
 
-def test_trade_mode_still_works_from_the_client(monkeypatch):
+def test_trade_mode_is_also_ignored_from_the_client(monkeypatch):
     write_store("DELTA_API_KEY=k\nDELTA_API_SECRET=s\n")
     monkeypatch.setenv("DELTA_MCP_MODE", "trade")
-    assert config_mod.load().mode == "trade"
+    assert config_mod.load().mode == "read"
 
 
 def test_debug_and_path_overrides_come_from_the_store(tmp_path):
@@ -223,14 +180,13 @@ def test_debug_and_path_overrides_come_from_the_store(tmp_path):
         ("DELTA_API_KEY=windows\r", "windows"),
     ],
 )
-def test_a_hand_edited_file_survives_the_usual_mistakes(line, expected):
-    """Each of these silently corrupts a credential under a naive KEY=value split.
-
-    Three of the five then fail as a signature error indistinguishable from a wrong
-    key, which is the worst outcome for the people this file exists to help.
-    """
+def test_a_hand_edited_legacy_credential_never_becomes_runtime_authority(
+    line, expected
+):
+    """The settings parser can inspect legacy values, but Config does not use them."""
     write_store(f"{line}\nDELTA_API_SECRET=s\n")
-    assert config_mod.load().api_key == expected
+    assert store.read()["DELTA_API_KEY"] == expected
+    assert config_mod.load().api_key is None
 
 
 def test_blank_entries_in_the_template_are_not_credentials():
@@ -249,7 +205,7 @@ def test_world_readable_file_is_reported_not_fatal():
     warning = store.insecure_permissions()
     assert warning is not None
     assert "chmod 600" in warning
-    assert config_mod.load().has_credentials is True
+    assert config_mod.load().has_credentials is False
 
     os.chmod(path, 0o600)
     assert store.insecure_permissions() is None
@@ -261,111 +217,89 @@ def test_missing_file_reports_no_permission_warning(tmp_path, monkeypatch):
 
 
 def test_write_creates_the_file_it_writes_into():
-    """Every front-end writes through here, and the first one to run finds no file."""
-    assert store.write({"DELTA_API_KEY": "k", "DELTA_API_SECRET": "s"}) is None
-    assert config_mod.load().has_credentials is True
+    assert store.write({"DELTA_MCP_DEBUG": "1"}) is None
+    assert config_mod.load().debug is True
 
 
 def test_write_leaves_settings_it_was_not_given_alone():
     """Two settings written at different moments must not erase each other."""
     write_store("DELTA_MCP_ENV=india_testnet\nDELTA_MCP_DEBUG=1\n")
-    assert store.write({"DELTA_API_KEY": "k", "DELTA_API_SECRET": "s"}) is None
+    assert store.write({"DELTA_MCP_ENV": "india_prod"}) is None
 
     cfg = config_mod.load()
-    assert (cfg.env, cfg.debug) == ("india_testnet", True)
-    assert cfg.has_credentials is True
+    assert (cfg.env, cfg.debug) == ("india_prod", True)
+    assert store.environment_state(config_mod.DEFAULT_ENV) == ("india_prod", 1)
 
 
-def test_concurrent_writers_preserve_another_clients_trade_deescalation(monkeypatch):
-    """A disjoint save cannot republish a stale trade grant from its staging copy."""
-    first_mode = config_mod.mode_key("first-client")
-    second_mode = config_mod.mode_key("second-client")
-    write_store(f"{first_mode}=trade\n{second_mode}=read\n")
+def test_environment_compare_and_write_rejects_an_aba_generation() -> None:
+    write_store("DELTA_MCP_ENV=india_prod\nDELTA_MCP_ENV_GENERATION=2\n")
 
-    first_inside = threading.Event()
-    release_first = threading.Event()
-    second_inside = threading.Event()
-    real_set_key = store.set_key
+    with pytest.raises(store.SettingsConflictError):
+        store.compare_and_write_environment(
+            "india_prod",
+            0,
+            "india_testnet",
+            default_environment=config_mod.DEFAULT_ENV,
+            before_publish=lambda: None,
+        )
 
-    def interleaved_set_key(target, key, value, *args, **kwargs):
-        if threading.current_thread().name == "first-writer" and key == first_mode:
-            first_inside.set()
-            assert release_first.wait(2)
-        if threading.current_thread().name == "second-writer":
-            second_inside.set()
-        return real_set_key(target, key, value, *args, **kwargs)
+    assert store.environment_state(config_mod.DEFAULT_ENV) == ("india_prod", 2)
 
-    monkeypatch.setattr(store, "set_key", interleaved_set_key)
-    outcomes: dict[str, str | None] = {}
 
-    first = threading.Thread(
-        target=lambda: outcomes.setdefault("first", store.write({first_mode: "read"})),
-        name="first-writer",
+def test_environment_compare_and_write_rejects_a_corrupt_generation() -> None:
+    settings = write_store(
+        "DELTA_MCP_ENV=india_prod\nDELTA_MCP_ENV_GENERATION=not-an-integer\n"
     )
-    second = threading.Thread(
-        target=lambda: outcomes.setdefault("second", store.write({second_mode: "trade"})),
-        name="second-writer",
-    )
+    before = settings.read_text()
 
-    first.start()
-    assert first_inside.wait(2)
-    second.start()
-    assert not second_inside.wait(0.1)
-    release_first.set()
-    first.join(2)
-    second.join(2)
+    with pytest.raises(store.SettingsConflictError):
+        store.compare_and_write_environment(
+            "india_prod",
+            -1,
+            "india_testnet",
+            default_environment=config_mod.DEFAULT_ENV,
+            before_publish=lambda: None,
+        )
 
-    assert not first.is_alive() and not second.is_alive()
-    assert outcomes == {"first": None, "second": None}
-    assert store.read()[first_mode] == "read"
-    assert store.read()[second_mode] == "trade"
+    assert settings.read_text() == before
 
 
 @pytest.mark.parametrize(
     "value",
     ["has spaces", "quotes'and\"more", "hash#inside", "newline\ninjected", "DELTA_MCP_MODE=trade"],
 )
-def test_a_written_value_survives_being_read_back(value):
+def test_a_non_secret_written_value_survives_being_read_back(value):
     """A value carrying a newline or an `=` must come back as one string.
 
     The last case would otherwise define a second setting and arm trading.
     """
-    store.write({"DELTA_API_KEY": value, "DELTA_API_SECRET": "s"})
-    cfg = config_mod.load()
-    assert cfg.api_key == value
-    assert cfg.mode == "read"
+    store.write({"CUSTOM_SETTING": value})
+    assert store.read()["CUSTOM_SETTING"] == value
 
 
-def test_a_failed_write_leaves_the_previous_credential_untouched(monkeypatch):
-    """A new key beside the old secret is worse than no write at all.
-
-    That pair was never issued together, so it still reads as complete, still registers
-    the account tools, and fails every signed request.
-    """
-    write_store("DELTA_API_KEY=old-key\nDELTA_API_SECRET=old-secret\n")
+def test_a_failed_write_leaves_the_previous_settings_untouched(monkeypatch):
+    write_store("SETTING_A=old-a\nSETTING_B=old-b\n")
     real = store.set_key
 
-    def fail_on_the_secret(target, key, value, *args, **kwargs):
-        if key == "DELTA_API_SECRET":
+    def fail_on_second_setting(target, key, value, *args, **kwargs):
+        if key == "SETTING_B":
             raise OSError("no space left on device")
         return real(target, key, value, *args, **kwargs)
 
-    monkeypatch.setattr(store, "set_key", fail_on_the_secret)
-    assert store.write({"DELTA_API_KEY": "new-key", "DELTA_API_SECRET": "new-secret"}) is not None
+    monkeypatch.setattr(store, "set_key", fail_on_second_setting)
+    assert store.write({"SETTING_A": "new-a", "SETTING_B": "new-b"}) is not None
 
-    cfg = config_mod.load()
-    assert (cfg.api_key, cfg.api_secret) == ("old-key", "old-secret")
+    assert store.read() == {"SETTING_A": "old-a", "SETTING_B": "old-b"}
 
 
 def test_a_failed_write_leaves_nothing_behind_beside_the_config(monkeypatch):
-    """The staging copy holds a secret, so a failure must not strand it in the directory."""
-    path = write_store("DELTA_API_KEY=old\n")
+    path = write_store("CUSTOM_SETTING=old\n")
 
     def boom(*args, **kwargs):
         raise OSError("no space left on device")
 
     monkeypatch.setattr(store, "set_key", boom)
-    assert store.write({"DELTA_API_KEY": "new"}) is not None
+    assert store.write({"CUSTOM_SETTING": "new"}) is not None
     assert {entry.name for entry in path.parent.iterdir()} == {
         path.name,
         f".{path.name}.lock",
@@ -373,15 +307,10 @@ def test_a_failed_write_leaves_nothing_behind_beside_the_config(monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
-def test_write_never_publishes_a_secret_into_a_file_others_can_read():
-    """Saving is the one moment a new secret enters this file.
-
-    Publishing it into a group- or world-readable file would hand it to every other
-    account on the machine, and silently — the permission warning only runs at startup.
-    """
-    path = write_store("DELTA_API_KEY=old\nDELTA_API_SECRET=old\n")
+def test_write_tightens_permissions_on_the_shared_settings_file():
+    path = write_store("CUSTOM_SETTING=old\n")
     os.chmod(path, 0o644)
-    assert store.write({"DELTA_API_KEY": "fresh", "DELTA_API_SECRET": "fresh"}) is None
+    assert store.write({"CUSTOM_SETTING": "fresh"}) is None
 
     assert stat.S_IMODE(path.stat().st_mode) & (stat.S_IRGRP | stat.S_IROTH) == 0
     assert store.insecure_permissions() is None
@@ -390,30 +319,39 @@ def test_write_never_publishes_a_secret_into_a_file_others_can_read():
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
 def test_write_keeps_the_owner_bits_the_file_already_had():
     """Masking group and other, not forcing 0600 — an owner who chose 0400 keeps it."""
-    path = write_store("DELTA_API_KEY=old\n")
+    path = write_store("CUSTOM_SETTING=old\n")
     os.chmod(path, 0o400)
-    store.write({"DELTA_API_KEY": "new"})
+    store.write({"CUSTOM_SETTING": "new"})
     assert stat.S_IMODE(path.stat().st_mode) == 0o400
 
 
 @pytest.mark.skipif(os.name == "nt", reason="chmod does not make a Windows directory read-only")
 def test_write_reports_a_read_only_directory_rather_than_raising():
     """A caller may be a tool answering a form, where an exception is not actionable."""
-    path = write_store("DELTA_API_KEY=\n")
+    path = write_store("CUSTOM_SETTING=\n")
     os.chmod(path.parent, 0o500)
     try:
-        problem = store.write({"DELTA_API_KEY": "k"})
+        problem = store.write({"CUSTOM_SETTING": "value"})
     finally:
         os.chmod(path.parent, 0o700)
-    assert problem is not None
-    assert "DELTA_API_KEY" in problem
+    assert problem == "the shared settings could not be updated"
+    assert str(path) not in problem
+
 
 def test_the_template_points_at_the_dashboard_the_rest_of_the_package_uses():
-    """store cannot import config — config imports store — so this is the only check."""
-    assert config_mod.DASHBOARDS["india_prod"] in store.TEMPLATE
+    """Dashboard links belong to the browser, not the non-secret template."""
+    assert config_mod.DASHBOARDS["india_prod"] not in store.TEMPLATE
+    assert "API key" not in store.TEMPLATE
+
 
 def test_write_reports_a_location_it_cannot_use(tmp_path, monkeypatch):
     blocker = tmp_path / "a-file"
     blocker.write_text("not a directory")
     monkeypatch.setenv("DELTA_MCP_CONFIG_FILE", str(blocker / "config.env"))
-    assert store.write({"DELTA_API_KEY": "k"}) is not None
+    assert store.write({"CUSTOM_SETTING": "value"}) is not None
+
+
+def test_write_rejects_plaintext_credentials() -> None:
+    problem = store.write({"DELTA_API_KEY": "key", "DELTA_API_SECRET": "secret"})
+    assert problem == "API credentials must be managed through Manage Connection"
+    assert not store.path().exists()
