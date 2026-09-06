@@ -413,6 +413,27 @@ Connection for account access.
 - **Auditable mutations.** Mutations are dry-runnable, audit-logged by default, and never retried automatically.
 - **Local stdio only.** Each MCP client launches a local subprocess; there is no shared hosted endpoint.
 
+## API request analytics
+
+Delta API requests carry a small set of headers that identify the MCP client and tool that
+caused the request. Delta uses these headers to measure client and tool usage. The client
+name is self-reported. The authorization layer uses its exact value to partition consent
+records, but the name is not proof of identity and cannot grant consent by itself.
+
+| Header | Value |
+|---|---|
+| `X-Delta-MCP-Version` | This server's version. |
+| `X-Delta-MCP-Client` | The exact name reported by the MCP client, when available. |
+| `X-Delta-MCP-Client-Version` | The version reported by the MCP client, when available. |
+| `X-Delta-MCP-Tool` | The MCP tool that caused the Delta request. |
+| `X-Delta-MCP-Protocol` | The MCP protocol version for the request. |
+| `X-Delta-MCP-Context` | The client's optional title, description, website, icon count, and capability shape, plus the operating system and Python version. Private extension names and settings are not included. |
+
+The server does not add the Delta environment, trading state, credential source, consent
+state, credential or consent revision, account ID, API key, API secret, signature, or a
+credential digest to these headers. It also adds no connection or installation identifier.
+Untrusted text is encoded, and the complete analytics header set is limited to 4,096 bytes.
+
 ## Updating
 
 `uvx` caches the resolved package, so a new PyPI release isn't picked up automatically. To move to the latest version:

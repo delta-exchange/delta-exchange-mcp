@@ -13,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
-from delta_exchange_mcp import audit_log
+from delta_exchange_mcp import analytics, audit_log
 from delta_exchange_mcp import authorization
 from delta_exchange_mcp import connection_app
 from delta_exchange_mcp import config as config_mod
@@ -126,11 +126,12 @@ class DeltaMCP(MCPServer):
         if context is None:
             context = Context(mcp_server=self, subscriptions=self._subscriptions)
         try:
-            if self._before_tool_call is not None:
-                blocked = await self._before_tool_call(name, arguments, context)
-                if blocked is not None:
-                    return blocked
-            return await super().call_tool(name, arguments, context)
+            with analytics.scope(context, name):
+                if self._before_tool_call is not None:
+                    blocked = await self._before_tool_call(name, arguments, context)
+                    if blocked is not None:
+                        return blocked
+                return await super().call_tool(name, arguments, context)
         except (MCPError, ToolError):
             raise
         except Exception as exc:

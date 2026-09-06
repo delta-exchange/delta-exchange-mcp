@@ -25,12 +25,12 @@ session: ContextVar[ServerSession | None] = ContextVar(
 class Client:
     """How the connected host names itself in the handshake.
 
-    Self-reported and unauthenticated: a client may claim any name. It scopes convenience
-    settings and labels analytics. It must never gate anything that carries a safety
-    consequence.
+    Self-reported and unauthenticated: a client may claim any name. Its exact value
+    partitions consent records and labels analytics, but the name does not prove identity
+    or grant consent by itself.
 
     `title` is the host's display name and may be set by the person using it, so it is
-    read for completeness but never sent anywhere or used as a key.
+    included only in bounded analytics and never used as a consent key.
     """
 
     name: str = ""
