@@ -192,7 +192,13 @@ class _PreparedReplacement:
             ),
         )
         self.values[self.environment] = rollback
-        self.metadata.write(self.values)
+        try:
+            self.metadata.write(self.values)
+        except Exception:
+            # Still restore the live binding and delete the candidate. Cleanup below
+            # retries the pointer write; a persistent failure must not keep a rejected
+            # credential usable merely because its metadata could not be restored.
+            logger.warning("credential rollback could not publish the previous pointer")
 
         activation_error: Exception | None = None
         try:
@@ -624,6 +630,11 @@ class CredentialStore:
         previous = values.get(environment, EnvironmentState())
         if not previous.pending_revisions:
             return
+
+        if previous.active_revision is not None:
+            # A failed rollback can remove the candidate while metadata still names
+            # it. Preserve the old pending record for recovery in that state.
+            self._get_locked(environment, values)
 
         remaining: list[int] = []
         for revision in previous.pending_revisions:

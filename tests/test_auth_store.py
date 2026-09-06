@@ -282,6 +282,53 @@ def test_activation_failure_restores_metadata_and_removes_the_new_record(tmp_pat
     assert set(backend.values) == {record_name(credentials, 1)}
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("failure", ["activation", "retirement"])
+def test_rollback_continues_when_metadata_cannot_be_restored(
+    tmp_path, monkeypatch, persistent, failure
+):
+    credentials, backend = make_store(tmp_path)
+    first = credentials.replace("india_prod", "old-key", "old-secret")
+    metadata = credentials._metadata
+    write = metadata.write
+    writes_blocked = False
+    observed = []
+
+    def fail_write(values):
+        nonlocal writes_blocked
+        if writes_blocked:
+            writes_blocked = persistent
+            raise auth_store.MetadataError("metadata write failed")
+        write(values)
+
+    def activate(credential):
+        nonlocal writes_blocked
+        observed.append(credential.revision if credential else None)
+        if credential and credential.revision == 2:
+            writes_blocked = True
+            if failure == "activation":
+                raise RuntimeError("rebind failed")
+            backend.fail_delete.add(record_name(credentials, 1))
+
+    monkeypatch.setattr(metadata, "write", fail_write)
+    with pytest.raises(CredentialStoreError):
+        credentials.replace("india_prod", "new-key", "new-secret", activate=activate)
+
+    assert observed == [2, 1]
+    assert set(backend.values) == {record_name(credentials, 1)}
+    restarted = CredentialStore(
+        backend, FileMetadata(tmp_path / "credentials.json"), CredentialSource.OS_STORE
+    )
+    if persistent:
+        # The pointer cannot be repaired while metadata is unwritable. A later read
+        # must refuse the missing candidate without deleting the previous secret.
+        with pytest.raises(CredentialCorruptError, match="missing revision 2"):
+            restarted.get("india_prod")
+        assert set(backend.values) == {record_name(credentials, 1)}
+    else:
+        assert restarted.get("india_prod") == first
+
+
 def test_retirement_failure_restores_a_record_deleted_before_the_error(tmp_path):
     credentials, backend = make_store(tmp_path)
     first = credentials.replace("india_prod", "old-key", "old-secret")
