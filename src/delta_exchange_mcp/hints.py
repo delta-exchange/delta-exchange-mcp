@@ -3,16 +3,16 @@
 A client uses these to decide how to present a tool and how loudly to confirm before
 calling it. They are advisory: the spec is explicit that a client must not trust them from
 an untrusted server, so nothing here is a safety boundary. The real boundaries are
-elsewhere — the trading surface is absent from the tool list unless it was armed, and every
-mutation carries `_meta["delta.exchange/mutating"]`, which is what the bundle verifier reads
-rather than inferring safety from a tool's name.
+elsewhere. Every trading tool stays visible and checks credentials and consent when called.
+Every mutation carries `_meta["delta.exchange/mutating"]`, which the bundle verifier reads
+to identify trading mutations.
 
 Both helpers return a fresh model rather than exposing a shared constant. One instance
-handed to forty-six registrations would be forty-six references to one mutable object.
+shared across registrations would give each tool the same mutable object.
 
 `external` is `openWorldHint`: true when the tool reaches Delta's API, false when it only
 reads or writes local state, such as the settings file. Almost every tool here is external;
-the status tools and the mode save are the exceptions.
+the status tools and Manage Connection use local state.
 """
 
 from __future__ import annotations

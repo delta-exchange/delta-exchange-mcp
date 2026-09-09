@@ -16,7 +16,9 @@ def test_help_exits_zero_and_prints_usage(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "usage: delta-exchange-mcp" in out
-    # The env vars are the whole configuration surface, so help is useless without them.
+    assert "Manage Connection is the normal environment" in out
+    assert "advanced externally managed compatibility overrides" in out
+    assert "process memory and no plaintext" in out
     assert "DELTA_MCP_ENV" in out
     assert "DELTA_API_KEY" in out
     assert "DELTA_MCP_MODE" in out
