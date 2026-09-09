@@ -116,6 +116,27 @@ Place this order as a dry run.
 
 The assistant selects the tool. You do not need to name one.
 
+## Skills
+
+A skill is a written procedure for a task that needs more than one tool. It defines the
+tool sequence, calculations, and output. The server includes three procedures:
+
+| Skill | Task | Account access needed to run it |
+|---|---|---|
+| `pnl-analytics` | Review P&L and trading performance | yes |
+| `position-risk` | Report open positions and risk | yes |
+| `funding-carry` | Compare perpetual funding rates | no |
+
+The P&L procedure exports fills to a local CSV. The installed `delta-exchange-pnl` command
+matches fills in first-in, first-out order and calculates the report. The procedure then
+writes an HTML dashboard to `~/.delta-exchange-mcp/reports/`. The raw fill history does not
+need to enter the conversation.
+
+Every procedure is readable before account setup. `list_skills` lists each procedure and
+its account requirement. `get_skill` reads the procedure or a supporting file. Clients can
+also read resources under `skill://delta/<name>` or use the prompt for each procedure.
+Account calls check credentials when called. These procedures do not place orders.
+
 ## Authorization behavior
 
 The server always advertises the same market, account, export, status, and trading tools.

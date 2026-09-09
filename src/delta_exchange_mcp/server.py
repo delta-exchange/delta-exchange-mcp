@@ -20,6 +20,7 @@ from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import hints
 from delta_exchange_mcp import identity
+from delta_exchange_mcp import skills
 from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
@@ -62,6 +63,11 @@ but a call that needs authorization opens the browser connection flow. Never ask
 API key or secret in the conversation, and never accept one in a tool argument. Use
 setup_credentials to open the same browser flow directly. A trading dry run does not need
 trading consent because it sends no mutation to Delta.
+
+This server ships procedures for P&L, position risk, and funding questions. Call
+list_skills, then get_skill for the matching procedure before answering those questions.
+The procedure defines the tool sequence, calculations, and output. Every procedure is
+readable without credentials; an account tool can require browser authorization.
 """
 
 
@@ -176,6 +182,7 @@ def build_server(
 
     market.register(mcp, client)
     account.register(mcp, client)
+    skills.register(mcp)
     trading.register(
         mcp,
         client,

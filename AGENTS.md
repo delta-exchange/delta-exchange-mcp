@@ -206,6 +206,22 @@ Before release:
 - run the authenticated testnet permission matrix with separate Read Data and Trading
   keys. Do not claim Read Data compatibility until each Read Data cell reports `allowed`.
 
+## Packaged skills
+
+`skills.py::Catalog` holds the written procedures under `skills_data/` and their supporting
+files. `skills.register(mcp)` publishes the same catalog through resources, read-only tools,
+and prompts. Keep discovery stable when credentials or consent change. The `requires` value
+describes the account access needed by a procedure; it does not restrict access to its text.
+
+Add a procedure as `skills_data/<name>/SKILL.md` with flat `name`, `description`, and
+`requires` frontmatter. Supporting files under `references/` and `assets/` are read once at
+registration. Resource URIs are static. `get_skill` resolves a supporting path only through
+the discovered file map, so a caller cannot traverse the filesystem.
+
+`report/` contains the local P&L calculator and the `delta-exchange-pnl` command. Preserve its
+`delta.pnl.input.v1` contract and verify that the wheel contains all skill data after a
+packaging change.
+
 ## Tests
 
 `respx` mocks Delta HTTP calls. Add a regression test for each observed failure. Keep live

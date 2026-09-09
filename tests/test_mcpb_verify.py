@@ -6,12 +6,24 @@ from pathlib import Path
 
 import pytest
 
+from delta_exchange_mcp.server import build_server
+from tests.connection_support import service, verified
+
 
 VERIFY_PATH = Path(__file__).parents[1] / "packaging" / "mcpb" / "verify.py"
 VERIFY_SPEC = importlib.util.spec_from_file_location("mcpb_verify", VERIFY_PATH)
 assert VERIFY_SPEC is not None and VERIFY_SPEC.loader is not None
 verify = importlib.util.module_from_spec(VERIFY_SPEC)
 VERIFY_SPEC.loader.exec_module(verify)
+
+
+async def test_verifier_accepts_the_complete_registered_tool_list():
+    app = build_server(connection_service=service(verified))
+    try:
+        tools = await app.list_tools()
+    finally:
+        await app.close_live_client()
+    assert {tool.name for tool in tools} == verify.EXPECTED_TOOL_NAMES
 
 
 def test_protocol_handshakes_use_independent_unpack_and_state_directories(
