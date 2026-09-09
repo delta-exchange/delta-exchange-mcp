@@ -29,11 +29,12 @@ jobs:
       - run: uv run ruff check src tests scripts packaging
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # 3.12 is the floor declared by requires-python; 3.13 is what most users are on.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -43,3 +44,33 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked
       - run: uv run pytest
+
+      - name: Install the Linux Secret Service
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --no-install-recommends --yes dbus-x11 gnome-keyring
+
+      # Python keyring requires the daemon and the test process to share one D-Bus
+      # session. The random unlock password and disposable credential stay inside it.
+      - name: Test the Linux Secret Service adapter
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dbus-run-session -- bash <<'KEYRING_SESSION'
+          set -euo pipefail
+          set +x
+          keyring_password="$(openssl rand -hex 32)"
+          printf '%s' "$keyring_password" | \
+            gnome-keyring-daemon --unlock --components=secrets >/dev/null
+          unset keyring_password
+          DELTA_MCP_TEST_SYSTEM_KEYRING=1 \
+            uv run pytest tests/test_system_keyring.py
+          KEYRING_SESSION
+
+      - name: Test the native system keyring adapter
+        if: runner.os != 'Linux'
+        run: uv run pytest tests/test_system_keyring.py
+        env:
+          DELTA_MCP_TEST_SYSTEM_KEYRING: "1"
