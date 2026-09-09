@@ -175,7 +175,7 @@ async def test_permission_denials_are_conclusive_matrix_outcomes() -> None:
         ("Signature Mismatch", "invalid_signature"),
         ("SignatureExpired", "clock_error"),
         ("ip_not_whitelisted_for_api_key", "ip_restricted"),
-        (f"unknown\n{READ_SECRET}", "api_error:unknown"),
+        (f"unknown\n{READ_SECRET}", "api_error:unknown_error"),
     ],
 )
 async def test_non_permission_api_errors_fail_without_exposing_context(

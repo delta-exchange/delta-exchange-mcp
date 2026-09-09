@@ -11,7 +11,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1,<1",
-    "mcp>=2.0.0,<3",
+    "mcp>=2.1.1,<3",
     "pydantic>=2.13.2,<3",
     # Already resolved via mcp -> pydantic-settings, but declared because we import it
     # directly. Hand-rolling the parse is what it replaces: quoted values, an `export`

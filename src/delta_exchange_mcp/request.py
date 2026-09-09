@@ -11,7 +11,10 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
+from mcp_types import CLIENT_INFO_META_KEY, Implementation
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 session: ContextVar[ServerSession | None] = ContextVar(
     "delta_request_session", default=None
@@ -52,6 +55,34 @@ def client(current: ServerSession | None) -> Client:
     if params is None:
         return UNKNOWN
     info = params.client_info
+    return Client(name=info.name, title=info.title or "", version=info.version)
+
+
+def context_client(ctx: Context) -> Client:
+    """Read the exact client identity carried by this MCP request.
+
+    MCP 2026 is request-scoped and has no initialization session. Its client identity
+    therefore comes from request ``_meta``. Older protocol versions keep the session
+    fallback for compatibility.
+    """
+    try:
+        meta = ctx.request_context.meta
+    except ValueError:
+        meta = None
+    raw = meta.get(CLIENT_INFO_META_KEY) if meta is not None else None
+    try:
+        info = (
+            raw
+            if isinstance(raw, Implementation)
+            else Implementation.model_validate(raw)
+        )
+    except (TypeError, ValueError):
+        if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+            return UNKNOWN
+        try:
+            return client(ctx.session)
+        except ValueError:
+            return UNKNOWN
     return Client(name=info.name, title=info.title or "", version=info.version)
 
 
