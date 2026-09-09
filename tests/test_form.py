@@ -99,9 +99,12 @@ def test_the_view_never_pushes_anything_into_the_model_context():
 
 
 def test_the_view_does_not_feature_test_on_the_ui_capability():
-    """Claude Desktop renders MCP Apps without advertising the extension.
+    """Claude Desktop 1.0.0 rendered MCP Apps without advertising the extension.
 
-    Gating on it would turn the form off on a client that supports it.
+    Build 1.30096.5 does advertise it, read 2026-08-16, so the declaration is no longer
+    missing everywhere. The rule stands anyway: gating would still turn the form off for
+    anyone on the older build, and gating buys nothing. A view that is asked for and cannot
+    be shown costs a collapsed frame; a view that is never asked for costs the feature.
     """
     assert "io.modelcontextprotocol/ui" not in form.VIEW_HTML
 
