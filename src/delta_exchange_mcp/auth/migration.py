@@ -17,7 +17,7 @@ from delta_exchange_mcp.auth.backend import (
     CredentialState,
     CredentialStoreError,
     EnvironmentState,
-    _file_lock,
+    file_lock,
     _sync_after_publication,
     normalize_environment,
 )
@@ -51,7 +51,7 @@ class MigrationResult:
 
 def migrate(store: "CredentialStore", config_path: Path) -> MigrationResult:
     """Move one complete legacy file credential into a persistent store."""
-    with _file_lock(config_path):
+    with file_lock(config_path):
         if config_path.is_symlink():
             return MigrationResult(MigrationStatus.UNAVAILABLE, "")
         try:

@@ -1,4 +1,4 @@
-"""Authenticated read-only account tools. Registered when DELTA_API_KEY/SECRET are set."""
+"""Account tools with stable discovery and call-time credential authorization."""
 
 from __future__ import annotations
 

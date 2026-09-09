@@ -14,8 +14,21 @@ from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, InputRequiredResult
 
-from delta_exchange_mcp import authorization, config as config_mod
-from delta_exchange_mcp import connection_app, debug_log, store
+from delta_exchange_mcp import authorization, debug_log
+from delta_exchange_mcp import connection_app, store
+from delta_exchange_mcp.auth.connection import ConnectionService
+from delta_exchange_mcp.auth.consent import (
+    ConsentBinding,
+    ConsentStore,
+    MemoryConsentBackend,
+)
+from delta_exchange_mcp.auth.store import (
+    CredentialSource,
+    CredentialState,
+    CredentialStore,
+    MemoryMetadata,
+    MemorySecretBackend,
+)
 from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import DeltaMCP, build_server
 from delta_exchange_mcp.tools import account, trading
@@ -29,6 +42,20 @@ async def manage_url(ctx: Context, access: authorization.Access) -> str:
     return MANAGE_URL
 
 
+def connection_service() -> ConnectionService:
+    credentials = CredentialStore(
+        MemorySecretBackend(),
+        MemoryMetadata(),
+        CredentialSource.OS_STORE,
+    )
+    consent = ConsentStore(
+        store.path().with_name("consent.json"),
+        secure_backend_available=True,
+        memory_backend=MemoryConsentBackend(),
+    )
+    return ConnectionService.open(credentials=credentials, consent=consent)
+
+
 @asynccontextmanager
 async def connected(
     app: DeltaMCP | None = None,
@@ -37,7 +64,14 @@ async def connected(
     url_elicitation: bool = False,
     apps: bool = False,
 ) -> AsyncIterator[Client]:
-    owned = app or build_server(manage_url=manage_url)
+    owned = (
+        build_server(
+            manage_url=manage_url,
+            connection_service=connection_service(),
+        )
+        if app is None
+        else app
+    )
 
     async def elicit(ctx: object, params: object) -> types.ElicitResult:
         return types.ElicitResult(action="accept")
@@ -67,8 +101,10 @@ def credentialled(*, trade: bool = False) -> None:
         "DELTA_API_SECRET": "test-secret",
     }
     if trade:
-        values[config_mod.mode_key(CLIENT_NAME)] = "trade"
-    assert store.write(values) is None
+        values["DELTA_MCP_MODE"] = "trade"
+    target = store.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("".join(f"{name}={value}\n" for name, value in values.items()))
 
 
 async def test_auto_mode_discovers_the_2026_server_and_apps_extension() -> None:
@@ -79,23 +115,74 @@ async def test_auto_mode_discovers_the_2026_server_and_apps_extension() -> None:
 
 
 async def test_tool_discovery_is_stable_across_authorization_changes() -> None:
-    async with connected() as client:
-        before = {
-            tool.name
-            for tool in (await client.list_tools(cache_mode="refresh")).tools
-        }
-        credentialled(trade=True)
-        after = {
-            tool.name
-            for tool in (await client.list_tools(cache_mode="refresh")).tools
-        }
+    service = connection_service()
+    app = build_server(manage_url=manage_url, connection_service=service)
+    environment = service.client.config.env
+    try:
+        async with connected(app) as client:
+            before = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
 
-    assert before == after
+            service.credentials.replace(
+                environment,
+                "test-key",
+                "test-secret",
+                state=CredentialState.VERIFIED,
+            )
+            connected_status = await client.call_tool("get_connection_status", {})
+            connected_tools = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
+
+            metadata = service.credentials.metadata(environment)
+            service.consent.enable(
+                ConsentBinding(
+                    client_name=CLIENT_NAME,
+                    environment=environment,
+                    credential_revision=metadata.revision,
+                    credential_generation=metadata.generation,
+                    credential_session_generation=None,
+                ),
+                expected_generation=0,
+            )
+            approved_status = await client.call_tool("get_connection_status", {})
+            approved_tools = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
+    finally:
+        await app.close_live_client()
+
+    assert connected_status.structured_content["credentials_configured"] is True
+    assert approved_status.structured_content["trading"]["enabled"] is True
+    assert before == connected_tools == approved_tools
     assert account.TOOL_NAMES <= before
     assert trading.TOOL_NAMES <= before
     assert "setup_credentials" in before
     assert "save_credentials" not in before
     assert "save_mode" not in before
+
+
+async def test_debug_setting_does_not_change_tool_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DELTA_MCP_DEBUG", raising=False)
+    without_debug = build_server(connection_service=connection_service())
+    monkeypatch.setenv("DELTA_MCP_DEBUG", "1")
+    with_debug = build_server(connection_service=connection_service())
+    try:
+        before = {tool.name for tool in await without_debug.list_tools()}
+        after = {tool.name for tool in await with_debug.list_tools()}
+    finally:
+        await without_debug.close_live_client()
+        await with_debug.close_live_client()
+        debug_log.shutdown()
+
+    assert before == after
+    assert "get_debug_status" in before
 
 
 async def test_connection_status_does_not_return_credentials() -> None:
@@ -145,53 +232,24 @@ async def test_tool_errors_expose_only_deliberate_safe_messages() -> None:
     assert "unexpected-private-value" not in unexpected.content[0].text
 
 
-async def test_debug_setting_does_not_change_tool_discovery(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "debug.log"))
-    without_debug = build_server(
-        config_mod.Config(
-            env="india_testnet",
-            base_url=config_mod.INDIA_TESTNET_REST,
-            debug=False,
-        )
-    )
-    with_debug = build_server(
-        config_mod.Config(
-            env="india_testnet",
-            base_url=config_mod.INDIA_TESTNET_REST,
-            debug=True,
-        )
-    )
-    try:
-        before = {tool.name for tool in await without_debug.list_tools()}
-        after = {tool.name for tool in await with_debug.list_tools()}
-    finally:
-        await without_debug.close_live_client()
-        await with_debug.close_live_client()
-        debug_log.shutdown()
-
-    assert before == after
-    assert "get_debug_status" in before
-
-
-async def test_connection_status_rebinds_an_externally_rotated_credential() -> None:
+async def test_connection_status_ignores_file_credentials_after_migration() -> None:
     credentialled()
-    app = build_server(manage_url=manage_url)
+    app = build_server(
+        manage_url=manage_url,
+        connection_service=connection_service(),
+    )
     try:
         async with connected(app) as client:
             await client.call_tool("get_connection_status", {})
             assert app.live_client.config.api_key == "test-key"
 
-            assert store.write(
-                {
-                    "DELTA_MCP_ENV": "india_testnet",
-                    "DELTA_API_KEY": "rotated-key",
-                    "DELTA_API_SECRET": "rotated-secret",
-                }
-            ) is None
+            store.path().write_text(
+                "DELTA_MCP_ENV=india_testnet\n"
+                "DELTA_API_KEY=rotated-key\n"
+                "DELTA_API_SECRET=rotated-secret\n"
+            )
             await client.call_tool("get_connection_status", {})
-            assert app.live_client.config.api_key == "rotated-key"
+            assert app.live_client.config.api_key == "test-key"
     finally:
         await app.close_live_client()
 
@@ -277,6 +335,7 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
             credentials_ready=True,
             trading_enabled=enabled,
             client_name=CLIENT_NAME,
+            final_trading_check=lambda: enabled,
         )
 
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
@@ -478,6 +537,51 @@ async def test_every_trading_dry_run_works_without_consent_or_http(
 
     assert result.is_error is False
     assert result.structured_content["dry_run"] is True
+
+
+@pytest.mark.parametrize(("name", "arguments"), DRY_RUNS.items())
+async def test_every_real_trading_tool_is_blocked_before_any_mutation(
+    name: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentialled()
+    app = build_server(
+        manage_url=manage_url,
+        connection_service=connection_service(),
+    )
+    mutations: list[tuple[str, str]] = []
+
+    async def mutate(
+        path: str,
+        json_body: Any = None,
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        mutations.append((path, repr(json_body)))
+        return {}
+
+    monkeypatch.setattr(app.live_client, "post", mutate)
+    monkeypatch.setattr(app.live_client, "put", mutate)
+    monkeypatch.setattr(app.live_client, "delete", mutate)
+    try:
+        async with connected(
+            app,
+            mode="2026-07-28",
+            url_elicitation=True,
+        ) as client:
+            result = await client.session.call_tool(
+                name,
+                arguments,
+                allow_input_required=True,
+            )
+    finally:
+        await app.close_live_client()
+
+    assert isinstance(result, InputRequiredResult)
+    prompt = result.input_requests["delta_exchange_authorization"]
+    assert "Enable trading" in prompt.params.message
+    assert mutations == []
 
 
 async def test_every_tool_that_changes_state_has_a_write_annotation(

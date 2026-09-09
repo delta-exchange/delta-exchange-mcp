@@ -27,7 +27,7 @@ class AccessState:
     credentials_ready: bool
     trading_enabled: bool
     client_name: str
-    final_trading_check: FinalTradingCheck | None = None
+    final_trading_check: FinalTradingCheck
 
 
 StateProvider = Callable[[Context], Awaitable[AccessState]]

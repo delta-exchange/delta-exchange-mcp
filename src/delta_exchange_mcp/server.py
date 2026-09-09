@@ -17,33 +17,28 @@ from delta_exchange_mcp import audit_log
 from delta_exchange_mcp import authorization
 from delta_exchange_mcp import connection_app
 from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, debug_log
+from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import hints
 from delta_exchange_mcp import identity
-from delta_exchange_mcp import request
-from delta_exchange_mcp import store
+from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
 _ENV_HELP = """\
-configuration (the settings below, from your MCP client or the shared file):
+configuration (the non-secret settings below, from your MCP client or shared file):
   DELTA_MCP_ENV         india_prod (default), india_testnet, india_devnet
-  DELTA_API_KEY         optional; requires DELTA_API_SECRET for the account tools
-  DELTA_API_SECRET      required alongside DELTA_API_KEY
-  DELTA_MCP_MODE        legacy compatibility value; it does not authorize trading
   DELTA_MCP_DEBUG       1/true/yes/on to trace HTTP requests and responses to a file
   DELTA_MCP_DEBUG_FILE  override the debug log path
   DELTA_MCP_AUDIT       off/false/0/no to disable the trade-mode audit log
   DELTA_MCP_AUDIT_FILE  override the audit log path
   DELTA_MCP_CONFIG_FILE override the shared settings file path
 
-Each is read from the environment your MCP client launched this server with, and
-falls back to a shared file at ~/.delta-exchange-mcp/config.env that every client
-on this machine reads. That file is created with instructions in it on first run,
-so an API key is set once rather than pasted into each client's own config.
-Legacy DELTA_MCP_MODE values do not authorize order placement. Trading requires browser
-consent for the exact client name, environment, and credential revision.
+API keys and secrets are managed in the browser and stored in the operating-system
+credential service. Existing complete DELTA_API_KEY and DELTA_API_SECRET process values
+remain supported as externally managed compatibility settings. DELTA_MCP_MODE never
+authorizes trading. Trading requires browser consent for the exact client name,
+environment, and credential revision.
 
 Prod and testnet API keys are separate; DELTA_MCP_ENV must match the dashboard the
 key was created on. The server speaks MCP over stdio and is normally launched by a
@@ -71,6 +66,7 @@ class DeltaMCP(MCPServer):
     def __init__(self) -> None:
         self._before_tool_call: BeforeToolCall | None = None
         self.live_client: DeltaClient | None = None
+        self.connection_service: ConnectionService | None = None
         apps = Apps()
 
         @apps.tool(
@@ -144,6 +140,8 @@ class DeltaMCP(MCPServer):
             raise UnexpectedToolError(f"Error executing tool {name}") from exc
 
     async def close_live_client(self) -> None:
+        if self.connection_service is not None:
+            self.connection_service.close()
         if self.live_client is not None:
             await self.live_client.aclose()
 
@@ -153,104 +151,77 @@ def build_server(
     *,
     manage_url: authorization.ManageUrlProvider | None = None,
     access_state: authorization.StateProvider | None = None,
+    connection_service: ConnectionService | None = None,
 ) -> DeltaMCP:
     """Build a server whose tool list does not depend on authorization state."""
-    cfg = cfg or config_mod.load()
+    service = connection_service or ConnectionService.open(cfg)
     mcp = DeltaMCP()
-    live = replace(cfg, mode="read")
-    client = DeltaClient(live)
+    mcp.connection_service = service
+    client = service.client
     mcp.live_client = client
-    log_path = debug_log.configure(cfg)
+    log_path = debug_log.configure(client.config)
     trade_gate = trading.TradeGate(armed=False)
-    trade_audit: audit_log.AuditLog | None = None
 
     market.register(mcp, client)
     account.register(mcp, client)
-    trading.register(mcp, client, lambda: trade_audit, trade_gate)
-
-    def http_identity(config: config_mod.Config) -> tuple[str, str | None, str | None]:
-        return config.env, config.api_key, config.api_secret
-
-    async def reconcile(
-        ctx: Context,
-    ) -> tuple[config_mod.Config, dict[str, str], authorization.AccessState]:
-        """Refresh the client binding and authorization for one request."""
-        nonlocal live, trade_audit
-        who = request.context_client(ctx)
-        shared = store.read()
-        next_config = config_mod.load_for_client(who.name, shared)
-        identity_changed = http_identity(live) != http_identity(next_config)
-        if identity_changed:
-            trade_gate.revoke()
-
-        client.rebind(next_config)
-        live = next_config
-        if trade_gate.armed:
-            trade_gate.revoke()
-        trade_audit = None
-
-        return next_config, shared, authorization.AccessState(
-            credentials_ready=next_config.has_credentials,
-            # DELTA_MCP_MODE is a legacy preference, not proof of browser consent.
-            trading_enabled=False,
-            client_name=who.name,
-        )
+    trading.register(
+        mcp,
+        client,
+        lambda: audit_log.configure(replace(client.binding_config, mode="trade")),
+        trade_gate,
+    )
 
     async def state_for(ctx: Context) -> authorization.AccessState:
-        nonlocal trade_audit
         current = (
             await access_state(ctx)
             if access_state is not None
-            else (await reconcile(ctx))[2]
+            else await service.access_state(ctx)
         )
         trade_gate.bind_final_check(current.final_trading_check)
         if current.credentials_ready and current.trading_enabled:
             trade_gate.arm()
-            trade_audit = audit_log.configure(replace(client.config, mode="trade"))
         else:
             if trade_gate.armed:
                 trade_gate.revoke()
-            trade_audit = None
         return current
 
-    authorizer = authorization.ToolAuthorization(state_for, manage_url)
+    authorizer = authorization.ToolAuthorization(
+        state_for,
+        manage_url or service.manage_url,
+    )
     mcp.before_tool_call(authorizer.before_call)
 
     @mcp.tool(annotations=hints.reads("Connection status", external=False))
     async def get_connection_status(ctx: Context) -> dict[str, object]:
         """Report connection and trading state without returning credential material."""
-        who = request.context_client(ctx)
-        if access_state is None:
-            next_config, shared, current = await reconcile(ctx)
-        else:
+        status = service.status(ctx)
+        if access_state is not None:
             current = await state_for(ctx)
-            next_config = client.config
-            shared = store.read()
-        overridden = credentials.overridden_by_client(who.name, shared)
-        return {
-            "environment": next_config.env,
-            "credentials_configured": current.credentials_ready,
-            "account_tools_available": current.credentials_ready,
-            "mode": "trade" if current.trading_enabled else "read",
-            "mode_after_restart": "read",
-            "restart_required": False,
-            "overridden_by_client": overridden,
-            "client_name": who.name,
-            "client_version": who.version,
-            "mode_setting": config_mod.mode_key(who.name),
-            "client_identity": "self-reported name; convenience scope, not authentication",
-            "version": PACKAGE_VERSION,
-            "view": connection_app.VIEW_URI,
-        }
+            status["credentials_configured"] = current.credentials_ready
+            status["account_tools_available"] = current.credentials_ready
+            trading_status = status.get("trading")
+            if isinstance(trading_status, dict):
+                trading_status["enabled"] = current.trading_enabled
+        status["client_identity"] = (
+            "self-reported exact name; consent partition, not authentication"
+        )
+        status["version"] = PACKAGE_VERSION
+        status["view"] = connection_app.VIEW_URI
+        return status
 
     @mcp.tool(annotations=hints.reads("Trading status", external=False))
     async def get_trading_status(ctx: Context) -> dict[str, object]:
         """Report whether this client can send trading mutations."""
         current = await state_for(ctx)
+        active_audit = (
+            audit_log.configure(replace(client.config, mode="trade"))
+            if current.trading_enabled
+            else None
+        )
         return {
             "mode": "trade" if current.trading_enabled else "read",
             "enabled": current.trading_enabled,
-            "audit_log_path": str(trade_audit.path) if trade_audit else None,
+            "audit_log_path": str(active_audit.path) if active_audit else None,
         }
 
     @mcp.tool(annotations=hints.reads("Debug status", external=False))
@@ -291,14 +262,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Optional, so a bare invocation still means "serve" — that is how every MCP client
     # launches this, and it must never become a subcommand.
     sub = parser.add_subparsers(dest="command")
-    login_parser = sub.add_parser(
+    sub.add_parser(
         "login",
-        help="store your API key in the shared settings file, once for every client",
-    )
-    login_parser.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="skip the check against Delta and save whatever is entered",
+        help="open the browser connection page",
     )
     return parser
 
@@ -307,12 +273,21 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
 
     if args.command == "login":
-        from delta_exchange_mcp import login
+        connection = ConnectionService.open()
+        try:
+            page = connection.open_page(open_browser=True)
+            print(
+                f"[delta-exchange-mcp] Manage Connection: {page.url}",
+                file=sys.stderr,
+            )
+            page.wait()
+        finally:
+            connection.close()
+            anyio.run(connection.client.aclose)
+        return
 
-        raise SystemExit(login.run(verify=not args.no_verify))
-
-    cfg = config_mod.load()
-    mcp = build_server(cfg)
+    mcp = build_server()
+    cfg = mcp.live_client.config
     surface = "market+account+trade"
     banner = (
         f"[delta-exchange-mcp] startup stdio env={cfg.env} base_url={cfg.base_url} "
@@ -325,16 +300,10 @@ def main(argv: list[str] | None = None) -> None:
         if log_path is not None:  # configure returns None if the log file can't be opened
             banner += f" debug=on log={log_path}"
     print(banner, file=sys.stderr)
-    insecure = store.insecure_permissions()
-    if insecure is not None:
-        print(f"[delta-exchange-mcp] {insecure}", file=sys.stderr)
-    if cfg.partial_credentials:
-        supplied = "DELTA_API_KEY" if cfg.api_key else "DELTA_API_SECRET"
-        missing = "DELTA_API_SECRET" if cfg.api_key else "DELTA_API_KEY"
+    if mcp.connection_service is not None and mcp.connection_service.credential_error:
         print(
-            f"[delta-exchange-mcp] {supplied} is set but {missing} is not. Both are "
-            "required to sign a request, so the account tools are NOT available and only "
-            "market data will work.",
+            "[delta-exchange-mcp] account authorization is unavailable; market data "
+            "remains available and Manage Connection can repair it.",
             file=sys.stderr,
         )
     anyio.run(serve, mcp)

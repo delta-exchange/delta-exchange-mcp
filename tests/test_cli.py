@@ -1,5 +1,6 @@
 import pytest
 
+from delta_exchange_mcp import server as server_mod
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_parser, build_server, main
 from delta_exchange_mcp.version import PACKAGE_VERSION
@@ -36,6 +37,56 @@ def test_unknown_option_is_rejected():
 
 def test_parser_help_is_not_empty():
     assert "stdio" in build_parser().format_help()
+
+
+def test_login_opens_manage_connection_without_requesting_secrets(
+    monkeypatch, capsys
+):
+    class FakePage:
+        url = "http://127.0.0.1:43123/manage"
+
+        def __init__(self):
+            self.waited = False
+
+        def wait(self):
+            self.waited = True
+
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    class FakeConnection:
+        def __init__(self):
+            self.page = FakePage()
+            self.client = FakeClient()
+            self.open_browser = False
+            self.closed = False
+
+        def open_page(self, *, open_browser=False):
+            self.open_browser = open_browser
+            return self.page
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(
+        server_mod.ConnectionService,
+        "open",
+        staticmethod(lambda: connection),
+    )
+
+    main(["login"])
+
+    error = capsys.readouterr().err
+    assert connection.open_browser is True
+    assert connection.page.waited is True
+    assert connection.closed is True
+    assert connection.client.closed is True
+    assert "Manage Connection: http://127.0.0.1:43123/manage" in error
 
 
 def test_help_documents_every_environment_variable_the_code_reads():
