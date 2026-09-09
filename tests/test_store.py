@@ -41,7 +41,8 @@ def test_template_is_created_on_first_load_owner_only():
     # The instructions someone needs are in the file, because the moment they open it
     # is the moment they are asking these exact questions.
     body = path.read_text()
-    assert "Read Data" in body
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
     assert "india_testnet" in body
     assert "DELTA_API_KEY=" in body
 

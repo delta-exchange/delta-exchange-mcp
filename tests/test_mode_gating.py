@@ -34,7 +34,6 @@ ACCOUNT_TOOLS = {
     "get_product_leverage",
     "get_trading_stats",
     "get_trading_preferences",
-    "get_profile",
 }
 
 

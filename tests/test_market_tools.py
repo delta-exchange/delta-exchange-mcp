@@ -178,3 +178,18 @@ async def test_429_retries_then_succeeds(client: DeltaClient):
     res = await client.get("/tickers/BTCUSD")
     assert route.call_count == 2
     assert res["result"] == {"close": "100"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_transport_errors_still_retry(client: DeltaClient):
+    """Reads stay retryable across transport blips; only mutations must not be."""
+    route = respx.get(f"{INDIA_TESTNET_REST}/tickers/BTCUSD").mock(
+        side_effect=[
+            httpx.ConnectError("flaky network"),
+            httpx.Response(200, json={"success": True, "result": {"close": "100"}}),
+        ]
+    )
+    res = await client.get("/tickers/BTCUSD")
+    assert route.call_count == 2
+    assert res["result"] == {"close": "100"}
