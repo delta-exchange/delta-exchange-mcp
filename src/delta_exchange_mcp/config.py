@@ -86,6 +86,12 @@ def setting(name: str, shared: dict[str, str] | None = None) -> str | None:
     return (values.get(name) or "").strip() or None
 
 
+# The key and its secret are one setting wearing two names. `_credentials` takes both from
+# whichever source holds either, so anything reasoning about where a credential came from
+# has to reason about the pair rather than about one name.
+CREDENTIAL_NAMES = ("DELTA_API_KEY", "DELTA_API_SECRET")
+
+
 def _credentials(shared: dict[str, str]) -> tuple[str | None, str | None]:
     """The API key and its secret, always taken from the same source.
 
@@ -99,13 +105,14 @@ def _credentials(shared: dict[str, str]) -> tuple[str | None, str | None]:
     # Stripped like every other setting, so a whitespace-only field reads as unanswered
     # and falls through. Stripping also absorbs the trailing newline a pasted key
     # usually carries, which would otherwise fail signing and look like a wrong key.
-    key = (os.environ.get("DELTA_API_KEY") or "").strip() or None
-    secret = (os.environ.get("DELTA_API_SECRET") or "").strip() or None
+    key_name, secret_name = CREDENTIAL_NAMES
+    key = (os.environ.get(key_name) or "").strip() or None
+    secret = (os.environ.get(secret_name) or "").strip() or None
     if key or secret:
         return key, secret
     return (
-        (shared.get("DELTA_API_KEY") or "").strip() or None,
-        (shared.get("DELTA_API_SECRET") or "").strip() or None,
+        (shared.get(key_name) or "").strip() or None,
+        (shared.get(secret_name) or "").strip() or None,
     )
 
 
