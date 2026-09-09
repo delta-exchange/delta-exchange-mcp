@@ -63,6 +63,7 @@ async def connected(
     mode: str = "auto",
     url_elicitation: bool = False,
     apps: bool = False,
+    client_info: types.Implementation | None = None,
 ) -> AsyncIterator[Client]:
     owned = (
         build_server(
@@ -82,7 +83,8 @@ async def connected(
     client = Client(
         owned,
         mode=mode,
-        client_info=types.Implementation(name=CLIENT_NAME, version="1"),
+        client_info=client_info
+        or types.Implementation(name=CLIENT_NAME, version="1"),
         elicitation_callback=elicit if url_elicitation else None,
         extensions=extensions,
     )

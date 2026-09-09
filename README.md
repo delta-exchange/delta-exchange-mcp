@@ -198,6 +198,7 @@ non-secret settings only. Process settings take precedence over values in that f
 | `DELTA_MCP_DEBUG_FILE` | automatic | Override the debug log path. |
 | `DELTA_MCP_AUDIT` | on for mutations | Set `off`, `false`, `0`, or `no` to disable the trading audit log. |
 | `DELTA_MCP_AUDIT_FILE` | automatic | Override the audit log path. |
+| `DELTA_MCP_ANALYTICS` | on | Set `off`, `false`, `0`, or `no` in the MCP client's process environment to omit all `X-Delta-MCP-*` headers. |
 | `DELTA_MCP_CONFIG_FILE` | `~/.delta-exchange-mcp/config.env` | Move the non-secret shared settings file. |
 
 ## Install in your MCP client
@@ -418,6 +419,36 @@ exception to the MCP URL elicitation security requirements. Read the
 - **Fail-closed changes.** Credential rotation, disconnect, environment changes, consent-store failures, and process-pair changes disable trading until fresh consent is recorded.
 - **Auditable mutations.** Mutations are dry-runnable, audit-logged by default, and never retried automatically.
 - **Local stdio only.** Each MCP client launches a local subprocess; there is no shared hosted endpoint.
+
+## API request analytics
+
+Delta API requests carry a small set of headers that identify the MCP client and tool that
+caused the request. Delta uses these headers to measure client and tool usage. The client
+name is self-reported. The authorization layer uses its exact value to partition consent
+records, but the name is not proof of identity and cannot grant consent by itself.
+
+| Header | Value |
+|---|---|
+| `X-Delta-MCP-Version` | This server's version. |
+| `X-Delta-MCP-Client` | The exact name reported by the MCP client, when available. |
+| `X-Delta-MCP-Client-Version` | The version reported by the MCP client, when available. |
+| `X-Delta-MCP-Tool` | The MCP tool that caused the Delta request. |
+| `X-Delta-MCP-Protocol` | The MCP protocol version for the request. |
+| `X-Delta-MCP-Context` | The operating system and architecture, Python major and minor version, presence of sampling, elicitation, roots and tasks, and counts of experimental and extension capabilities. Private extension names and settings are not included. |
+
+The server does not add the Delta environment, trading state, credential source, consent
+state, credential or consent revision, account ID, API key, API secret, signature, or a
+credential digest to these headers. It also adds no connection or installation identifier.
+Untrusted text is encoded, and the complete analytics header set is limited to 4,096 bytes.
+The server does not forward the client's title, description, website, or icons. Client
+names and versions are still supplied by the client. Do not put personal information in
+these fields.
+
+Set `DELTA_MCP_ANALYTICS=off` in the MCP client's process environment to omit all six
+analytics headers. The required User-Agent and authentication headers still apply.
+The package does not store an analytics history locally. Delta API infrastructure receives
+the headers with each request. Its log retention is controlled outside this package;
+this repository does not define or promise a retention period for those logs.
 
 ## Updating
 

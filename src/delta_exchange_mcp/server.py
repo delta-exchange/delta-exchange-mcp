@@ -13,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
-from delta_exchange_mcp import audit_log
+from delta_exchange_mcp import analytics, audit_log
 from delta_exchange_mcp import authorization
 from delta_exchange_mcp import connection_app
 from delta_exchange_mcp import config as config_mod
@@ -30,6 +30,7 @@ configuration (the non-secret settings below, from your MCP client or shared fil
   DELTA_MCP_ENV         india_prod (default), india_testnet, india_devnet
   DELTA_MCP_DEBUG       1/true/yes/on to trace HTTP requests and responses to a file
   DELTA_MCP_DEBUG_FILE  override the debug log path
+  DELTA_MCP_ANALYTICS   off/false/0/no to omit client and tool analytics headers
   DELTA_MCP_AUDIT       off/false/0/no to disable the trade-mode audit log
   DELTA_MCP_AUDIT_FILE  override the audit log path
   DELTA_MCP_CONFIG_FILE override the shared settings file path
@@ -126,11 +127,12 @@ class DeltaMCP(MCPServer):
         if context is None:
             context = Context(mcp_server=self, subscriptions=self._subscriptions)
         try:
-            if self._before_tool_call is not None:
-                blocked = await self._before_tool_call(name, arguments, context)
-                if blocked is not None:
-                    return blocked
-            return await super().call_tool(name, arguments, context)
+            with analytics.scope(context, name):
+                if self._before_tool_call is not None:
+                    blocked = await self._before_tool_call(name, arguments, context)
+                    if blocked is not None:
+                        return blocked
+                return await super().call_tool(name, arguments, context)
         except (MCPError, ToolError):
             raise
         except Exception as exc:
