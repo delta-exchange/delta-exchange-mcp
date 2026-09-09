@@ -1,13 +1,16 @@
-"""Authenticated read-only account tools. Registered when DELTA_API_KEY/SECRET are set."""
+"""Account tools with stable discovery and call-time credential authorization."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
+from delta_exchange_mcp import hints
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
 
 TOOL_NAMES = frozenset(
@@ -23,7 +26,6 @@ TOOL_NAMES = frozenset(
         "get_product_leverage",
         "get_trading_stats",
         "get_trading_preferences",
-        "get_profile",
         "bulk_fills_export",
     }
 )
@@ -72,7 +74,7 @@ def _safe_export_path(output_path: str) -> Path:
     home = Path.home().resolve()
     if not (resolved.is_relative_to(cwd) or resolved.is_relative_to(home)):
         raise ValueError(
-            f"output_path must be inside cwd ({cwd}) or home ({home}); got {resolved}"
+            "output_path must be inside the current working directory or home directory"
         )
     return resolved
 
@@ -137,8 +139,8 @@ def _patch_short_option_pnl(result: Any) -> Any:
     return result
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
-    @mcp.tool()
+def register(mcp: MCPServer, client: DeltaClient) -> None:
+    @mcp.tool(annotations=hints.reads("Positions"))
     async def get_positions(
         product_id: int | None = Field(default=None, description="Single product id."),
         underlying_asset_symbol: str | None = Field(
@@ -153,14 +155,16 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         fields, call `get_margined_positions` instead.
         """
         if (product_id is None) == (not underlying_asset_symbol):
-            raise ValueError("pass exactly one of product_id or underlying_asset_symbol")
+            raise ToolError(
+                "pass exactly one of product_id or underlying_asset_symbol"
+            )
         return await client.get(
             "/positions",
             params={"product_id": product_id, "underlying_asset_symbol": underlying_asset_symbol},
             auth=True,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Margined positions"))
     async def get_margined_positions(
         product_ids: list[int] | None = Field(default=None, description="Max 10 product ids."),
         contract_types: list[str] | None = Field(
@@ -197,7 +201,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         )
         return _patch_short_option_pnl(result)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Wallet balances"))
     async def get_wallet_balances() -> dict[str, Any]:
         """Wallet balances across all assets.
 
@@ -210,7 +214,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         """
         return await client.get("/wallet/balances", auth=True)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Wallet transactions"))
     async def get_wallet_transactions(
         asset_ids: list[int] | None = Field(default=None, description="Filter by asset ids."),
         transaction_types: list[str] | None = Field(
@@ -254,7 +258,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         )
         return _annotate_default_window(result, start_time_us)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Fills"))
     async def get_fills(
         product_ids: list[int] | None = None,
         contract_types: list[str] | None = None,
@@ -270,6 +274,9 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         after: str | None = None,
     ) -> dict[str, Any]:
         """Your trade fills (executed trades). Paginated. Timestamps are microseconds.
+
+        This is the authoritative record of what actually executed — no need to cross-check
+        get_order_history, which tracks order lifecycle, not executions.
 
         If start_time_us is omitted the API returns only the last ~90 days — pass start_time_us
         for older/full history. When omitted, the result carries a `notice` field saying so.
@@ -288,7 +295,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         )
         return _annotate_default_window(result, start_time_us)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Open orders"))
     async def get_open_orders(
         product_ids: list[int] | None = Field(default=None, description="Max 10 product ids."),
         states: list[str] | None = Field(default=None, description="Subset of: open, pending."),
@@ -309,7 +316,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             auth=True,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Order history"))
     async def get_order_history(
         product_ids: list[int] | None = None,
         contract_types: list[str] | None = None,
@@ -322,7 +329,10 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         page_size: int = Field(default=50, ge=1, le=200),
         after: str | None = None,
     ) -> dict[str, Any]:
-        """Closed / cancelled orders, filterable + paginated. Timestamps are microseconds."""
+        """Closed or cancelled order records. Use get_fills for executed trades.
+
+        Results are filterable and paginated. Timestamps are microseconds.
+        """
         return await client.get(
             "/orders/history",
             params={
@@ -337,41 +347,42 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             auth=True,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Order by id"))
     async def get_order_by_id(
         order_id: int | None = Field(default=None, description="Delta-assigned order id."),
         client_order_id: str | None = Field(default=None, description="Your client_order_id if you set one."),
     ) -> dict[str, Any]:
         """Fetch a single order by id or client_order_id. Exactly one must be provided."""
         if (order_id is None) == (not client_order_id):
-            raise ValueError("pass exactly one of order_id or client_order_id")
+            raise ToolError("pass exactly one of order_id or client_order_id")
         if order_id is not None:
             return await client.get(f"/orders/{order_id}", auth=True)
         return await client.get(f"/orders/client_order_id/{client_order_id}", auth=True)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Product leverage"))
     async def get_product_leverage(
         product_id: int = Field(description="Product id to fetch leverage for."),
     ) -> dict[str, Any]:
         """Configured order leverage for a product."""
         return await client.get(f"/products/{product_id}/orders/leverage", auth=True)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Trading stats"))
     async def get_trading_stats() -> dict[str, Any]:
         """Account-level trading volume / stats."""
         return await client.get("/stats", auth=True)
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Trading preferences"))
     async def get_trading_preferences() -> dict[str, Any]:
         """User trading preferences (margin mode, notifications, etc.)."""
-        return await client.get("/users/trading_preferences", auth=True)
+        return (await fetch_account_identity(client)).response
 
-    @mcp.tool()
-    async def get_profile() -> dict[str, Any]:
-        """User profile."""
-        return await client.get("/profile", auth=True)
-
-    @mcp.tool()
+    # The one tool here that is not read-only: it writes a CSV, and `write_bytes` replaces
+    # an existing file rather than refusing. Annotating it read-only would let a client
+    # present overwriting someone's file as a harmless lookup. Idempotent because a repeat
+    # rewrites the same path rather than accumulating anything.
+    @mcp.tool(
+        annotations=hints.mutates("Export fills", destructive=True, idempotent=True)
+    )
     async def bulk_fills_export(
         output_path: str = Field(
             description=(
@@ -402,7 +413,10 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         The output path is restricted to the current working directory or the user's
         home directory to keep the write scope predictable.
         """
-        resolved = _safe_export_path(output_path)
+        try:
+            resolved = _safe_export_path(output_path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         resolved.parent.mkdir(parents=True, exist_ok=True)
         data = await client.get_raw(
             "/fills/history/download/csv",

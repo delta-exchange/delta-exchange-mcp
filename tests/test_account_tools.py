@@ -7,13 +7,15 @@ the MCP server, and asserts the request URL + query string + auth headers.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -29,14 +31,14 @@ def _client() -> DeltaClient:
 
 
 def _build_tools() -> dict[str, Any]:
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     account.register(mcp, _client())
     return {t.name: t for t in asyncio.run(mcp.list_tools())}
 
 
 async def _call_tool(tool_name: str, **kwargs: Any) -> Any:
-    """Invoke a registered tool through the FastMCP runtime."""
-    mcp = FastMCP("test")
+    """Invoke a registered tool through the MCPServer runtime."""
+    mcp = MCPServer("test")
     account.register(mcp, _client())
     return await mcp.call_tool(tool_name, kwargs)
 
@@ -45,23 +47,10 @@ def _ok(json_body: Any = None) -> httpx.Response:
     return httpx.Response(200, json=json_body or {"success": True, "result": []})
 
 
-def test_all_twelve_tools_registered():
+def test_all_account_tools_registered():
     names = set(_build_tools())
-    expected = {
-        "get_positions",
-        "get_margined_positions",
-        "get_wallet_balances",
-        "get_wallet_transactions",
-        "get_fills",
-        "get_open_orders",
-        "get_order_history",
-        "get_order_by_id",
-        "get_product_leverage",
-        "get_trading_stats",
-        "get_trading_preferences",
-        "get_profile",
-    }
-    assert expected.issubset(names)
+    assert names == set(account.TOOL_NAMES)
+    assert "get_profile" not in names
 
 
 @pytest.mark.asyncio
@@ -71,6 +60,15 @@ async def test_get_wallet_balances_hits_balances():
     await _call_tool("get_wallet_balances")
     assert route.called
     assert route.calls[0].request.headers.get("api-key") == "k"
+
+
+@pytest.mark.asyncio
+async def test_account_input_error_is_actionable_to_the_mcp_client():
+    with pytest.raises(
+        ToolError,
+        match="pass exactly one of product_id or underlying_asset_symbol",
+    ):
+        await _call_tool("get_positions")
 
 
 @pytest.mark.asyncio
@@ -95,7 +93,7 @@ async def test_get_wallet_transactions_csv_and_pagination():
 
 
 def _structured(result: Any) -> Any:
-    return result[1] if isinstance(result, tuple) else result
+    return result.structured_content
 
 
 @pytest.mark.asyncio
@@ -251,16 +249,10 @@ async def test_get_trading_stats():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_trading_preferences():
-    route = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(return_value=_ok())
+    route = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=_ok({"success": True, "result": {"user_id": 57354187}})
+    )
     await _call_tool("get_trading_preferences")
-    assert route.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_get_profile():
-    route = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(return_value=_ok())
-    await _call_tool("get_profile")
     assert route.called
 
 
@@ -286,8 +278,18 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     monkeypatch.chdir(sandbox)
+    outside = Path(tmp_path.anchor) / "delta-mcp-outside.csv"
+    relative = os.path.relpath(outside, sandbox)
+    assert ".." in Path(relative).parts
     with pytest.raises(ValueError, match="must be inside"):
-        _safe_export_path("../../../../etc/passwd")
+        _safe_export_path(relative)
+
+
+@pytest.mark.asyncio
+async def test_export_path_error_is_actionable_to_the_mcp_client(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ToolError, match="output_path must be inside"):
+        await _call_tool("bulk_fills_export", output_path="/etc/passwd")
 
 
 # --- GH #9: short-option unrealized_pnl sign fix ---------------------------
@@ -400,7 +402,7 @@ async def test_bulk_fills_export_writes_csv(tmp_path, monkeypatch):
         end_time_us=2000,
         product_ids=[1, 2],
     )
-    structured = result[1] if isinstance(result, tuple) else result
+    structured = result.structured_content
     assert (tmp_path / "fills.csv").read_bytes() == csv_body
     assert structured["row_count"] == 2
     assert structured["size_bytes"] == len(csv_body)
@@ -455,8 +457,7 @@ async def test_get_margined_positions_patches_short_option_pnl():
         )
     )
     result = await _call_tool("get_margined_positions")
-    # FastMCP returns (content, structured) — the structured dict is what we want.
-    structured = result[1] if isinstance(result, tuple) else result
+    structured = result.structured_content
     positions = structured["result"] if isinstance(structured, dict) else None
     assert positions is not None, f"unexpected tool result shape: {result!r}"
     short_call = next(p for p in positions if p["product_symbol"].startswith("C-"))

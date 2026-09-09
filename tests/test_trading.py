@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -13,9 +15,10 @@ import respx
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 
 def _client() -> DeltaClient:
@@ -33,14 +36,17 @@ async def _call(
     gate: trading.TradeGate | None = None,
     **kwargs: Any,
 ) -> Any:
-    mcp = FastMCP("test")
-    trading.register(mcp, client, audit, gate)
+    mcp = MCPServer("test")
+    active_gate = gate or trading.TradeGate()
+    if gate is None:
+        active_gate.bind_final_check(lambda: True)
+    trading.register(mcp, client, audit, active_gate)
     return await mcp.call_tool(name, kwargs)
 
 
 def _payload(call_result: Any) -> dict[str, Any]:
-    """mcp.call_tool returns (content, structured); pull the structured dict out."""
-    structured = call_result[1]
+    """mcp.call_tool returns a CallToolResult; pull the structured dict out."""
+    structured = call_result.structured_content
     return structured.get("result", structured) if isinstance(structured, dict) else structured
 
 
@@ -71,7 +77,10 @@ async def test_place_order_signs_exact_body_bytes():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_identity_rebind_revokes_a_trade_still_in_preflight():
+async def test_identity_rebind_revokes_a_trade_still_in_preflight(
+    tmp_path,
+    monkeypatch,
+):
     """A lookup cannot finish by mutating either the old or newly rebound account."""
     lookup_started = asyncio.Event()
     release_lookup = asyncio.Event()
@@ -106,6 +115,9 @@ async def test_identity_rebind_revokes_a_trade_still_in_preflight():
         http=old_http,
     )
     gate = trading.TradeGate()
+    gate.bind_final_check(lambda: True)
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
     new_account = respx.post(f"{INDIA_PROD_REST}/orders").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {"id": 8}})
     )
@@ -114,6 +126,7 @@ async def test_identity_rebind_revokes_a_trade_still_in_preflight():
         _call(
             client,
             "place_order",
+            audit=lambda: audit_log.configure(client.binding_config),
             gate=gate,
             product_symbol="BTCUSD",
             size=1,
@@ -142,6 +155,13 @@ async def test_identity_rebind_revokes_a_trade_still_in_preflight():
         ("GET", f"{INDIA_TESTNET_REST}/products/BTCUSD"),
     ]
     assert new_account.called is False
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "audit.log").read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["env"] == "india_testnet"
+    assert "trading was disabled" in rows[0]["error"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +198,7 @@ async def test_trade_to_read_revokes_a_trade_still_in_preflight():
         http=http,
     )
     gate = trading.TradeGate()
+    gate.bind_final_check(lambda: True)
     call = asyncio.create_task(
         _call(
             client,
@@ -201,6 +222,41 @@ async def test_trade_to_read_revokes_a_trade_still_in_preflight():
     assert [(request.method, str(request.url)) for request in requests] == [
         ("GET", f"{INDIA_TESTNET_REST}/products/BTCUSD"),
     ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_final_checker_error_fails_closed_without_audit_data():
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    )
+    client = _client()
+    audit = Mock(spec=audit_log.AuditLog)
+    gate = trading.TradeGate()
+
+    def failed_check() -> bool:
+        raise RuntimeError("private checker failure")
+
+    gate.bind_final_check(failed_check)
+    try:
+        with pytest.raises(
+            Exception, match="trading authorization could not be confirmed"
+        ):
+            await _call(
+                client,
+                "place_order",
+                audit=audit,
+                gate=gate,
+                product_id=27,
+                size=1,
+                side="buy",
+                order_type="market_order",
+            )
+    finally:
+        await client.aclose()
+
+    assert route.called is False
+    audit.record.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -311,21 +367,72 @@ async def test_batch_cap_enforced():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
+    preferences = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 999}},
+        )
     )
     close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = FastMCP("test")
-    trading.register(mcp, client, None)
+    mcp = MCPServer("test")
+    gate = trading.TradeGate()
+    trading.register(mcp, client, None, gate)
+    gate.bind_final_check(lambda: True)
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+    gate.bind_final_check(lambda: True)
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
 
-    assert profile.call_count == 1  # cached after first fetch
+    assert preferences.call_count == 1  # cached after first fetch
     assert close.call_count == 2
     assert b'"user_id":999' in close.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_all_refetches_user_id_after_credential_rebind() -> None:
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 111}},
+        )
+    )
+    respx.get(f"{INDIA_PROD_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 222}},
+        )
+    )
+    testnet_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    prod_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    gate = trading.TradeGate()
+    trading.register(mcp, client, None, gate)
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="prod-key",
+            api_secret="prod-secret",
+            mode="trade",
+        )
+    )
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
+
+    assert b'"user_id":111' in testnet_close.calls[0].request.content
+    assert b'"user_id":222' in prod_close.calls[0].request.content
+    await client.aclose()
 
 
 # --------------------------------------------------------------- audit log
@@ -335,7 +442,7 @@ async def test_close_all_fetches_and_caches_user_id():
 @respx.mock
 async def test_audit_records_success_and_error_without_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
-    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="trade",
@@ -352,7 +459,7 @@ async def test_audit_records_success_and_error_without_secrets(tmp_path, monkeyp
     client = _client()
     await _call(client, "place_order", audit=audit,
                 product_id=27, size=1, side="buy", order_type="market_order")
-    # FastMCP wraps the DeltaApiError in a ToolError, but _finish records it first.
+    # The SDK wraps the DeltaApiError in a ToolError, but _finish records it first.
     with pytest.raises(Exception, match="insufficient_margin"):
         await _call(client, "place_order", audit=audit,
                     product_id=27, size=1, side="buy", order_type="market_order")
@@ -369,7 +476,7 @@ async def test_audit_records_success_and_error_without_secrets(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_audit_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
-    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="trade",
@@ -377,23 +484,105 @@ async def test_audit_kill_switch(tmp_path, monkeypatch):
     assert audit_log.configure(cfg) is None
 
 
+def test_audit_cache_keeps_environment_labels_exact(tmp_path, monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
+    testnet = audit_log.configure(
+        Config(env="india_testnet", base_url=INDIA_TESTNET_REST, mode="trade")
+    )
+    production = audit_log.configure(
+        Config(env="india_prod", base_url=INDIA_PROD_REST, mode="trade")
+    )
+    assert testnet is not None
+    assert production is not None
+
+    testnet.record("place_order", {"product_id": 27}, result={"id": 1})
+    production.record("place_order", {"product_id": 27}, result={"id": 2})
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "audit.log").read_text().splitlines()
+    ]
+    assert [row["env"] for row in rows] == ["india_testnet", "india_prod"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_successful_rebind_audits_each_mutation_for_its_http_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
+    testnet = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"id": 1}},
+        )
+    )
+    production = respx.post(f"{INDIA_PROD_REST}/orders").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"id": 2}},
+        )
+    )
+    client = _client()
+    gate = trading.TradeGate()
+    mcp = MCPServer("audit-rebind")
+    trading.register(
+        mcp,
+        client,
+        lambda: audit_log.configure(client.binding_config),
+        gate,
+    )
+    arguments = {
+        "product_id": 27,
+        "size": 1,
+        "side": "buy",
+        "order_type": "market_order",
+    }
+
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("place_order", arguments)
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="prod-key",
+            api_secret="prod-secret",
+            mode="trade",
+        )
+    )
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("place_order", arguments)
+    await client.aclose()
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "audit.log").read_text().splitlines()
+    ]
+    assert testnet.call_count == 1
+    assert production.call_count == 1
+    assert [row["env"] for row in rows] == ["india_testnet", "india_prod"]
+
+
 # --------------------------------------------------------------- mode gating
 
 
-def test_trade_tools_absent_in_read_mode():
+def test_trade_tools_stay_discoverable_in_read_mode():
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="read",
     )
     mcp = build_server(cfg)
     names = {t.name for t in mcp._tool_manager.list_tools()}
-    assert "place_order" not in names
+    assert "place_order" in names
     assert "get_positions" in names  # account tools still present
 
 
 def test_trade_tools_present_in_trade_mode(monkeypatch):
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")  # no file writes during this test
-    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
     cfg = Config(
         env="india_testnet", base_url=INDIA_TESTNET_REST,
         api_key="k1", api_secret="s1", mode="trade",
@@ -411,7 +600,7 @@ def test_trade_tools_present_in_trade_mode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_all_trading_tools_declare_mutating_metadata():
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     client = _client()
     try:
         trading.register(mcp, client)
@@ -498,7 +687,7 @@ async def test_place_batch_flags_partial_failure_with_dropped_coids():
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
     assert route.called
-    pf = out[1]["partial_failure"]
+    pf = out.structured_content["partial_failure"]
     assert pf["requested"] == 3 and pf["succeeded"] == 2 and pf["dropped"] == 1
     assert pf["dropped_client_order_ids"] == ["b"]
 
@@ -514,7 +703,7 @@ async def test_cancel_batch_flags_dropped_ids():
         client, "cancel_batch_orders", product_id=84,
         orders=[{"id": 111}, {"id": 999999999}],
     )
-    pf = out[1]["partial_failure"]
+    pf = out.structured_content["partial_failure"]
     assert pf["requested"] == 2 and pf["succeeded"] == 1
     assert pf["dropped_ids"] == [999999999]
 
@@ -531,7 +720,7 @@ async def test_batch_no_partial_flag_when_all_succeed():
         {"side": "buy", "order_type": "limit_order", "limit_price": "61000", "size": 1},
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
-    assert "partial_failure" not in out[1]
+    assert "partial_failure" not in out.structured_content
 
 
 # --------------------------------------------------------------- BUG-4: close_all scope
@@ -547,8 +736,11 @@ async def test_close_all_requires_a_scope():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_explicit_scope_not_broadened():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"user_id": 7}},
+        )
     )
     route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -641,7 +833,7 @@ async def test_off_tick_price_rounded_to_nearest():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.1"' in route.calls[0].request.content
-    structured = out[1]
+    structured = out.structured_content
     assert structured["price_adjustments"] == [
         {"field": "limit_price", "sent": "62000.07", "normalized": "62000.1"}
     ]
@@ -663,4 +855,353 @@ async def test_tick_rounding_skipped_when_unresolved():
         product_symbol="BTCUSD", size=1, side="buy", order_type="limit_order", limit_price="62000.07",
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
-    assert "price_adjustments" not in out[1]
+    assert "price_adjustments" not in out.structured_content
+
+
+# ------------------------------------------------------- transport-failure safety
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_is_never_resent_after_a_transport_failure():
+    """POST accepted, response lost, automatic re-POST — the duplicate-order path.
+
+    The status-code retry paths were always GET-only; the transport-error path was
+    not, and would resend a mutation whose outcome is unknown.
+    """
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.ReadTimeout("private-httpx-timeout-marker"),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+    assert "private-httpx-timeout-marker" not in str(err.value)
+    assert "private-httpx-timeout-marker" not in repr(err.value.context)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_connect_failure_says_nothing_was_sent():
+    """A connect failure provably sent nothing, so its error says a retry is safe."""
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=httpx.ConnectError("private-httpx-connect-marker")
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "upstream_unreachable"
+    assert "private-httpx-connect-marker" not in str(err.value)
+    assert "private-httpx-connect-marker" not in repr(err.value.context)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_server_failure_has_an_unknown_outcome_without_retry():
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.Response(
+                503,
+                json={
+                    "success": False,
+                    "error": {"code": "private-upstream-code-marker"},
+                },
+            ),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+    assert "private-upstream-code-marker" not in str(err.value)
+    assert "private-upstream-code-marker" not in repr(err.value.context)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_malformed_mutation_response_has_an_unknown_outcome_without_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="delta_exchange_mcp")
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.Response(200, text="private-response-body-marker"),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+    assert "private-response-body-marker" not in str(err.value)
+    assert "private-response-body-marker" not in repr(err.value.context)
+    assert "private-response-body-marker" not in caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_explicit_mutation_rejection_preserves_its_error_code() -> None:
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "success": False,
+                "error": {"code": "insufficient_margin"},
+            },
+        )
+    )
+
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+
+    assert route.call_count == 1
+    assert err.value.code == "insufficient_margin"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_audit_records_an_unknown_outcome(tmp_path, monkeypatch):
+    """An ambiguous transport failure must reach the audit log.
+
+    The raw httpx error bypassed _finish's DeltaApiError catch entirely, so the one
+    mutation whose exchange outcome is uncertain was also the one that left no
+    audit trace.
+    """
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
+    cfg = Config(
+        env="india_testnet", base_url=INDIA_TESTNET_REST,
+        api_key="k1", api_secret="s1", mode="trade",
+    )
+    audit = audit_log.configure(cfg)
+    assert audit is not None
+
+    respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=httpx.ReadTimeout("private-audit-transport-marker")
+    )
+    with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
+        await _call(_client(), "place_order", audit=audit,
+                    product_id=27, size=1, side="buy", order_type="market_order")
+
+    lines = (tmp_path / "audit.log").read_text().splitlines()
+    assert len(lines) == 1
+    assert "private-audit-transport-marker" not in str(caught.value)
+    assert "execution_outcome_unknown" in json.loads(lines[0])["error"]
+    assert "private-audit-transport-marker" not in lines[0]
+
+
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_price_cache_partitions_tick_size_after_rebind():
+    respx.get(f"{INDIA_TESTNET_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "1"}},
+        )
+    )
+    first_order = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 1}})
+    )
+    prod_lookup = respx.get(f"{INDIA_PROD_REST}/products/BTCUSD").mock(
+        return_value=httpx.Response(
+            200,
+            json={"success": True, "result": {"symbol": "BTCUSD", "tick_size": "0.01"}},
+        )
+    )
+    second_order = respx.post(f"{INDIA_PROD_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 2}})
+    )
+    client = _client()
+    mcp = MCPServer("test")
+    gate = trading.TradeGate()
+    trading.register(mcp, client, None, gate)
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "62000.07",
+    }
+
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("place_order", arguments)
+    client.rebind(
+        Config(
+            env="india_prod",
+            base_url=INDIA_PROD_REST,
+            api_key="k2",
+            api_secret="s2",
+            mode="trade",
+        )
+    )
+    gate.bind_final_check(lambda: True)
+    await mcp.call_tool("place_order", arguments)
+    await client.aclose()
+
+    assert prod_lookup.call_count == 1
+    assert b'"limit_price":"62000"' in first_order.calls[0].request.content
+    assert b'"limit_price":"62000.07"' in second_order.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_trading_permission_error_does_not_name_the_validation_endpoint() -> None:
+    respx.delete(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": "UnauthorizedApiAccess"}},
+        )
+    )
+
+    with pytest.raises(Exception) as exc:
+        await _call(_client(), "cancel_order", product_id=27, id=81)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
+
+
+@pytest.mark.asyncio
+async def test_serializer_error_keeps_credentials_out_of_the_tool_and_audit(
+    tmp_path, monkeypatch
+) -> None:
+    marker = "private-api-key-marker"
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
+
+    connection_closed = asyncio.Event()
+
+    async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        connection_closed.set()
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    cfg = Config(
+        env="india_testnet",
+        base_url=f"http://127.0.0.1:{port}/v2",
+        api_key=f"{marker}\n",
+        api_secret="s1",
+        mode="trade",
+    )
+    audit = audit_log.configure(cfg)
+    assert audit is not None
+    client = DeltaClient(cfg)
+
+    try:
+        async with server:
+            with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
+                await _call(
+                    client,
+                    "place_order",
+                    audit=audit,
+                    product_id=27,
+                    size=1,
+                    side="buy",
+                    order_type="market_order",
+                )
+            await asyncio.wait_for(connection_closed.wait(), timeout=1)
+    finally:
+        await client.aclose()
+
+    error = str(caught.value)
+    audit_text = (tmp_path / "audit.log").read_text()
+    audit_error = json.loads(audit_text)["error"]
+    assert marker not in error
+    assert marker not in audit_text
+    assert "get_open_orders" in error
+    assert "get_order_history" in audit_error
+
+    causes: list[BaseException] = []
+    cause: BaseException | None = caught.value
+    while cause is not None:
+        causes.append(cause)
+        cause = cause.__cause__
+    assert any(isinstance(item, httpx.LocalProtocolError) for item in causes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "path", "arguments", "expected"),
+    [
+        (
+            "place_order",
+            "/orders",
+            {"product_id": 27, "size": 1, "side": "buy", "order_type": "market_order"},
+            ("get_open_orders", "get_order_history"),
+        ),
+        (
+            "adjust_position_margin",
+            "/positions/change_margin",
+            {"product_id": 27, "delta_margin": "5"},
+            ("get_margined_positions",),
+        ),
+        (
+            "set_product_leverage",
+            "/products/27/orders/leverage",
+            {"product_id": 27, "leverage": "10"},
+            ("get_product_leverage",),
+        ),
+        (
+            "close_all_positions",
+            "/positions/close_all",
+            {"close_all_portfolio": True},
+            ("get_margined_positions",),
+        ),
+    ],
+)
+@respx.mock
+async def test_unknown_outcome_names_the_correct_state_checks(
+    tool: str,
+    path: str,
+    arguments: dict[str, Any],
+    expected: tuple[str, ...],
+) -> None:
+    if tool == "close_all_positions":
+        respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "result": {"user_id": 99}},
+            )
+        )
+    respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(
+        side_effect=httpx.ReadTimeout("private transport detail")
+    )
+
+    with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
+        await _call(_client(), tool, **arguments)
+
+    message = str(caught.value)
+    assert all(name in message for name in expected)
+    all_checks = {
+        "get_open_orders",
+        "get_order_history",
+        "get_product_leverage",
+        "get_margined_positions",
+    }
+    assert all(name not in message for name in all_checks.difference(expected))
+    assert "private transport detail" not in message
+
+
+@pytest.mark.parametrize("error", [None, [], {"code": None}, {"code": {}}, {"code": ""}])
+@respx.mock
+async def test_invalid_mutation_rejection_requires_reconciliation(error):
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(400, json={"success": False, "error": error})
+    )
+    with pytest.raises(DeltaApiError) as caught:
+        await _client().post("/orders", {"product_id": 27}, auth=True)
+    assert caught.value.code == "execution_outcome_unknown"
+    assert route.call_count == 1

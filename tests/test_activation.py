@@ -1,682 +1,621 @@
-"""Bringing the account tools up mid-session, without restarting the client.
+"""MCP 2026 discovery and request-scoped authorization behavior."""
 
-These drive a real client session over the real protocol rather than calling the tool
-functions directly, because every interesting part of this is protocol-level: whether the
-server declared that its tool list can change, whether the notification reaches the
-client, and whether a `tools/list` after it shows tools that did not exist at startup.
-Calling `save_credentials` in-process proves none of that.
-"""
-
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
-import anyio
-import httpx
-import mcp.types as types
 import pytest
 import respx
-from mcp.client.session import ClientSession
-from mcp.shared.memory import create_client_server_memory_streams
+from mcp import types
+from mcp.client import Client, advertise
+from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
+from mcp.server.mcpserver import Context
+from mcp.types import CallToolResult, InputRequiredResult
 
-from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, server, store
+from delta_exchange_mcp import authorization, debug_log
+from delta_exchange_mcp import connection_app, store
+from delta_exchange_mcp.auth.connection import ConnectionService
+from delta_exchange_mcp.auth.consent import (
+    ConsentBinding,
+    ConsentStore,
+    MemoryConsentBackend,
+)
+from delta_exchange_mcp.auth.store import (
+    CredentialSource,
+    CredentialState,
+    CredentialStore,
+    MemoryMetadata,
+    MemorySecretBackend,
+)
+from delta_exchange_mcp.errors import DeltaApiError
+from delta_exchange_mcp.server import DeltaMCP, build_server
+from delta_exchange_mcp.tools import account, trading
 
-KEY = "typed-into-the-form-key"
-SECRET = "typed-into-the-form-secret"
+MANAGE_URL = "http://127.0.0.1:43123/manage"
+CLIENT_NAME = "Claude Desktop"
 
 
-class Session:
-    """A connected client plus the notifications the server pushed to it."""
+async def manage_url(ctx: Context, access: authorization.Access) -> str:
+    """Return a deterministic loopback URL in protocol tests."""
+    return MANAGE_URL
 
-    def __init__(self, client, initialized, mcp):
-        self.client = client
-        self.initialized = initialized
-        self.server = mcp
-        self.notifications = []
 
-    async def tool_names(self):
-        return {t.name for t in (await self.client.list_tools()).tools}
-
-    async def call(self, name, **arguments):
-        result = await self.client.call_tool(name, arguments)
-        if result.structuredContent is not None:
-            return result.structuredContent
-        return json.loads(result.content[0].text)
-
-    async def raw_call(self, name, **arguments):
-        return await self.client.call_tool(name, arguments)
-
-    async def open_form(self):
-        result = await self.client.call_tool("setup_credentials", {})
-        return result.meta["ui"]["saveGrant"]
-
-    def saw_tool_list_changed(self):
-        return any(
-            isinstance(n, types.ToolListChangedNotification) for n in self.notifications
-        )
+def connection_service() -> ConnectionService:
+    credentials = CredentialStore(
+        MemorySecretBackend(),
+        MemoryMetadata(),
+        CredentialSource.OS_STORE,
+    )
+    consent = ConsentStore(
+        store.path().with_name("consent.json"),
+        secure_backend_available=True,
+        memory_backend=MemoryConsentBackend(),
+    )
+    return ConnectionService.open(credentials=credentials, consent=consent)
 
 
 @asynccontextmanager
-async def connected(cfg=None, client_name=None, mcp=None):
-    """A client talking to a server started the way `main` starts it.
+async def connected(
+    app: DeltaMCP | None = None,
+    *,
+    mode: str = "auto",
+    url_elicitation: bool = False,
+    apps: bool = False,
+    client_info: types.Implementation | None = None,
+) -> AsyncIterator[Client]:
+    owned = (
+        build_server(
+            manage_url=manage_url,
+            connection_service=connection_service(),
+        )
+        if app is None
+        else app
+    )
 
-    The SDK's own `create_connected_server_and_client_session` builds initialization
-    options from scratch, which would silently drop the one capability under test here.
-    """
-    app = mcp or server.build_server(cfg or config_mod.load())
-    owns_server = mcp is None
+    async def elicit(ctx: object, params: object) -> types.ElicitResult:
+        return types.ElicitResult(action="accept")
+
+    extensions = (
+        [advertise(EXTENSION_ID, {"mimeTypes": [APP_MIME_TYPE]})] if apps else None
+    )
+    client = Client(
+        owned,
+        mode=mode,
+        client_info=client_info
+        or types.Implementation(name=CLIENT_NAME, version="1"),
+        elicitation_callback=elicit if url_elicitation else None,
+        extensions=extensions,
+    )
     try:
-        async with create_client_server_memory_streams() as (client_streams, server_streams):
-            client_read, client_write = client_streams
-            server_read, server_write = server_streams
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    lambda: app._mcp_server.run(
-                        server_read,
-                        server_write,
-                        server.initialization_options(app),
-                        raise_exceptions=True,
-                    )
-                )
-                box = {}
-
-                async def collect(message):
-                    if isinstance(message, types.ServerNotification):
-                        box["session"].notifications.append(message.root)
-
-                info = (
-                    types.Implementation(name=client_name, version="1")
-                    if client_name
-                    else None
-                )
-                async with ClientSession(
-                    client_read, client_write, message_handler=collect, client_info=info
-                ) as client:
-                    initialized = await client.initialize()
-                    box["session"] = Session(client, initialized, app)
-                    yield box["session"]
-                tg.cancel_scope.cancel()
+        async with client:
+            yield client
     finally:
-        if owns_server:
-            await app.close_live_client()
+        if app is None:
+            await owned.close_live_client()
 
 
-@pytest.fixture
-def accepted(monkeypatch):
-    """Delta accepts whatever key is offered, without a live call."""
-
-    async def check(env, key, secret):
-        return credentials.Check(ok=True, reachable=True, detail="someone@delta.exchange")
-
-    monkeypatch.setattr(credentials, "check", check)
-
-
-async def save(session, **overrides):
-    grant = await session.open_form()
-    arguments = {
-        "environment": "india_testnet",
-        "api_key": KEY,
-        "api_secret": SECRET,
-        "grant": grant,
-    }
-    arguments.update(overrides)
-    return await session.call("save_credentials", **arguments)
-
-
-# --- what the server promises at startup ---------------------------------------------
-
-
-async def test_the_server_declares_that_its_tool_list_can_change():
-    """Without this the notification is one a client was told never to expect.
-
-    A client reads `tools/list` once and re-reads it only when told the list changed, so
-    declaring `listChanged: false` and then sending the notification means the account
-    tools stay invisible and the restart is unavoidable — with nothing failing anywhere
-    to say so.
-    """
-    async with connected() as session:
-        assert session.initialized.capabilities.tools.listChanged is True
-
-
-async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
-    """The state with no key has no account tool to carry a hint on its own description."""
-    async with connected() as session:
-        instructions = session.initialized.instructions
-        assert "setup_credentials" in instructions
-        assert "Never ask for an API key" in instructions
-
-
-async def test_the_status_tool_exists_with_no_credentials(accepted):
-    """"Am I connected?" is asked most often by someone who is not."""
-    async with connected() as session:
-        assert "get_connection_status" in await session.tool_names()
-        status = await session.call("get_connection_status")
-        assert status["credentials_configured"] is False
-        assert status["account_tools_available"] is False
-        assert status["restart_required"] is False
-
-
-# --- bringing the surface up ---------------------------------------------------------
-
-
-async def test_a_saved_key_makes_the_account_tools_reachable_without_a_restart(accepted):
-    """The whole point: the client sees tools that did not exist when it connected."""
-    async with connected() as session:
-        before = await session.tool_names()
-        assert "get_positions" not in before
-
-        result = await save(session)
-        assert result["status"] == "saved"
-
-        assert session.saw_tool_list_changed()
-        after = await session.tool_names()
-        assert "get_positions" in after
-        assert "get_wallet_balances" in after
-
-
-async def test_the_saved_message_leads_with_carrying_on_rather_than_restarting(accepted):
-    async with connected() as session:
-        message = (await save(session))["message"]
-        assert "live in this session" in message
-        assert "someone@delta.exchange" in message
-
-
-async def test_the_status_tool_reports_the_surface_that_is_actually_live(accepted):
-    async with connected() as session:
-        await save(session)
-        status = await session.call("get_connection_status")
-        assert status["credentials_configured"] is True
-        assert status["account_tools_available"] is True
-        assert status["restart_required"] is False
-        # The environment typed into the form, not the one loaded at startup.
-        assert status["environment"] == "india_testnet"
-        assert json.dumps(status).find(SECRET) == -1
-
-
-async def test_a_second_save_does_not_register_the_account_tools_twice(accepted):
-    """Rotating a key goes through the same path, and FastMCP would keep both copies."""
-    async with connected() as session:
-        await save(session)
-        first = await session.tool_names()
-        await save(session)
-        assert await session.tool_names() == first
-
-
-async def test_replacing_a_key_already_in_use_rebinds_without_a_restart(accepted):
-    """Every registered surface shares the rebindable client, so rotation is immediate."""
-    async with connected() as session:
-        await save(session)
-        again = await save(session)
-        assert "live in this session" in again["message"]
-        assert (await session.call("get_connection_status"))["restart_required"] is False
-
-
-@respx.mock
-async def test_a_rotated_key_signs_the_next_account_request(accepted):
-    """Hot status is not enough: the shared client must actually use the new identity."""
-    rotated = "rotated-in-the-form-key"
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
-    )
-    async with connected() as session:
-        await save(session)
-        await save(session, api_key=rotated)
-        await session.call("get_profile")
-
-    assert route.called
-    assert route.calls.last.request.headers["api-key"] == rotated
-
-
-@respx.mock
-async def test_the_first_save_rebinds_market_and_account_tools_to_one_environment(accepted):
-    """Public and authenticated closures must move together, not split across sites."""
-    ticker = respx.get(f"{config_mod.INDIA_TESTNET_REST}/tickers/BTCUSD").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"symbol": "BTCUSD"}})
-    )
-    profile = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
-    )
-    async with connected() as session:
-        await save(session)
-        await session.call("get_ticker", symbol="BTCUSD")
-        await session.call("get_profile")
-
-    assert ticker.called and profile.called
-
-
-async def test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one(accepted):
-    """The app capability is session-bound even while its ten-minute TTL remains."""
-    app = server.build_server(config_mod.load())
-    try:
-        async with connected(mcp=app) as first:
-            grant = await first.open_form()
-
-        async with connected(mcp=app) as second:
-            result = await second.call(
-                "save_credentials",
-                environment="india_testnet",
-                api_key=KEY,
-                api_secret=SECRET,
-                grant=grant,
-            )
-            assert result["status"] == "refused"
-    finally:
-        await app.close_live_client()
-
-
-# --- what still needs a restart ------------------------------------------------------
-
-
-async def test_trade_mode_still_waits_for_a_restart(accepted, monkeypatch):
-    """Order placement must follow from the client config the user edited.
-
-    Arming it from a form submitted in a chat would mean a mutating surface appeared
-    without the user doing the thing that enables it.
-    """
-    monkeypatch.setenv("DELTA_MCP_MODE", "trade")
-    async with connected() as session:
-        result = await save(session, mode="trade")
-        assert "Restart this app to turn trading on" in result["message"]
-
-        # The reads still came up — only the mutations wait. Suppressing the notification
-        # too would leave them registered and unreachable, which is the worst of both.
-        assert session.saw_tool_list_changed()
-        names = await session.tool_names()
-        assert "get_positions" in names
-        assert "place_order" not in names
-
-        status = await session.call("get_connection_status")
-        assert status["mode"] == "read"
-        assert status["mode_after_restart"] == "trade"
-        assert status["restart_required"] is True
-
-
-async def test_a_key_the_client_config_outranks_says_so_instead_of_reporting_success(
-    accepted, monkeypatch
-):
-    """The failure this replaces was silent, and restarting made it look broken.
-
-    config resolves the process environment before the shared file, so a client passing
-    its own key wins on every launch. The save verified a real account and would have
-    reported it by name while the server went on signing with the other one.
-    """
-    monkeypatch.setenv("DELTA_API_KEY", "from-the-client-config")
-    monkeypatch.setenv("DELTA_API_SECRET", "from-the-client-config")
-    async with connected() as session:
-        result = await save(session)
-        assert result["status"] == "overridden"
-        assert "DELTA_API_KEY" in result["message"]
-        assert "will not be used" in result["message"]
-        # The email of the account it checked must not be reported as connected.
-        assert "someone@delta.exchange" not in result["message"]
-
-        # The key still belongs in the file — every other client on the machine reads it.
-        assert store.read()["DELTA_API_KEY"] == KEY
-
-        status = await session.call("get_connection_status")
-        assert status["overridden_by_client"] == ["DELTA_API_KEY", "DELTA_API_SECRET"]
-        # Restarting cannot help: the client passes its own value again every launch.
-        assert status["restart_required"] is False
-
-
-async def test_an_environment_the_client_config_outranks_is_reported_too(accepted, monkeypatch):
-    """Picking the practice site is just as ignorable, and fails as a rejected key later."""
-    monkeypatch.setenv("DELTA_MCP_ENV", "india_prod")
-    async with connected() as session:
-        result = await save(session)
-        assert result["status"] == "overridden"
-        assert "DELTA_MCP_ENV" in result["message"]
-        # This case still uses the key, so saying it is unused would be wrong — it is sent
-        # to the site it was not created on, where Delta rejects it as unknown.
-        assert "will not be used at all" not in result["message"]
-        assert "against the other site" in result["message"]
-
-
-async def test_a_client_pinning_the_same_environment_is_not_reported(accepted, monkeypatch):
-    """The Cursor install link sets DELTA_MCP_ENV=india_prod for everyone who uses it.
-
-    Testing for presence rather than for a difference would tell every one of those users
-    that the key they just saved would not be used, which is both false and alarming.
-    """
-    monkeypatch.setenv("DELTA_MCP_ENV", "india_testnet")
-    async with connected() as session:
-        # The same environment the form is about to save.
-        result = await save(session)
-        assert result["status"] == "saved"
-        assert (await session.call("get_connection_status"))["overridden_by_client"] == []
-
-
-# --- trading, scoped to the client that asked for it ---------------------------------
-
-
-def credentialled(mode_for=None):
-    """A settings file with a working key, and optionally a client entitled to trade."""
+def credentialled(*, trade: bool = False) -> None:
     values = {
         "DELTA_MCP_ENV": "india_testnet",
-        "DELTA_API_KEY": KEY,
-        "DELTA_API_SECRET": SECRET,
+        "DELTA_API_KEY": "test-key",
+        "DELTA_API_SECRET": "test-secret",
     }
-    if mode_for:
-        values[config_mod.mode_key(mode_for)] = "trade"
-    store.write(values)
+    if trade:
+        values["DELTA_MCP_MODE"] = "trade"
+    target = store.path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("".join(f"{name}={value}\n" for name, value in values.items()))
 
 
-async def test_trading_arms_only_for_the_client_it_was_enabled_for():
-    """The settings file is shared by every client on the machine.
-
-    An unscoped mode in it would hand order placement to all of them at once, which is
-    why `load` refuses to read that name from the file. The scoped name is what the form
-    writes, and only the client whose handshake matches it gets the mutating tools.
-    """
-    credentialled(mode_for="Claude Desktop")
-
-    async with connected(client_name="Claude Desktop") as session:
-        names = await session.tool_names()
-        assert "place_order" in names
-        assert "get_trading_status" in names
-        assert (await session.call("get_connection_status"))["mode"] == "trade"
-
-    async with connected(client_name="Cursor") as session:
-        names = await session.tool_names()
-        assert "place_order" not in names
-        status = await session.call("get_connection_status")
-        assert status["mode"] == "read"
-        assert status["mode_after_restart"] == "read"
+async def test_auto_mode_discovers_the_2026_server_and_apps_extension() -> None:
+    async with connected() as client:
+        assert client.protocol_version == "2026-07-28"
+        assert client.server_info.name == "delta-exchange"
+        assert EXTENSION_ID in client.server_capabilities.extensions
 
 
-async def test_mode_only_save_does_not_read_or_rewrite_the_stored_credentials():
-    """Once connected, changing access mode never asks the app to handle the key again."""
-    credentialled()
-    before = store.read()
-    async with connected(client_name="Claude Desktop") as session:
-        grant = await session.open_form()
-        result = await session.call("save_mode", mode="trade", grant=grant)
-        assert result["status"] == "saved"
-        assert result["effective_mode"] == "trade"
-        assert "Restart this app to turn trading on" in result["next_step"]
-        assert "place_order" not in await session.tool_names()
-
-    after = store.read()
-    assert after["DELTA_API_KEY"] == before["DELTA_API_KEY"]
-    assert after["DELTA_API_SECRET"] == before["DELTA_API_SECRET"]
-    assert after[config_mod.mode_key("Claude Desktop")] == "trade"
-
-
-async def test_another_session_cannot_call_a_globally_registered_trade_tool(monkeypatch):
-    """The process registry is shared, so authorization also runs at tools/call."""
-    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
-    credentialled(mode_for="Trader")
-    app = server.build_server(config_mod.load())
+async def test_tool_discovery_is_stable_across_authorization_changes() -> None:
+    service = connection_service()
+    app = build_server(manage_url=manage_url, connection_service=service)
+    environment = service.client.config.env
     try:
-        async with connected(client_name="Trader", mcp=app) as trader:
-            assert "place_order" in await trader.tool_names()
+        async with connected(app) as client:
+            before = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
 
-        # Deliberately skip tools/list. MCP permits a direct tools/call, and the trading
-        # function remains in FastMCP's process-global registry from the prior session.
-        async with connected(client_name="Reader", mcp=app) as reader:
-            result = await reader.raw_call(
-                "place_order",
-                product_id=27,
-                size=1,
-                side="buy",
-                order_type="market_order",
-                dry_run=True,
+            service.credentials.replace(
+                environment,
+                "test-key",
+                "test-secret",
+                state=CredentialState.VERIFIED,
             )
-            assert result.isError is True
-            assert "not enabled for this MCP session" in result.content[0].text
+            connected_status = await client.call_tool("get_connection_status", {})
+            connected_tools = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
+
+            metadata = service.credentials.metadata(environment)
+            service.consent.enable(
+                ConsentBinding(
+                    client_name=CLIENT_NAME,
+                    environment=environment,
+                    credential_revision=metadata.revision,
+                    credential_generation=metadata.generation,
+                    credential_session_generation=None,
+                ),
+                expected_generation=0,
+            )
+            approved_status = await client.call_tool("get_connection_status", {})
+            approved_tools = {
+                tool.name
+                for tool in (await client.list_tools(cache_mode="refresh")).tools
+            }
+    finally:
+        await app.close_live_client()
+
+    assert connected_status.structured_content["credentials_configured"] is True
+    assert approved_status.structured_content["trading"]["enabled"] is True
+    assert before == connected_tools == approved_tools
+    assert account.TOOL_NAMES <= before
+    assert trading.TOOL_NAMES <= before
+    assert "setup_credentials" in before
+    assert "save_credentials" not in before
+    assert "save_mode" not in before
+
+
+async def test_debug_setting_does_not_change_tool_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DELTA_MCP_DEBUG", raising=False)
+    without_debug = build_server(connection_service=connection_service())
+    monkeypatch.setenv("DELTA_MCP_DEBUG", "1")
+    with_debug = build_server(connection_service=connection_service())
+    try:
+        before = {tool.name for tool in await without_debug.list_tools()}
+        after = {tool.name for tool in await with_debug.list_tools()}
+    finally:
+        await without_debug.close_live_client()
+        await with_debug.close_live_client()
+        debug_log.shutdown()
+
+    assert before == after
+    assert "get_debug_status" in before
+
+
+async def test_connection_status_does_not_return_credentials() -> None:
+    credentialled()
+    async with connected() as client:
+        result = await client.call_tool("get_connection_status", {})
+
+    rendered = json.dumps(result.structured_content)
+    assert "test-key" not in rendered
+    assert "test-secret" not in rendered
+    assert "signature" not in rendered.lower()
+    assert result.structured_content["credentials_configured"] is True
+    assert result.structured_content["client_name"] == CLIENT_NAME
+    assert result.structured_content["client_version"] == "1"
+
+
+async def test_tool_errors_expose_only_deliberate_safe_messages() -> None:
+    app = DeltaMCP()
+
+    @app.tool()
+    async def rejected_by_delta() -> None:
+        raise DeltaApiError(
+            "insufficient_margin",
+            context={"upstream_private_value": "must-not-cross-mcp"},
+            status=400,
+        )
+
+    @app.tool()
+    async def crashed() -> None:
+        raise RuntimeError("unexpected-private-value")
+
+    try:
+        async with connected(app) as client:
+            rejected = await client.call_tool("rejected_by_delta", {})
+            unexpected = await client.call_tool("crashed", {})
+    finally:
+        await app.close_live_client()
+
+    assert rejected.is_error is True
+    assert rejected.content[0].text == (
+        "Error executing tool rejected_by_delta: "
+        "delta api error: insufficient_margin [http 400]"
+    )
+    assert "must-not-cross-mcp" not in rejected.content[0].text
+    assert unexpected.is_error is True
+    assert unexpected.content[0].text == "Error executing tool crashed"
+    assert "unexpected-private-value" not in unexpected.content[0].text
+
+
+async def test_connection_status_ignores_file_credentials_after_migration() -> None:
+    credentialled()
+    app = build_server(
+        manage_url=manage_url,
+        connection_service=connection_service(),
+    )
+    try:
+        async with connected(app) as client:
+            await client.call_tool("get_connection_status", {})
+            assert app.live_client.config.api_key == "test-key"
+
+            store.path().write_text(
+                "DELTA_MCP_ENV=india_testnet\n"
+                "DELTA_API_KEY=rotated-key\n"
+                "DELTA_API_SECRET=rotated-secret\n"
+            )
+            await client.call_tool("get_connection_status", {})
+            assert app.live_client.config.api_key == "test-key"
     finally:
         await app.close_live_client()
 
 
-async def test_mode_only_read_disarms_live_trading_immediately(capsys):
-    """The safe direction takes effect now and leaves an explicit runtime transition."""
-    credentialled(mode_for="Claude Desktop")
-    async with connected(client_name="Claude Desktop") as session:
-        assert "place_order" in await session.tool_names()
-        grant = await session.open_form()
-        result = await session.call("save_mode", mode="read", grant=grant)
+async def test_setup_has_no_secret_arguments() -> None:
+    async with connected() as client:
+        tools = {
+            tool.name: tool
+            for tool in (await client.list_tools(cache_mode="refresh")).tools
+        }
 
-        assert result["status"] == "saved"
-        assert "Trading stays off" in result["next_step"]
-        assert "place_order" not in await session.tool_names()
-        status = await session.call("get_connection_status")
-        assert status["mode"] == "read"
-        assert status["mode_after_restart"] == "read"
-        assert status["restart_required"] is False
-
-    transitions = capsys.readouterr().err
-    assert "runtime transition=trade-armed" in transitions
-    assert "runtime transition=trade-disarmed-read-mode" in transitions
-    assert KEY not in transitions and SECRET not in transitions
+    setup = tools["setup_credentials"]
+    schema = setup.input_schema
+    assert schema.get("properties", {}) == {}
+    rendered = str(schema).lower()
+    assert "api_key" not in rendered
+    assert "api_secret" not in rendered
+    assert setup.meta["ui"] == {
+        "resourceUri": connection_app.VIEW_URI,
+        "visibility": ["model", "app"],
+    }
 
 
-async def test_external_identity_drift_disarms_trading_before_hot_rebind(capsys):
-    """A status check cannot leave mutations signed for a changed site or account."""
-    client_name = "Claude Desktop"
-    credentialled(mode_for=client_name)
-    async with connected(client_name=client_name) as session:
-        assert "place_order" in await session.tool_names()
-        store.write(
-            {
-                "DELTA_MCP_ENV": "india_prod",
-                "DELTA_API_KEY": "externally-rotated-key",
-                "DELTA_API_SECRET": "externally-rotated-secret",
-                config_mod.mode_key(client_name): "trade",
-            }
+async def test_modern_account_gate_returns_url_input_and_sealed_request_state() -> None:
+    async with connected(mode="2026-07-28", url_elicitation=True) as client:
+        result = await client.session.call_tool(
+            "get_positions", {}, allow_input_required=True
         )
 
-        status = await session.call("get_connection_status")
-        assert status["environment"] == "india_prod"
-        assert status["mode"] == "read"
-        assert status["mode_after_restart"] == "trade"
-        assert status["restart_required"] is True
-        assert "place_order" not in await session.tool_names()
-        assert "get_positions" in await session.tool_names()
-
-    transitions = capsys.readouterr().err
-    assert "runtime transition=trade-disarmed-identity-change" in transitions
-    assert "identity-rebound" in transitions
-    assert "env=india_prod mode=read surface=market+account" in transitions
-    assert "externally-rotated" not in transitions
+    assert isinstance(result, InputRequiredResult)
+    request = result.input_requests["delta_exchange_authorization"]
+    assert request.params.mode == "url"
+    assert request.params.url == MANAGE_URL
+    assert result.request_state.startswith("v1.")
+    assert "account" not in result.request_state
+    assert MANAGE_URL not in result.request_state
 
 
-async def test_mode_only_save_reports_when_trading_is_already_live():
-    """Re-saving the current choice must not tell someone to restart a live surface."""
-    credentialled(mode_for="Claude Desktop")
-    async with connected(client_name="Claude Desktop") as session:
-        assert "place_order" in await session.tool_names()
-        grant = await session.open_form()
-        result = await session.call("save_mode", mode="trade", grant=grant)
-        assert result["status"] == "saved"
-        assert "Trading is live" in result["next_step"]
-        assert result["effective_mode"] == "trade"
-        assert (await session.call("get_connection_status"))["restart_required"] is False
+async def test_setup_uses_url_elicitation_when_the_client_supports_it() -> None:
+    async with connected(mode="2026-07-28", url_elicitation=True) as client:
+        result = await client.session.call_tool(
+            "setup_credentials", {}, allow_input_required=True
+        )
+
+    assert isinstance(result, InputRequiredResult)
+    request = result.input_requests["delta_exchange_authorization"]
+    assert request.params.url == MANAGE_URL
 
 
-async def test_process_mode_override_is_reported_with_the_effective_mode(
-    accepted, monkeypatch
-):
-    """The form shows what will run, even when the client's config beats its selection."""
-    monkeypatch.setenv("DELTA_MCP_MODE", "trade")
-    async with connected(client_name="Claude Desktop") as session:
-        result = await save(session, mode="read")
-        assert result["status"] == "overridden"
-        assert result["effective_mode"] == "trade"
-        assert result["mode_setting"] == config_mod.mode_key("Claude Desktop")
-        assert "DELTA_MCP_MODE" in result["message"]
-        assert "future sessions trade" in result["next_step"]
-        assert "Restart this app to turn trading on" not in result["message"]
-        assert "get_positions" in await session.tool_names()
-        assert "place_order" not in await session.tool_names()
-        status = await session.call("get_connection_status")
-        assert status["restart_required"] is True
-        assert status["overridden_by_client"] == ["DELTA_MCP_MODE"]
+async def test_setup_request_resumption_does_not_loop_or_claim_completion() -> None:
+    async with connected(mode="2026-07-28", url_elicitation=True) as client:
+        result = await client.call_tool("setup_credentials", {})
+
+    assert result.structured_content["status"] == "authorization_pending"
+    assert "Finish it" in result.content[0].text
 
 
-async def test_a_concurrent_full_save_is_reported_as_superseded(accepted, monkeypatch):
-    """Never claim checked account A is live after another process publishes account B."""
-    real_save = credentials.save
+async def test_legacy_trade_mode_does_not_count_as_browser_consent() -> None:
+    credentialled(trade=True)
+    arguments = {
+        "product_id": 27,
+        "size": 1,
+        "side": "buy",
+        "order_type": "market_order",
+    }
+    async with connected(mode="2026-07-28", url_elicitation=True) as client:
+        result = await client.session.call_tool(
+            "place_order", arguments, allow_input_required=True
+        )
 
-    def save_then_supersede(env, key, secret, client="", mode=""):
-        problem = real_save(env, key, secret, client, mode)
-        assert problem is None
-        assert (
-            store.write(
-                {
-                    "DELTA_MCP_ENV": "india_prod",
-                    "DELTA_API_KEY": "newer-client-key",
-                    "DELTA_API_SECRET": "newer-client-secret",
-                }
+    assert isinstance(result, InputRequiredResult)
+    request = result.input_requests["delta_exchange_authorization"]
+    assert "Enable trading" in request.params.message
+
+
+async def test_resumed_trade_never_executes_the_pending_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enabled = False
+
+    async def access_state(ctx: Context) -> authorization.AccessState:
+        return authorization.AccessState(
+            credentials_ready=True,
+            trading_enabled=enabled,
+            client_name=CLIENT_NAME,
+            final_trading_check=lambda: enabled,
+        )
+
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    app = build_server(manage_url=manage_url, access_state=access_state)
+    sent = False
+
+    async def post(
+        path: str, payload: dict[str, Any], *, auth: bool = False
+    ) -> dict[str, Any]:
+        nonlocal sent
+        sent = True
+        return {}
+
+    monkeypatch.setattr(app.live_client, "post", post)
+    arguments = {
+        "product_id": 27,
+        "size": 1,
+        "side": "buy",
+        "order_type": "market_order",
+    }
+    try:
+        async with connected(
+            app, mode="2026-07-28", url_elicitation=True
+        ) as client:
+            first = await client.session.call_tool(
+                "place_order", arguments, allow_input_required=True
             )
-            is None
-        )
-        return None
+            assert isinstance(first, InputRequiredResult)
 
-    monkeypatch.setattr(credentials, "save", save_then_supersede)
-    async with connected(client_name="Claude Desktop") as session:
-        result = await save(session)
+            enabled = True
+            second = await client.session.call_tool(
+                "place_order",
+                arguments,
+                input_responses={
+                    "delta_exchange_authorization": types.ElicitResult(action="accept")
+                },
+                request_state=first.request_state,
+                allow_input_required=True,
+            )
+    finally:
+        await app.close_live_client()
 
-        assert result["status"] == "superseded"
-        assert "someone@delta.exchange" not in result["message"]
-        assert "newer settings" in result["message"]
-        status = await session.call("get_connection_status")
-        assert status["environment"] == "india_prod"
-        assert session.server.live_client.config.api_key == "newer-client-key"
-
-
-async def test_punctuation_variants_do_not_inherit_each_others_trading_choice():
-    """The readable slug may match, but the exact handshake name is the binding."""
-    credentialled(mode_for="claude-ai")
-    async with connected(client_name="Claude AI") as session:
-        assert "place_order" not in await session.tool_names()
+    assert isinstance(second, CallToolResult)
+    assert second.structured_content["status"] == "authorization_complete"
+    assert "pending trade was not sent" in second.content[0].text
+    assert sent is False
 
 
-async def test_choosing_trade_does_not_arm_it_in_the_session_that_chose_it(accepted):
-    """The restart is the point. Order placement appearing mid-conversation, in the same
-    turn that asked for it, is exactly what the whole gate exists to prevent.
-    """
-    async with connected(client_name="Claude Desktop") as session:
-        grant = await session.open_form()
-        result = await session.call(
-            "save_credentials",
-            environment="india_testnet",
-            api_key=KEY,
-            api_secret=SECRET,
-            mode="trade",
-            grant=grant,
-        )
-        assert result["status"] == "saved"
-        assert "Restart this app to turn trading on" in result["message"]
+async def test_final_checker_blocks_a_mutation_when_consent_changes_during_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consent = True
+    state_checks: list[bool] = []
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    mutations: list[str] = []
 
-        # The reads came up; the mutations did not.
-        assert "get_positions" in await session.tool_names()
-        assert "place_order" not in await session.tool_names()
-
-        status = await session.call("get_connection_status")
-        assert status["mode"] == "read"
-        assert status["mode_after_restart"] == "trade"
-        # It must not claim everything is done while trading still waits.
-        assert status["restart_required"] is True
-
-    # The written entitlement is what the next start reads.
-    assert store.read()[config_mod.mode_key("Claude Desktop")] == "trade"
-    async with connected(client_name="Claude Desktop") as session:
-        assert "place_order" in await session.tool_names()
-
-
-async def test_a_punctuation_only_client_name_gets_a_distinct_safe_binding(accepted):
-    """The digest binds even names whose readable slug has no letters or digits."""
-    async with connected(client_name="!!!") as session:
-        grant = await session.open_form()
-        result = await session.call(
-            "save_credentials",
-            environment="india_testnet",
-            api_key=KEY,
-            api_secret=SECRET,
-            mode="trade",
-            grant=grant,
-        )
-        assert result["status"] == "saved"
-        assert result["mode_setting"] == config_mod.mode_key("!!!")
-        assert store.read()[config_mod.mode_key("!!!")] == "trade"
-
-
-async def test_a_client_env_var_still_outranks_the_scoped_setting(monkeypatch):
-    """Editing the client's own config stays the most deliberate thing anyone can do."""
-    credentialled(mode_for="Claude Desktop")
-    monkeypatch.setenv("DELTA_MCP_MODE", "read")
-    async with connected(client_name="Claude Desktop") as session:
-        assert "place_order" not in await session.tool_names()
-
-
-def rejecting(code, detail="delta api error: raw [http 401] (context={...})", ip=""):
-    async def check(env, key, secret):
-        return credentials.Check(
-            ok=False, reachable=True, detail=detail, code=code, ip=ip
+    async def access_state(ctx: Context) -> authorization.AccessState:
+        state_checks.append(consent)
+        return authorization.AccessState(
+            credentials_ready=True,
+            trading_enabled=True,
+            client_name=CLIENT_NAME,
+            final_trading_check=lambda: consent,
         )
 
-    return check
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    app = build_server(manage_url=manage_url, access_state=access_state)
+
+    async def get(
+        path: str, params: dict[str, Any] | None = None, *, auth: bool = False
+    ) -> dict[str, Any]:
+        assert path == "/products/BTCUSD"
+        lookup_started.set()
+        await release_lookup.wait()
+        return {"result": {"id": 27, "symbol": "BTCUSD", "tick_size": "0.1"}}
+
+    async def mutate(
+        path: str, payload: dict[str, Any], *, auth: bool = False
+    ) -> dict[str, Any]:
+        mutations.append(path)
+        return {}
+
+    monkeypatch.setattr(app.live_client, "get", get)
+    monkeypatch.setattr(app.live_client, "post", mutate)
+    monkeypatch.setattr(app.live_client, "put", mutate)
+    monkeypatch.setattr(app.live_client, "delete", mutate)
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "62000.07",
+    }
+
+    try:
+        async with connected(app, mode="2026-07-28") as client:
+            call = asyncio.create_task(client.call_tool("place_order", arguments))
+            await lookup_started.wait()
+            assert state_checks == [True]
+            consent = False
+            release_lookup.set()
+            result = await call
+    finally:
+        await app.close_live_client()
+
+    assert result.is_error is True
+    assert "trading was disabled" in result.content[0].text
+    assert mutations == []
 
 
-async def test_a_key_from_the_other_site_names_the_choice_not_the_variable(monkeypatch):
-    """The commonest first-run mistake, answered in the words on the form's own radios."""
-    monkeypatch.setattr(credentials, "check", rejecting("invalid_api_key"))
-    async with connected() as session:
-        message = (await save(session))["message"]
-        # save() picks the practice site, so that is what it was checked against and the
-        # other choice is the one worth offering.
-        assert "demo.delta.exchange" in message
-        assert "Real account" in message
+async def test_apps_result_opens_the_external_page_and_keeps_a_text_link() -> None:
+    async with connected(mode="2026-07-28", apps=True) as client:
+        result = await client.call_tool("setup_credentials", {})
+        resource = await client.read_resource(connection_app.VIEW_URI)
+
+    assert result.meta["ui"] == {
+        "resourceUri": connection_app.VIEW_URI,
+        "manageUrl": MANAGE_URL,
+    }
+    assert MANAGE_URL in result.content[0].text
+    assert resource.contents[0].mime_type == APP_MIME_TYPE
+    html = resource.contents[0].text
+    assert 'request("ui/open-link", { url: manageUrl })' in html
+    assert 'request("tools/call"' not in html
+    assert "api_secret" not in html.lower()
 
 
-async def test_a_rejection_never_shows_the_form_the_message_meant_for_a_log(monkeypatch):
-    """`delta api error:`, the raw code, DELTA_MCP_ENV and `[http 401]` mean nothing here.
+async def test_client_without_url_or_apps_gets_a_clickable_link() -> None:
+    async with connected(mode="2026-07-28") as client:
+        result = await client.call_tool("get_positions", {})
 
-    Appending readable copy to that string rather than replacing it left the user reading
-    the machine's version first and the same advice twice.
-    """
-    monkeypatch.setattr(credentials, "check", rejecting("invalid_api_key"))
-    async with connected() as session:
-        message = (await save(session))["message"]
-        for leak in ("delta api error", "DELTA_MCP_ENV", "http 401", "context=", "_api_key"):
-            assert leak not in message, f"{leak!r} leaked into the form"
+    assert result.is_error is True
+    assert f"]({MANAGE_URL})" in result.content[0].text
 
 
-async def test_a_blocked_ip_says_so_and_shows_the_address_delta_saw(monkeypatch):
-    """Telling someone to switch sites over an unwhitelisted IP sends them nowhere useful."""
-    monkeypatch.setattr(
-        credentials, "check", rejecting("ip_not_whitelisted_for_api_key", ip="1.2.3.4")
+async def test_legacy_url_elicitation_returns_without_running_the_account_call() -> None:
+    seen = []
+
+    async def elicit(ctx: object, params: Any) -> types.ElicitResult:
+        seen.append(params)
+        return types.ElicitResult(action="accept")
+
+    app = build_server(manage_url=manage_url)
+    try:
+        async with Client(
+            app,
+            mode="legacy",
+            client_info=types.Implementation(name=CLIENT_NAME, version="1"),
+            elicitation_callback=elicit,
+        ) as client:
+            result = await client.call_tool("get_positions", {})
+    finally:
+        await app.close_live_client()
+
+    assert len(seen) == 1
+    assert seen[0].url == MANAGE_URL
+    assert result.structured_content["status"] == "authorization_pending"
+
+
+DRY_RUNS = {
+    "place_order": {
+        "product_id": 27,
+        "size": 1,
+        "side": "buy",
+        "order_type": "market_order",
+    },
+    "edit_order": {"id": 1, "size": 1, "product_id": 27},
+    "cancel_order": {"product_id": 27, "id": 1},
+    "cancel_all_orders": {},
+    "place_batch_orders": {
+        "product_id": 27,
+        "orders": [{"size": 1, "side": "buy", "order_type": "market_order"}],
+    },
+    "edit_batch_orders": {
+        "product_id": 27,
+        "orders": [{"id": 1, "size": 1}],
+    },
+    "cancel_batch_orders": {"product_id": 27, "orders": [{"id": 1}]},
+    "place_bracket_order": {
+        "product_id": 27,
+        "stop_loss_order": {"order_type": "market_order", "trail_amount": "1"},
+    },
+    "edit_bracket_order": {"id": 1, "product_id": 27},
+    "set_product_leverage": {"product_id": 27, "leverage": "10"},
+    "adjust_position_margin": {"product_id": 27, "delta_margin": "5"},
+    "close_all_positions": {"close_all_portfolio": True},
+    "configure_auto_topup": {"product_id": 27, "auto_topup": True},
+}
+
+
+@pytest.mark.parametrize(("name", "arguments"), DRY_RUNS.items())
+@respx.mock
+async def test_every_trading_dry_run_works_without_consent_or_http(
+    name: str, arguments: dict[str, Any]
+) -> None:
+    async with connected(mode="2026-07-28") as client:
+        result = await client.call_tool(name, {**arguments, "dry_run": True})
+
+    assert result.is_error is False
+    assert result.structured_content["dry_run"] is True
+
+
+@pytest.mark.parametrize(("name", "arguments"), DRY_RUNS.items())
+async def test_every_real_trading_tool_is_blocked_before_any_mutation(
+    name: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentialled()
+    app = build_server(
+        manage_url=manage_url,
+        connection_service=connection_service(),
     )
-    async with connected() as session:
-        message = (await save(session))["message"]
-        assert "1.2.3.4" in message
-        assert "whitelisted" in message
-        assert "demo.delta.exchange" not in message
+    mutations: list[tuple[str, str]] = []
+
+    async def mutate(
+        path: str,
+        json_body: Any = None,
+        *,
+        auth: bool = False,
+    ) -> dict[str, Any]:
+        mutations.append((path, repr(json_body)))
+        return {}
+
+    monkeypatch.setattr(app.live_client, "post", mutate)
+    monkeypatch.setattr(app.live_client, "put", mutate)
+    monkeypatch.setattr(app.live_client, "delete", mutate)
+    try:
+        async with connected(
+            app,
+            mode="2026-07-28",
+            url_elicitation=True,
+        ) as client:
+            result = await client.session.call_tool(
+                name,
+                arguments,
+                allow_input_required=True,
+            )
+    finally:
+        await app.close_live_client()
+
+    assert isinstance(result, InputRequiredResult)
+    prompt = result.input_requests["delta_exchange_authorization"]
+    assert "Enable trading" in prompt.params.message
+    assert mutations == []
 
 
-async def test_a_key_without_read_data_says_which_permission_to_add(monkeypatch):
-    monkeypatch.setattr(credentials, "check", rejecting("unauthorized_api_access"))
-    async with connected() as session:
-        assert "Read Data" in (await save(session))["message"]
+async def test_every_tool_that_changes_state_has_a_write_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    app = build_server()
+    try:
+        tools = await app.list_tools()
+    finally:
+        await app.close_live_client()
+
+    expected = trading.TOOL_NAMES | {"bulk_fills_export", "setup_credentials"}
+    writes = {tool.name for tool in tools if not tool.annotations.read_only_hint}
+    assert writes == expected
 
 
-async def test_an_unanticipated_failure_keeps_the_raw_message(monkeypatch):
-    """For a code nobody wrote copy for, the raw text is the only information there is."""
-    monkeypatch.setattr(
-        credentials, "check", rejecting("SomethingNew", detail="delta api error: SomethingNew")
-    )
-    async with connected() as session:
-        assert "SomethingNew" in (await save(session))["message"]
+async def test_non_idempotent_writes_do_not_invite_automatic_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    app = build_server()
+    try:
+        tools = {tool.name: tool for tool in await app.list_tools()}
+    finally:
+        await app.close_live_client()
 
-
-async def test_a_key_delta_rejects_changes_nothing(monkeypatch):
-    async def rejected(env, key, secret):
-        return credentials.Check(
-            ok=False, reachable=True, detail="delta api error: InvalidApiKey"
-        )
-
-    monkeypatch.setattr(credentials, "check", rejected)
-    async with connected() as session:
-        assert (await save(session))["status"] == "rejected"
-        assert not session.saw_tool_list_changed()
-        assert "get_positions" not in await session.tool_names()
+    for name in (
+        "setup_credentials",
+        "place_order",
+        "place_batch_orders",
+        "place_bracket_order",
+        "adjust_position_margin",
+    ):
+        assert tools[name].annotations.idempotent_hint is False, name

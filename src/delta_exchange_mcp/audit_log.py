@@ -1,4 +1,4 @@
-"""Append-only audit log for trading mutations (`DELTA_MCP_MODE=trade`).
+"""Append-only audit log for browser-authorized trading mutations.
 
 Every mutating tool call — including dry-runs — is recorded as one JSON line so the user
 has a durable record of what the assistant placed, edited, cancelled or closed. Request
@@ -23,12 +23,12 @@ from typing import Any
 from delta_exchange_mcp.config import Config, setting
 
 
-def _resolve_path() -> Path:
+def _resolve_path(env: str) -> Path:
     override = setting("DELTA_MCP_AUDIT_FILE")
     if override:
         return Path(override).expanduser()
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    name = f"audit-{stamp}-{os.getpid()}.log"
+    name = f"audit-{env}-{stamp}-{os.getpid()}.log"
     return Path.home() / ".delta-exchange-mcp" / "audit" / name
 
 
@@ -78,9 +78,9 @@ def _summarize(result: Any) -> Any:
 # really doesn't want a file on disk can set DELTA_MCP_AUDIT to one of these.
 _DISABLE = {"off", "false", "0", "no"}
 
-# One audit file per process — build_server and main() both call configure(); cache so
-# they share the same file (the resolved path uses a timestamp that would otherwise drift).
-_INSTANCE: AuditLog | None = None
+# Keep one audit object per environment. An environment switch must never reuse a logger
+# whose fixed label belongs to another HTTP destination.
+_INSTANCES: dict[str, AuditLog] = {}
 
 
 def configure(cfg: Config) -> AuditLog | None:
@@ -89,15 +89,18 @@ def configure(cfg: Config) -> AuditLog | None:
     On by default in trade mode; DELTA_MCP_AUDIT=off|false|0|no disables it. Idempotent
     within a process.
     """
-    global _INSTANCE
     if cfg.mode != "trade":
         return None
     if (setting("DELTA_MCP_AUDIT") or "").lower() in _DISABLE:
         return None
-    if _INSTANCE is not None:
-        return _INSTANCE
+    override = setting("DELTA_MCP_AUDIT_FILE")
+    current = _INSTANCES.get(cfg.env)
+    if current is not None and (
+        not override or current.path == Path(override).expanduser()
+    ):
+        return current
 
-    path = _resolve_path()
+    path = _resolve_path(cfg.env)
     try:
         path = _open(path)
     except OSError:
@@ -107,8 +110,9 @@ def configure(cfg: Config) -> AuditLog | None:
         except OSError as e:
             print(f"[delta-exchange-mcp] audit logging disabled: {e}", file=sys.stderr)
             return None
-    _INSTANCE = AuditLog(path, cfg.env)
-    return _INSTANCE
+    configured = AuditLog(path, cfg.env)
+    _INSTANCES[cfg.env] = configured
+    return configured
 
 
 def _open(path: Path) -> Path:

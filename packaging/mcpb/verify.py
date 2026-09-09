@@ -1,4 +1,4 @@
-"""Check a built .mcpb: archive structure, then a real MCP handshake from a fresh unpack.
+"""Check a built .mcpb: archive structure, then real MCP handshakes from fresh unpacks.
 
 Packing successfully is not evidence the bundle works. This unpacks the artifact the way a
 client would and speaks the protocol to it, so a bundle that installs but cannot start
@@ -8,7 +8,6 @@ fails here rather than on someone's machine.
 import json
 import os
 import queue
-import re
 import shutil
 import struct
 import subprocess
@@ -20,6 +19,59 @@ import zipfile
 from pathlib import Path
 
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
+MODERN_PROTOCOL = "2026-07-28"
+LEGACY_PROTOCOL = "2025-06-18"
+PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
+CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
+EXPECTED_TOOL_NAMES = frozenset(
+    {
+        "adjust_position_margin",
+        "bulk_fills_export",
+        "cancel_all_orders",
+        "cancel_batch_orders",
+        "cancel_order",
+        "close_all_positions",
+        "configure_auto_topup",
+        "edit_batch_orders",
+        "edit_bracket_order",
+        "edit_order",
+        "get_candles",
+        "get_connection_status",
+        "get_debug_status",
+        "get_fills",
+        "get_funding_history",
+        "get_indices",
+        "get_margined_positions",
+        "get_mark_price_history",
+        "get_oi_history",
+        "get_open_orders",
+        "get_options_chain",
+        "get_order_by_id",
+        "get_order_history",
+        "get_orderbook",
+        "get_positions",
+        "get_product",
+        "get_product_leverage",
+        "get_recent_trades",
+        "get_reference_data",
+        "get_settlement_prices",
+        "get_ticker",
+        "get_trading_preferences",
+        "get_trading_stats",
+        "get_trading_status",
+        "get_wallet_balances",
+        "get_wallet_transactions",
+        "list_products",
+        "list_tickers",
+        "place_batch_orders",
+        "place_bracket_order",
+        "place_order",
+        "set_product_leverage",
+        "setup_credentials",
+    }
+)
+RETIRED_TOOL_NAMES = frozenset({"get_profile", "save_credentials", "save_mode"})
 
 
 def check_archive(mcpb: Path) -> None:
@@ -49,7 +101,13 @@ def check_archive(mcpb: Path) -> None:
 
     # Assert the payload rather than trusting .mcpbignore. Build tooling sits beside the
     # payload in this directory, so one missed ignore rule would otherwise ship it silently.
-    required = {"manifest.json", "pyproject.toml", "uv.lock", "icon.png", "server/main.py"}
+    required = {
+        "manifest.json",
+        "pyproject.toml",
+        "uv.lock",
+        "icon.png",
+        "server/main.py",
+    }
     missing = required - names
     if missing:
         raise SystemExit(f"missing from the bundle: {', '.join(sorted(missing))}")
@@ -65,49 +123,49 @@ def check_archive(mcpb: Path) -> None:
             f".mcpbignore?): {', '.join(sorted(unexpected))}"
         )
 
-    print(f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid")
+    print(
+        f"  archive: {len(raw)} bytes, {len(names)} entries, CRCs OK, strict-parser valid"
+    )
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
-    """The environment a host would build, over a deliberately hostile one.
+def check_connection_contract(manifest: dict) -> None:
+    """Require the bundle to defer credentials and consent to Manage Connection."""
+    if "user_config" in manifest:
+        raise SystemExit(
+            "the browser-configured bundle must not declare user_config prompts"
+        )
+    if "env" in manifest["server"]["mcp_config"]:
+        raise SystemExit(
+            "the browser-configured bundle must not inject launch settings"
+        )
+    print("  connection: no install-time secrets or authorization settings")
 
-    The ambient half sets DELTA_MCP_MODE=trade and supplies credentials, which is what a
-    machine with those exported looks like. The manifest half is then applied on top with
-    ${user_config.x} resolved the way the host resolves it. Checking the result is what
-    makes "the form decides the mode, not the environment" an actual test rather than an
-    assertion that passes because no credentials were present.
 
-    DELTA_MCP_DEBUG is in the ambient half and *not* declared by the manifest, which is the
-    point: the manifest env is applied over the user's environment, so an undeclared variable
-    reaches the server untouched and registers `get_debug_status`. Left out of here, the
-    undeclared-tool check in `main` could only ever pass, because CI's own shell has no such
-    variable. With it, that check is what proves the declared list is a real ceiling.
-
-    Everything the server writes is pointed at `workdir`, the throwaway unpack: the debug log
-    that turning debug on creates, the audit log that trade mode with credentials opens, and
-    the shared settings file. That last one is not tidiness — the server reads
-    ~/.delta-exchange-mcp/config.env for anything the manifest does not declare, so a
-    developer with DELTA_MCP_DEBUG=1 in their own file would fail the undeclared-tool check
-    here for a reason CI could never reproduce. Left at their defaults, every build also
-    wrote three files into a home directory a build has no business touching.
-    """
-    config = {k: v.get("default", "") for k, v in manifest["user_config"].items()}
-    config.update({"mode": mode, "api_key": "placeholder", "api_secret": "placeholder"})
-
-    env = dict(os.environ)
-    env.update({
-        "DELTA_MCP_MODE": "trade",
-        "DELTA_API_KEY": "ambient",
-        "DELTA_API_SECRET": "ambient",
-        "DELTA_MCP_DEBUG": "1",
-        "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
-        "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
-        "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
-    })
-    for key, raw in manifest["server"]["mcp_config"]["env"].items():
-        env[key] = re.sub(
-            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), "")), raw
+def launch_env(workdir: Path, *, hostile: bool) -> dict[str, str]:
+    """Build an isolated public or hostile process environment."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("DELTA_")
+    }
+    env.update(
+        {
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "DELTA_MCP_DEBUG": "1",
+            "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
+            "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
+            "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
+        }
+    )
+    if hostile:
+        env.update(
+            {
+                "DELTA_MCP_MODE": "trade",
+                "DELTA_MCP_ENV": "india_devnet",
+                "DELTA_API_KEY": "synthetic-key",
+                "DELTA_API_SECRET": "synthetic-secret",
+            }
         )
     return env
 
@@ -130,11 +188,23 @@ def _pump(stream, put) -> None:
 
 
 def handshake(
-    extracted: Path, env: dict[str, str] | None = None, timeout: float = 240.0
+    extracted: Path,
+    *,
+    modern: bool,
+    env: dict[str, str] | None = None,
+    timeout: float = 240.0,
 ) -> dict[str, dict]:
-    """Start the unpacked server over stdio and return the tools it registers by name."""
+    """Discover one fresh unpack and return its tools by name."""
     proc = subprocess.Popen(
-        ["uv", "run", "--directory", str(extracted), "--frozen", "python", "server/main.py"],
+        [
+            "uv",
+            "run",
+            "--directory",
+            str(extracted),
+            "--frozen",
+            "python",
+            "server/main.py",
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -148,7 +218,9 @@ def handshake(
     readers = [
         threading.Thread(target=_pump, args=(proc.stdout, replies.put), daemon=True),
         threading.Thread(
-            target=_pump, args=(proc.stderr, lambda line: line and errors.append(line)), daemon=True
+            target=_pump,
+            args=(proc.stderr, lambda line: line and errors.append(line)),
+            daemon=True,
         ),
     ]
     for reader in readers:
@@ -158,18 +230,34 @@ def handshake(
         proc.stdin.write(json.dumps(msg) + "\n")
         proc.stdin.flush()
 
-    send(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "bundle-verify", "version": "1"},
-            },
-        }
-    )
+    client_info = {"name": "bundle-verify", "version": "1"}
+    request_meta = {
+        PROTOCOL_VERSION_META_KEY: MODERN_PROTOCOL,
+        CLIENT_INFO_META_KEY: client_info,
+        CLIENT_CAPABILITIES_META_KEY: {},
+    }
+    if modern:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": request_meta},
+            }
+        )
+    else:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": LEGACY_PROTOCOL,
+                    "capabilities": {},
+                    "clientInfo": client_info,
+                },
+            }
+        )
 
     deadline = time.time() + timeout
     seen: dict[int, dict] = {}
@@ -192,8 +280,16 @@ def handshake(
             seen[msg["id"]] = msg
         if msg.get("id") == 1 and not asked:
             asked = True
-            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            if not modern:
+                send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    **({"params": {"_meta": request_meta}} if modern else {}),
+                }
+            )
 
     proc.terminate()
     try:
@@ -207,12 +303,21 @@ def handshake(
 
     tail = "".join(errors)[-2000:]
     if 1 not in seen:
-        raise SystemExit(f"no initialize response\nstderr:\n{tail}")
+        operation = "server/discover" if modern else "initialize"
+        raise SystemExit(f"no {operation} response\nstderr:\n{tail}")
     if 2 not in seen:
         raise SystemExit(f"no tools/list response\nstderr:\n{tail}")
 
-    info = seen[1]["result"].get("serverInfo", {})
-    print(f"  handshake: initialize OK, serverInfo={info}")
+    if modern:
+        supported = seen[1].get("result", {}).get("supportedVersions", [])
+        if MODERN_PROTOCOL not in supported:
+            raise SystemExit(
+                f"server/discover did not advertise {MODERN_PROTOCOL}: {supported!r}"
+            )
+        print(f"  discovery: server/discover OK, supported={supported}")
+    else:
+        info = seen[1]["result"].get("serverInfo", {})
+        print(f"  discovery: initialize OK, serverInfo={info}")
     return {tool["name"]: tool for tool in seen[2]["result"]["tools"]}
 
 
@@ -225,6 +330,37 @@ def mutation_names(tools: dict[str, dict]) -> list[str]:
     )
 
 
+def unpack_installations(mcpb: Path, workdir: Path) -> tuple[dict, Path, Path]:
+    """Extract independent bundle installations for modern and legacy discovery."""
+    modern_dir = workdir / "modern"
+    legacy_dir = workdir / "legacy"
+    modern_dir.mkdir()
+    legacy_dir.mkdir()
+    with zipfile.ZipFile(mcpb) as archive:
+        archive.extractall(modern_dir)
+        archive.extractall(legacy_dir)
+
+    manifest = json.loads((modern_dir / "manifest.json").read_text())
+    return manifest, modern_dir, legacy_dir
+
+
+def discover_tools(
+    modern_dir: Path, legacy_dir: Path
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Run protocol discovery with independent installation and state directories."""
+    modern = handshake(
+        modern_dir,
+        modern=True,
+        env=launch_env(modern_dir, hostile=False),
+    )
+    legacy = handshake(
+        legacy_dir,
+        modern=False,
+        env=launch_env(legacy_dir, hostile=True),
+    )
+    return modern, legacy
+
+
 def main() -> None:
     mcpb = Path(sys.argv[1]).resolve()
     print(f"verifying {mcpb.name}")
@@ -232,43 +368,40 @@ def main() -> None:
 
     tmp = Path(tempfile.mkdtemp(prefix="mcpb-verify-"))
     try:
-        with zipfile.ZipFile(mcpb) as z:
-            z.extractall(tmp)
-        manifest = json.loads((tmp / "manifest.json").read_text())
-
-        # Someone who accepted the form's defaults, on a machine whose environment is
-        # already asking for trade mode. The declared default has to win.
-        default = handshake(
-            tmp, launch_env(manifest, manifest["user_config"]["mode"]["default"], tmp)
-        )
-        leaked = mutation_names(default)
-        print(f"  default mode: {len(default)} tools, {len(leaked)} mutating")
-        if leaked:
-            raise SystemExit(
-                "the default install can mutate: an ambient DELTA_MCP_MODE=trade reached "
-                f"the server and registered {', '.join(leaked[:5])}"
-            )
-        if not default:
+        manifest, modern_dir, legacy_dir = unpack_installations(mcpb, tmp)
+        check_connection_contract(manifest)
+        modern, legacy = discover_tools(modern_dir, legacy_dir)
+        if not modern:
             raise SystemExit("no tools registered")
-
-        # And the opt-in has to actually reach trading, or the field is decorative.
-        opted = handshake(tmp, launch_env(manifest, "trade", tmp))
-        mutating = mutation_names(opted)
-        print(f"  mode=trade:   {len(opted)} tools, {len(mutating)} mutating")
-        if not mutating:
-            raise SystemExit("opting into trade registered no mutation tools")
-
-        # tools_generated is false, which promises the manifest lists everything reachable.
-        # Both runs, not just the trade one: an undeclared tool that a variable in the user's
-        # own environment switches on appears in the default install too, and that is the
-        # install almost everyone has.
-        declared = {t["name"] for t in manifest["tools"]}
-        undeclared = (set(default) | set(opted)) - declared
-        if undeclared:
+        if set(modern) != set(legacy):
             raise SystemExit(
-                "manifest declares tools_generated=false but the server registers "
-                f"undeclared tools: {', '.join(sorted(undeclared)[:5])}"
+                "modern and legacy discovery returned different tool lists: "
+                f"modern-only={sorted(set(modern) - set(legacy))}, "
+                f"legacy-only={sorted(set(legacy) - set(modern))}"
             )
+        declared = {t["name"] for t in manifest["tools"]}
+        runtime = set(modern)
+        retired = (declared | runtime) & RETIRED_TOOL_NAMES
+        if retired:
+            raise SystemExit(f"retired setup tools must stay absent: {sorted(retired)}")
+        if declared != runtime:
+            raise SystemExit(
+                "manifest and runtime tool lists differ: "
+                f"runtime-only={sorted(runtime - declared)}, "
+                f"manifest-only={sorted(declared - runtime)}"
+            )
+        if runtime != EXPECTED_TOOL_NAMES:
+            raise SystemExit(
+                "runtime tool list differs from the approved stable registry: "
+                f"new={sorted(runtime - EXPECTED_TOOL_NAMES)}, "
+                f"missing={sorted(EXPECTED_TOOL_NAMES - runtime)}"
+            )
+        mutations = mutation_names(modern)
+        if len(mutations) != 13:
+            raise SystemExit(
+                f"expected 13 annotated trading tools, found {len(mutations)}: {mutations}"
+            )
+        print(f"  stable tools: {len(runtime)} total, {len(mutations)} trading")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

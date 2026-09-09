@@ -154,7 +154,7 @@ async def test_idle_rebinds_close_retired_transports_promptly():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_invalid_api_key_message_hints_env():
+async def test_invalid_api_key_message_hints_manage_connection():
     respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(
             401, json={"success": False, "error": {"code": "InvalidApiKey"}}
@@ -164,7 +164,30 @@ async def test_invalid_api_key_message_hints_env():
     with pytest.raises(DeltaApiError) as exc:
         await client.get("/wallet/balances", auth=True)
     assert exc.value.code == "InvalidApiKey"
-    assert "DELTA_MCP_ENV" in str(exc.value)
+    assert "Open Manage Connection" in str(exc.value)
+    assert "environment is externally managed" in str(exc.value)
+    assert "DELTA_MCP_ENV" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["UnauthorizedApiAccess", "unauthorized_api_access"])
+@respx.mock
+async def test_account_permission_error_does_not_name_the_validation_endpoint(
+    code: str,
+) -> None:
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": code}},
+        )
+    )
+
+    with pytest.raises(DeltaApiError) as exc:
+        await _client_with_creds().get("/wallet/balances", auth=True)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
 
 
 @pytest.mark.asyncio

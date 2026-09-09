@@ -1,9 +1,8 @@
 """Authenticated trading tools (mutations).
 
-Registered only when DELTA_API_KEY/SECRET are set AND DELTA_MCP_MODE=trade. Every tool
-takes a `dry_run` flag that validates and echoes the payload without sending it, and every
-call (dry-run or real) is recorded to the audit log. Mutations never auto-retry (see
-DeltaClient retry policy) — a timeout is surfaced, not silently re-sent.
+All tools remain discoverable. Call-time authorization requires a current credential and
+browser consent before a real mutation. A `dry_run` validates and echoes the payload
+without consent or an HTTP mutation. Mutations never retry automatically.
 """
 
 from __future__ import annotations
@@ -11,14 +10,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
+from delta_exchange_mcp import hints
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -48,7 +50,49 @@ _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
 _MUTATING_TOOL_META = {MUTATING_TOOL_META_KEY: True}
 _REVOKED_MESSAGE = "trading was disabled while this request was being prepared; no mutation was sent"
-_SESSION_MESSAGE = "trading is not enabled for this MCP session; no mutation was sent"
+_ORDER_OUTCOME_UNKNOWN = (
+    "The order mutation may have reached Delta. Do not resubmit it. "
+    "Use get_open_orders and get_order_history to reconcile the order state first."
+)
+_LEVERAGE_OUTCOME_UNKNOWN = (
+    "The leverage change may have reached Delta. Do not resubmit it. "
+    "Use get_product_leverage to read the current leverage first."
+)
+_POSITION_OUTCOME_UNKNOWN = (
+    "The position change may have reached Delta. Do not resubmit it. "
+    "Use get_margined_positions to read the current position state first."
+)
+_OUTCOME_UNKNOWN_BY_TOOL = {
+    "place_order": _ORDER_OUTCOME_UNKNOWN,
+    "edit_order": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_order": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_all_orders": _ORDER_OUTCOME_UNKNOWN,
+    "place_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "edit_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "place_bracket_order": _ORDER_OUTCOME_UNKNOWN,
+    "edit_bracket_order": _ORDER_OUTCOME_UNKNOWN,
+    "set_product_leverage": _LEVERAGE_OUTCOME_UNKNOWN,
+    "adjust_position_margin": _POSITION_OUTCOME_UNKNOWN,
+    "close_all_positions": _POSITION_OUTCOME_UNKNOWN,
+    "configure_auto_topup": _POSITION_OUTCOME_UNKNOWN,
+}
+
+_CHECK_FAILED_MESSAGE = "trading authorization could not be confirmed; no mutation was sent"
+
+FinalTradingCheck = Callable[[], bool]
+
+
+class FinalTradingCheckError(RuntimeError):
+    """The point-of-use authorization checker failed."""
+
+
+@dataclass(frozen=True)
+class TradeLease:
+    """The gate generation and final checker captured for one tool request."""
+
+    generation: int
+    final_check: FinalTradingCheck
 
 
 @dataclass
@@ -57,27 +101,45 @@ class TradeGate:
 
     generation: int = 0
     armed: bool = True
-    session: object | None = None
+    _final_check: ContextVar[FinalTradingCheck | None] = field(
+        init=False, repr=False, compare=False
+    )
 
-    def bind(self, session: object) -> None:
-        if self.session is not None and self.session is not session:
-            self.generation += 1
-        self.session = session
+    def __post_init__(self) -> None:
+        self._final_check = ContextVar(
+            f"delta_trade_final_check_{id(self)}", default=None
+        )
 
-    def lease(self, session: object | None) -> int:
+    def bind_final_check(self, checker: FinalTradingCheck | None) -> None:
+        """Bind a storage-backed checker to the current request task."""
+        self._final_check.set(checker)
+
+    def arm(self) -> None:
+        """Authorize future mutations after the request-scoped check succeeds."""
         if not self.armed:
-            raise RuntimeError(_REVOKED_MESSAGE)
-        if self.session is not None and self.session is not session:
-            raise RuntimeError(_SESSION_MESSAGE)
-        return self.generation
+            self.generation += 1
+        self.armed = True
+
+    def lease(self) -> TradeLease:
+        if not self.armed:
+            raise ToolError(_REVOKED_MESSAGE)
+        checker = self._final_check.get()
+        self._final_check.set(None)
+        if checker is None:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE)
+        return TradeLease(generation=self.generation, final_check=checker)
 
     def revoke(self) -> None:
         self.armed = False
         self.generation += 1
 
-    def accepts(self, lease: int | None) -> bool:
-        return self.armed and lease == self.generation
-
+    def accepts(self, lease: TradeLease | None) -> bool:
+        if not self.armed or lease is None or lease.generation != self.generation:
+            return False
+        try:
+            return lease.final_check() is True
+        except Exception as exc:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE) from exc
 
 def _bs(value: bool | None) -> str | None:
     """Delta's order-level flags are string enums "true"/"false", not JSON booleans."""
@@ -99,7 +161,7 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _require_one(product_id: int | None, product_symbol: str | None) -> None:
     if (product_id is None) == (product_symbol is None):
-        raise ValueError("pass exactly one of product_id or product_symbol")
+        raise ToolError("pass exactly one of product_id or product_symbol")
 
 
 def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) -> None:
@@ -109,7 +171,9 @@ def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) 
     dry-run) with a clearer message instead of spending a live round-trip.
     """
     if stop_loss_price is not None and trail_amount is not None:
-        raise ValueError("bracket stop-loss takes either a fixed price or a trailing amount, not both")
+        raise ToolError(
+            "bracket stop-loss takes either a fixed price or a trailing amount, not both"
+        )
 
 
 def _validate_order(order_type: str | None, limit_price: str | None, size: int | None) -> None:
@@ -119,11 +183,13 @@ def _validate_order(order_type: str | None, limit_price: str | None, size: int |
     documented API constraints — they are not a full server simulation.
     """
     if size is not None and size <= 0:
-        raise ValueError("size must be a positive integer")
+        raise ToolError("size must be a positive integer")
     if order_type == "limit_order" and limit_price is None:
-        raise ValueError("limit_price is required for limit_order")
+        raise ToolError("limit_price is required for limit_order")
     if order_type == "market_order" and limit_price is not None:
-        raise ValueError("market_order must not carry a limit_price (it is ignored, not a cap)")
+        raise ToolError(
+            "market_order must not carry a limit_price (it is ignored, not a cap)"
+        )
 
 
 def _flag_partial(result: Any, sent: list[dict[str, Any]]) -> Any:
@@ -184,42 +250,73 @@ def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
 
 
 def register(
-    mcp: FastMCP,
+    mcp: MCPServer,
     client: DeltaClient,
-    audit: AuditLog | None = None,
+    audit: AuditLog | Callable[[], AuditLog | None] | None = None,
     gate: TradeGate | None = None,
 ) -> None:
     gate = gate or TradeGate()
-    active_lease: ContextVar[int | None] = ContextVar(
+    active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
-    _uid_cache: dict[str, int] = {}
-    # tick_size keyed by both product id (int) and symbol (str); filled lazily.
-    _tick_cache: dict[int | str, Decimal] = {}
-    _tick_list_loaded = {"done": False}
+    active_audit: ContextVar[AuditLog | None] = ContextVar(
+        f"delta_trade_audit_{id(gate)}", default=None
+    )
+    _uid_cache: dict[int, int] = {}
+    # Each cache key includes the task-pinned HTTP identity. A rebind cannot reuse or
+    # repopulate product or account data under a different credential pair.
+    _tick_cache: dict[tuple[int, int | str], Decimal] = {}
+    _tick_list_loaded: set[int] = set()
+
+    def current_audit() -> AuditLog | None:
+        return audit() if callable(audit) else audit
 
     def mutation_tool(
-        function: Callable[..., Awaitable[Any]],
-    ) -> Callable[..., Awaitable[Any]]:
-        """Pin every request in one dispatched mutation to the same client state."""
+        title: str, *, destructive: bool, idempotent: bool
+    ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+        """Pin every request in one dispatched mutation to the same client state.
 
-        @wraps(function)
-        async def pinned(*args: Any, **kwargs: Any) -> Any:
-            try:
-                session = mcp.get_context().session
-            except ValueError:
-                session = None
-            lease = gate.lease(session)
-            token = active_lease.set(lease)
-            try:
-                async with client.pin():
-                    return await function(*args, **kwargs)
-            finally:
-                active_lease.reset(token)
+        It also carries the annotations, which is why it takes arguments rather than
+        wrapping bare. Putting them here rather than on thirteen registrations keeps the
+        `_meta` mutating flag and the client-facing hints in one place, so a new mutation
+        cannot acquire one and miss the other.
+        """
 
-        return mcp.tool(meta=_MUTATING_TOOL_META)(pinned)
+        def decorate(
+            function: Callable[..., Awaitable[Any]],
+        ) -> Callable[..., Awaitable[Any]]:
+            @wraps(function)
+            async def pinned(*args: Any, **kwargs: Any) -> Any:
+                if kwargs.get("dry_run") is True:
+                    async with client.pin():
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
+                lease = gate.lease()
+                token = active_lease.set(lease)
+                try:
+                    async with client.pin():
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
+                finally:
+                    active_lease.reset(token)
+
+            return mcp.tool(
+                annotations=hints.mutates(
+                    title, destructive=destructive, idempotent=idempotent
+                ),
+                meta=_MUTATING_TOOL_META,
+            )(pinned)
+
+        return decorate
 
     def _store_product(prod: dict[str, Any]) -> None:
+        generation = client.binding_generation
         tick = prod.get("tick_size")
         if tick is None:
             return
@@ -228,9 +325,9 @@ def register(
         except (InvalidOperation, ValueError):
             return
         if prod.get("id") is not None:
-            _tick_cache[int(prod["id"])] = dec
+            _tick_cache[(generation, int(prod["id"]))] = dec
         if prod.get("symbol"):
-            _tick_cache[str(prod["symbol"])] = dec
+            _tick_cache[(generation, str(prod["symbol"]))] = dec
 
     async def _tick_size(product_id: int | None, product_symbol: str | None) -> Decimal | None:
         """Resolve a product's tick_size (cached per process). Returns None if unresolvable.
@@ -240,7 +337,11 @@ def register(
         indexes every product. Never raises — price rounding must not block an order on a
         metadata-lookup failure.
         """
-        key: int | str | None = product_symbol if product_symbol is not None else product_id
+        generation = client.binding_generation
+        product_key: int | str | None = (
+            product_symbol if product_symbol is not None else product_id
+        )
+        key = (generation, product_key) if product_key is not None else None
         if key is not None and key in _tick_cache:
             return _tick_cache[key]
         try:
@@ -249,15 +350,20 @@ def register(
                 inner = resp.get("result", resp) if isinstance(resp, dict) else None
                 if isinstance(inner, dict):
                     _store_product(inner)
-            elif not _tick_list_loaded["done"]:
+            elif generation not in _tick_list_loaded:
                 resp = await client.get("/products")
                 products = resp.get("result", []) if isinstance(resp, dict) else []
                 for prod in products if isinstance(products, list) else []:
                     if isinstance(prod, dict):
                         _store_product(prod)
-                _tick_list_loaded["done"] = True
+                _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
-            logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
+            logger.info(
+                "tick_size lookup failed for %s/%s: %s",
+                product_id,
+                product_symbol,
+                type(e).__name__,
+            )
             return None
         return _tick_cache.get(key) if key is not None else None
 
@@ -284,36 +390,46 @@ def register(
         return adjustments
 
     async def _user_id() -> int:
-        if "id" not in _uid_cache:
-            prof = await client.get("/profile", auth=True)
-            inner = prof.get("result", prof) if isinstance(prof, dict) else {}
-            uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
-            if uid is None:
-                raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
+        generation = client.binding_generation
+        if generation not in _uid_cache:
+            _uid_cache[generation] = (await fetch_account_identity(client)).user_id
+        return _uid_cache[generation]
 
     async def _finish(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
     ) -> Any:
         payload = _clean(payload)
+        log = active_audit.get()
         if dry_run:
-            if audit:
-                audit.record(tool, payload, dry_run=True)
+            if log:
+                log.record(tool, payload, dry_run=True)
             return {"dry_run": True, "method": method, "path": path, "payload": payload}
-        if not gate.accepts(active_lease.get()):
-            if audit:
-                audit.record(tool, payload, error=_REVOKED_MESSAGE)
-            raise RuntimeError(_REVOKED_MESSAGE)
         sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
+        try:
+            accepted = gate.accepts(active_lease.get())
+        except FinalTradingCheckError:
+            raise ToolError(_CHECK_FAILED_MESSAGE) from None
+        if not accepted:
+            if log:
+                log.record(tool, payload, error=_REVOKED_MESSAGE)
+            raise ToolError(_REVOKED_MESSAGE)
         try:
             result = await sender(path, payload, auth=True)
         except DeltaApiError as e:
-            if audit:
-                audit.record(tool, payload, error=str(e))
+            reported = e
+            if e.code == "execution_outcome_unknown":
+                reported = DeltaApiError(
+                    e.code,
+                    hint=_OUTCOME_UNKNOWN_BY_TOOL[tool],
+                    status=e.status,
+                )
+            if log:
+                log.record(tool, payload, error=str(reported))
+            if reported is not e:
+                raise reported from e
             raise
-        if audit:
-            audit.record(tool, payload, result=result)
+        if log:
+            log.record(tool, payload, result=result)
         return result
 
     def _attach(result: Any, adjustments: list[dict[str, str]]) -> Any:
@@ -325,7 +441,7 @@ def register(
 
     # ---------------------------------------------------------------- single order
 
-    @mutation_tool
+    @mutation_tool("Place order", destructive=False, idempotent=False)
     async def place_order(
         size: int = Field(description="Order size in contracts."),
         side: str = Field(description="buy or sell."),
@@ -397,7 +513,7 @@ def register(
         result = await _finish("place_order", "POST", "/orders", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Edit order", destructive=True, idempotent=True)
     async def edit_order(
         id: int = Field(description="Order id to edit."),
         size: int = Field(description="Total size after the edit."),
@@ -430,7 +546,7 @@ def register(
         result = await _finish("edit_order", "PUT", "/orders", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Cancel order", destructive=True, idempotent=True)
     async def cancel_order(
         product_id: int = Field(description="Product id the order belongs to."),
         id: int | None = Field(default=None, description="Order id to cancel."),
@@ -439,11 +555,11 @@ def register(
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
-            raise ValueError("pass exactly one of id or client_order_id")
+            raise ToolError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("cancel_order", "DELETE", "/orders", payload, dry_run=dry_run)
 
-    @mutation_tool
+    @mutation_tool("Cancel all orders", destructive=True, idempotent=True)
     async def cancel_all_orders(
         product_id: int | None = Field(default=None, description="Limit to one product."),
         contract_types: list[str] | None = Field(
@@ -481,12 +597,12 @@ def register(
 
     def _check_batch(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not orders:
-            raise ValueError("orders must be a non-empty list")
+            raise ToolError("orders must be a non-empty list")
         if len(orders) > _MAX_BATCH:
-            raise ValueError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
+            raise ToolError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
         return [_clean(o) for o in orders]
 
-    @mutation_tool
+    @mutation_tool("Place orders in batch", destructive=False, idempotent=False)
     async def place_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 orders, each {size, side, order_type, limit_price?, "
@@ -509,7 +625,7 @@ def register(
             coid = order.get("client_order_id")
             if coid is not None:
                 if coid in seen_coids:
-                    raise ValueError(f"duplicate client_order_id in batch: {coid}")
+                    raise ToolError(f"duplicate client_order_id in batch: {coid}")
                 seen_coids.add(coid)
         payload = {
             "product_id": product_id,
@@ -519,7 +635,7 @@ def register(
         result = await _finish("place_batch_orders", "POST", "/orders/batch", payload, dry_run=dry_run)
         return _flag_partial(result, cleaned)
 
-    @mutation_tool
+    @mutation_tool("Edit orders in batch", destructive=True, idempotent=True)
     async def edit_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 edits, each {id, size, order_type, limit_price?, post_only?}."
@@ -541,7 +657,7 @@ def register(
         result = await _finish("edit_batch_orders", "PUT", "/orders/batch", payload, dry_run=dry_run)
         return _flag_partial(result, cleaned)
 
-    @mutation_tool
+    @mutation_tool("Cancel orders in batch", destructive=True, idempotent=True)
     async def cancel_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Up to 50 orders to cancel, each {id} or {client_order_id}."
@@ -563,15 +679,23 @@ def register(
 
     # ---------------------------------------------------------------- bracket orders
 
-    @mutation_tool
+    @mutation_tool("Place bracket order", destructive=False, idempotent=False)
     async def place_bracket_order(
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
         stop_loss_order: dict[str, Any] | None = Field(
-            default=None, description="{order_type, stop_price, limit_price?, trail_amount?}."
+            default=None,
+            description=(
+                "{order_type: limit_order|market_order (default market_order), stop_price, "
+                "limit_price (required for limit_order), trail_amount?}."
+            ),
         ),
         take_profit_order: dict[str, Any] | None = Field(
-            default=None, description="{order_type, stop_price, limit_price?}."
+            default=None,
+            description=(
+                "{order_type: limit_order|market_order (default market_order), stop_price, "
+                "limit_price (required for limit_order)}."
+            ),
         ),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
         dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
@@ -583,7 +707,9 @@ def register(
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
-            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
+            raise ToolError(
+                "provide at least one of stop_loss_order or take_profit_order"
+            )
         sl = _clean(stop_loss_order) if stop_loss_order else None
         tp = _clean(take_profit_order) if take_profit_order else None
         if sl:
@@ -607,7 +733,7 @@ def register(
         result = await _finish("place_bracket_order", "POST", "/orders/bracket", payload, dry_run=dry_run)
         return _attach(result, adjustments)
 
-    @mutation_tool
+    @mutation_tool("Edit bracket order", destructive=True, idempotent=True)
     async def edit_bracket_order(
         id: int = Field(description="Order id whose bracket params to update."),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
@@ -652,7 +778,7 @@ def register(
 
     # ---------------------------------------------------------------- positions & leverage
 
-    @mutation_tool
+    @mutation_tool("Set leverage", destructive=True, idempotent=True)
     async def set_product_leverage(
         product_id: int = Field(description="Product id to set order leverage for."),
         leverage: str = Field(description="Leverage multiplier, e.g. '10'."),
@@ -664,7 +790,7 @@ def register(
             f"/products/{product_id}/orders/leverage", {"leverage": leverage}, dry_run=dry_run,
         )
 
-    @mutation_tool
+    @mutation_tool("Adjust position margin", destructive=True, idempotent=False)
     async def adjust_position_margin(
         product_id: int = Field(description="Product id of the position."),
         delta_margin: str = Field(description="Margin to add (positive) or remove (negative), e.g. '5.0'."),
@@ -676,28 +802,30 @@ def register(
             "adjust_position_margin", "POST", "/positions/change_margin", payload, dry_run=dry_run
         )
 
-    @mutation_tool
+    @mutation_tool("Close all positions", destructive=True, idempotent=True)
     async def close_all_positions(
         close_all_portfolio: bool = Field(default=False, description="Close cross/portfolio-margined positions."),
         close_all_isolated: bool = Field(default=False, description="Close isolated-margin positions."),
         dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Close open positions in the scopes you set to true. Both flags default to false,
-        so you must explicitly opt into a scope — this never broadens beyond your request.
+        so you must explicitly select a scope. The tool does not broaden the scope.
 
-        Your user_id is required by the API and is resolved automatically from your profile
-        (fetched once and cached) — you do not pass it.
+        Your user_id is required by the API and is resolved automatically from your trading
+        preferences. The value is fetched once and cached, so you do not pass it.
         """
         if not (close_all_portfolio or close_all_isolated):
-            raise ValueError("set at least one of close_all_portfolio or close_all_isolated to true")
+            raise ToolError(
+                "set at least one of close_all_portfolio or close_all_isolated to true"
+            )
         payload = {
             "close_all_portfolio": close_all_portfolio,
             "close_all_isolated": close_all_isolated,
-            "user_id": await _user_id(),
+            "user_id": None if dry_run else await _user_id(),
         }
         return await _finish("close_all_positions", "POST", "/positions/close_all", payload, dry_run=dry_run)
 
-    @mutation_tool
+    @mutation_tool("Configure auto top-up", destructive=True, idempotent=True)
     async def configure_auto_topup(
         product_id: int = Field(description="Product id of the position."),
         auto_topup: bool = Field(description="Enable or disable auto top-up for this position."),

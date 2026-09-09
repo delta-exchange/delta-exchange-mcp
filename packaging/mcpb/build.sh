@@ -31,6 +31,9 @@ rm -f "$HERE/uv.lock"
 uv lock --directory "$HERE" >/dev/null
 
 echo "==> generating the manifest from the live tool list"
+# The bundle environment can hold a same-version wheel from another branch. Recreate it
+# before introspection so the manifest always comes from the wheel built above.
+rm -rf "$HERE/.venv"
 uv run --directory "$HERE" --frozen python make_bundle.py manifest
 
 echo "==> packing"
