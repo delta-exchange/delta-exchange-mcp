@@ -282,13 +282,56 @@ async def test_selected_real_trade_requires_input_without_sending_a_mutation(
     assert mutations == []
 
 
-async def test_explicit_dry_run_false_is_overridden():
+@pytest.mark.parametrize(
+    ("dry_run_args", "expected_pass"),
+    [
+        pytest.param({}, True, id="omitted"),
+        pytest.param({"dry_run": False}, True, id="false"),
+        pytest.param({"dry_run": True}, True, id="true"),
+        pytest.param({"dry_run": "false"}, False, id="string"),
+        pytest.param({"dry_run": None}, False, id="null"),
+        pytest.param({"dry_run": 0}, False, id="integer"),
+        pytest.param({"dry_run": []}, False, id="array"),
+        pytest.param({"dry_run": {}}, False, id="object"),
+    ],
+)
+async def test_dry_run_override_preserves_model_arguments_for_scoring(
+    dry_run_args: dict[str, object], expected_pass: bool
+) -> None:
+    app = build_server(Config(env="india_testnet", base_url=INDIA_TESTNET_REST))
+    try:
+        tools = await app.list_tools()
+    finally:
+        await app.close_live_client()
+
+    arguments = {
+        "product_symbol": "BTCUSD",
+        "size": 1,
+        "side": "buy",
+        "order_type": "limit_order",
+        "limit_price": "50000",
+        "post_only": True,
+        **dry_run_args,
+    }
+    original_arguments = arguments.copy()
     session = FakeSession(_echo({"dry_run": True, "method": "POST", "path": "/orders"}))
-    call = await _call(session, MUTATING, "place_order", {"size": 1, "dry_run": False})
+    call = await _call(session, mutating_tools(tools), "place_order", arguments)
+
+    assert session.sent == ("place_order", {**original_arguments, "dry_run": True})
     assert session.sent[1]["dry_run"] is True
-    # recorded args are the model's intent, without the harness override
-    assert "dry_run" not in call.args
-    assert call.args == {"size": 1}
+    case = next(case for case in CASES if case.id == "post_only_limit")
+    transcript = Transcript(
+        available_tools=tools,
+        turns=[TurnRecord(prompt=case.turns[0].prompt, reply="done", calls=[call])],
+    )
+
+    passed, failures = check(case, transcript)
+
+    assert passed is expected_pass, failures
+    if not expected_pass:
+        assert any("invalid place_order dry_run" in item for item in failures)
+    assert call.args == original_arguments
+    assert arguments == original_arguments
 
 
 async def test_schema_rejection_from_mcp_cannot_pass_the_argument_gate():
