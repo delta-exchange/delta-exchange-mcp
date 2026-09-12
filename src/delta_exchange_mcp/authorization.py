@@ -58,8 +58,15 @@ class ToolAuthorization:
         if name not in account.TOOL_NAMES and name not in trading.TOOL_NAMES:
             return None
 
-        current = await self._state(ctx)
         resumed = self._resumed_access(ctx)
+        if resumed is not None and self._response_action(ctx) in {"decline", "cancel"}:
+            return self._result(
+                "Authorization was cancelled. No request was sent to Delta.",
+                status="authorization_cancelled",
+                error=True,
+            )
+
+        current = await self._state(ctx)
 
         if name in account.TOOL_NAMES:
             if current.credentials_ready:
@@ -102,21 +109,13 @@ class ToolAuthorization:
     async def _blocked(
         self, ctx: Context, required: Access, resumed: Access | None
     ) -> CallToolResult | InputRequiredResult:
-        if resumed is not None:
-            action = self._response_action(ctx)
-            if action in {"decline", "cancel"}:
-                return self._result(
-                    "Authorization was cancelled. No request was sent to Delta.",
-                    status="authorization_cancelled",
-                    error=True,
-                )
-            if resumed == required:
-                return self._result(
-                    "Authorization is not complete. No request was sent to Delta. "
-                    "Finish the browser flow, then retry the tool call.",
-                    status="authorization_pending",
-                    error=True,
-                )
+        if resumed == required:
+            return self._result(
+                "Authorization is not complete. No request was sent to Delta. "
+                "Finish the browser flow, then retry the tool call.",
+                status="authorization_pending",
+                error=True,
+            )
         return await self._prompt(ctx, required)
 
     async def _prompt(
