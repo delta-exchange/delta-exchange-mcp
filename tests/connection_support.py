@@ -69,7 +69,7 @@ def action(
     revision: setup.Revision | None = None,
 ) -> setup.ActionResult:
     expected = connection._revision(client_name) if revision is None else revision
-    return connection._actions(client_name)(name, arguments, expected)
+    return connection.actions(client_name)(name, arguments, expected)
 
 
 async def verified(
