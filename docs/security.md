@@ -47,3 +47,21 @@ commits its metadata. This verifies storage, not account permissions. It then
 removes the key and secret lines from the legacy file. The source file remains
 available if the credential metadata cannot be committed. Migration does not import
 legacy trading mode as consent.
+
+## User-operated CLI login
+
+The login CLI can collect a key and secret with hidden terminal prompts, or accept a complete
+pair through `--api-key` and `--api-secret`. These values never enter an MCP tool call or
+result. Explicit command-line values may be visible to shell history and process inspection;
+hidden prompts avoid those copies. Interactive input stops if the terminal cannot hide it.
+
+Browser and terminal entry share credential validation, atomic replacement, and consent
+checks. Standalone login requires an approved native store; a memory-only connection would
+be lost when the CLI exits. It does not add a plaintext fallback. The CLI and MCP process
+must run as the same OS user and use the same metadata location to share credentials.
+
+Direct credential arguments do not approve trading. Interactive terminal consent requires
+an exact client name and an explicit `yes`, plus a second acknowledgement for production.
+The same revision checks prevent a concurrent credential change or revocation from being
+approved by an older prompt. As with browser consent, a local program running as the same OS
+user can imitate this input; the operating-system account remains the security boundary.

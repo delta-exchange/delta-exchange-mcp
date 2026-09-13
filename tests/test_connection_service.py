@@ -1265,7 +1265,7 @@ async def test_candidate_validation_does_not_hold_the_connection_lock() -> None:
 
     def replace_credential() -> None:
         results.append(
-            connection._actions("Codex")(
+            connection.actions("Codex")(
                 "credentials",
                 {
                     "environment": "india_prod",
@@ -1309,7 +1309,7 @@ def test_candidate_validation_rechecks_the_browser_revision_before_commit() -> N
 
     def replace_from_browser() -> None:
         results.append(
-            connection._actions("Codex")(
+            connection.actions("Codex")(
                 "credentials",
                 {
                     "environment": "india_prod",

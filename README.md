@@ -14,7 +14,7 @@
 
 This is the official local MCP server for Delta Exchange India. Market data works without
 an account connection. Account tools use a Delta API key. Trading tools need separate
-browser approval.
+approval in the browser or terminal.
 
 > [!NOTE]
 > This project is in beta. The tool definitions and setup flow can still change. Please
@@ -65,6 +65,47 @@ calls need. A real trading key must have trading permission and meet Delta's IP 
 current Delta documentation does not establish whether Read Data alone covers every account
 endpoint. This project does not make that claim.
 
+### Terminal and headless login
+
+```bash
+delta-exchange-mcp login                       # automatically choose browser or terminal
+delta-exchange-mcp login --browser             # force the browser connection page
+delta-exchange-mcp login --device              # hidden terminal API key and secret prompts
+delta-exchange-mcp login --no-browser          # alias for --device
+delta-exchange-mcp login --api-key '<key>' --api-secret '<secret>'
+```
+
+Prefix these commands with `uvx` if the executable is not installed on your PATH.
+SSH sessions, Linux sessions without `DISPLAY` or `WAYLAND_DISPLAY`, and sessions without a
+browser controller use terminal entry. If automatic browser launch fails, login falls back
+to terminal entry. Browser availability is a best-effort check; use `--no-browser` when the
+session looks graphical but cannot display a usable browser. `--browser` prints the local
+URL even if launching fails. `--device` is a terminal-entry alias, not an OAuth device-code
+flow, and does not require a browser on another machine.
+
+Terminal entry hides both values and requires an interactive terminal. Supplying both
+credential arguments skips prompts and works without a TTY; a missing or empty half fails.
+Command-line values can appear in shell history and process listings, so prefer the hidden
+prompts when typing credentials yourself. Never put real credentials in chat or MCP tool
+arguments. `--env india_testnet` selects testnet for terminal/direct login; the default is the
+current environment. Browser users select the environment on the page.
+
+Terminal login optionally asks for the exact MCP client name reported by
+`get_connection_status`. You can also supply `--client NAME`. Trading stays off unless you
+explicitly type `yes` to approve all 13 trading tools; production asks for another `yes` to
+acknowledge real orders. Credential arguments alone never enable trading, even with
+`--client`. Browser login accepts `--client NAME` to bind approval to that client.
+
+Both entry points use the same validation, credential replacement, and consent service.
+Rejected credentials leave the previous connection unchanged. Unreachable or inconclusive
+validation is reported as unverified. Rotation revokes previous trading approval.
+
+Standalone login needs an available, unlocked native credential service on the same machine
+and OS user account as the MCP process. On a headless Linux server, configure Secret Service
+first; a terminal by itself does not provide persistent secure storage. Login fails clearly
+when only process memory is available. It never writes new secrets to `config.env`.
+The CLI and MCP client must use the same `DELTA_MCP_CONFIG_FILE` location if overridden.
+
 ### Where the credential is stored
 
 The server stores one credential record for production and one for testnet. It uses:
@@ -82,7 +123,8 @@ connect that location to the existing account.
 
 If no approved credential service is available, the server keeps the credential in memory
 for that process. The connection and trading approval then end when the process stops. The
-server does not use a plaintext fallback.
+server does not use a plaintext fallback. Standalone CLI login requires persistent secure
+storage and reports an error when only process memory is available.
 
 ### Existing installations
 
@@ -141,7 +183,7 @@ operating-system credential service is available. An unnamed client gets approva
 the current process.
 
 Production approval requires a separate acknowledgement that real orders can be placed.
-The checkbox starts clear. Trading tools have no built-in notional or position-size cap.
+The browser checkbox starts clear; terminal login asks for a separate `yes`. Trading tools have no built-in notional or position-size cap.
 Delta sizes orders in contracts, not coins.
 
 Approval has no time expiry in this version. The server revokes it after credential rotation,
@@ -166,7 +208,7 @@ current design boundary. The operating-system user account is the security bound
 
 Every entry below starts the same local stdio server. Do not add an environment block for
 credentials, environment selection, or trading mode. Manage those settings in the browser
-after the server starts.
+or through the user-operated login CLI.
 
 ### Let your coding agent install it
 

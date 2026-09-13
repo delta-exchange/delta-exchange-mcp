@@ -16,6 +16,7 @@ from mcp.types import CallToolResult, InputRequiredResult, TextContent
 from delta_exchange_mcp import analytics, audit_log
 from delta_exchange_mcp import authorization
 from delta_exchange_mcp import connection_app
+from delta_exchange_mcp import login
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import hints
@@ -274,10 +275,11 @@ def build_parser() -> argparse.ArgumentParser:
     # Optional, so a bare invocation still means "serve" — that is how every MCP client
     # launches this, and it must never become a subcommand.
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser(
+    login_parser = sub.add_parser(
         "login",
-        help="open the browser connection page",
+        help="connect through a browser or enter credentials in the terminal",
     )
+    login.add_arguments(login_parser)
     return parser
 
 
@@ -285,17 +287,15 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
 
     if args.command == "login":
-        connection = ConnectionService.open()
-        try:
-            page = connection.open_page(open_browser=True)
-            print(
-                f"[delta-exchange-mcp] Manage Connection: {page.url}",
-                file=sys.stderr,
-            )
-            page.wait()
-        finally:
-            connection.close()
-            anyio.run(connection.client.aclose)
+        result = login.run(
+            mode=args.login_mode,
+            api_key=args.api_key,
+            api_secret=args.api_secret,
+            environment=args.env,
+            client_name=args.client,
+        )
+        if result:
+            raise SystemExit(result)
         return
 
     mcp = build_server()
