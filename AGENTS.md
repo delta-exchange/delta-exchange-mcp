@@ -28,7 +28,8 @@ uv run ruff check src tests scripts packaging
 actionlint
 
 uv run delta-exchange-mcp
-uv run delta-exchange-mcp login             # optional browser-opening convenience
+uv run delta-exchange-mcp login             # automatic browser or hidden terminal entry
+uv run delta-exchange-mcp login --no-browser # force terminal entry
 
 bash scripts/inspect.sh --cli --method tools/list
 bash scripts/inspect.sh --cli --method tools/call --tool-name get_ticker --tool-arg symbol=BTCUSD
@@ -118,6 +119,23 @@ The validation endpoint is `GET /v2/users/trading_preferences`. It supplies the 
 not proof of an invalid key. Only explicit invalid-key and invalid-signature responses
 reject a candidate as invalid. An unreachable candidate can be stored as `unverified`.
 
+## CLI login
+
+`login.py` selects browser or terminal entry. Plain `login` detects SSH, missing Linux
+displays, and missing browser controllers; failed automatic browser launch falls back to
+the terminal. `--browser` forces the page, and `--device` / `--no-browser` force hidden
+terminal entry. `--device` is not OAuth. Both `--api-key` and `--api-secret` are required for
+direct login without prompts. These are user-operated CLI flags, never MCP tool arguments.
+
+Reuse `ConnectionService.actions()` for validation, replacement, and consent. Capture the
+expected revision before credential input and reuse the replacement result's revision for
+consent, so concurrent changes cannot be overwritten or approved. A complete direct pair
+never enables trading. Interactive consent needs an exact client name and explicit approval;
+production also needs a separate real-orders acknowledgement.
+
+Standalone login must fail if secure storage is unavailable: its process exits and cannot
+keep a memory-only connection alive. Never reintroduce plaintext storage as a fallback.
+
 ## Manage Connection browser
 
 `setup.py` owns the loopback listener. `form.py` owns the shared inline HTML. The listener
@@ -196,7 +214,8 @@ This project is local stdio only. Do not add a shared hosted MCP, HTTP transport
 image, or OAuth flow without a separate design review.
 
 The MCPB manifest is generated from the live stable tool list. It must not ask for an API
-key, secret, environment, or trading mode. The browser is the configuration interface.
+key, secret, environment, or trading mode. The browser and user-operated login CLI are the
+configuration interfaces.
 
 Before release:
 

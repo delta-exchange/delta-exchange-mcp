@@ -283,7 +283,7 @@ class ConnectionService:
                 return self._page
             if self._page is not None:
                 self._page.stop()
-            actions = self._actions(client_name)
+            actions = self.actions(client_name)
             revision = self._revision(client_name)
             self._page = self.page_factory(
                 open_browser=open_browser,
@@ -307,7 +307,8 @@ class ConnectionService:
                 self._page = None
                 self._page_client_name = ""
 
-    def _actions(self, client_name: str) -> setup.ActionHandler:
+    def actions(self, client_name: str) -> setup.ActionHandler:
+        """Bind shared connection and consent operations to one MCP client."""
         def run(
             action: str,
             arguments: Mapping[str, Any],

@@ -19,7 +19,7 @@
 </div>
 
 Official MCP (Model Context Protocol) server for **Delta Exchange India**: market data for
-everyone, your own account with an API key, and live trading only after browser consent
+everyone, your own account with an API key, and live trading only after explicit consent
 for the requesting MCP client.
 
 > [!NOTE]
@@ -41,7 +41,8 @@ your key and secret there. The page sends them directly to the local MCP process
 conversation, and stores them in the operating-system credential service when it is available.
 
 Trading tools are always visible, but they cannot send a mutation until you enable trading
-on Manage Connection for the exact MCP client, environment, and credential revision. A
+on Manage Connection or during terminal login for the exact MCP client, environment, and
+credential revision. A
 production approval requires an explicit warning acknowledgement.
 
 <details>
@@ -117,7 +118,7 @@ client does not need a restart after you connect an account or change trading co
 |---|---|---|
 | Market data | none | Prices, order books, option chains, candles, funding and open-interest history, indices |
 | Account, read-only | a connected API key | Positions, orders, fills, balances, trading stats, preferences |
-| Trading | a connected key plus browser consent for this MCP client | Place, edit and cancel orders, brackets, leverage, margin, close-all |
+| Trading | a connected key plus explicit consent for this MCP client | Place, edit and cancel orders, brackets, leverage, margin, close-all |
 
 A partial key and secret pair fails closed. Account and trading calls return a Manage
 Connection link until the required authorization is available.
@@ -155,13 +156,16 @@ Market data needs no key. For account access, use one of these equivalent routes
 - Run `uvx delta-exchange-mcp login`.
 - Retry an account tool and open the Manage Connection link in the authorization response.
 
-All routes open the same short-lived loopback page. Choose production or testnet, enter the
-complete key and secret pair, and submit. The local service validates the pair before it
+The MCP routes open the same short-lived loopback page. The CLI chooses a browser or
+terminal prompts for the current session. Choose production or testnet, enter the complete
+key and secret pair, and submit. The local service validates the pair before it
 replaces the active credential. Do not paste credentials into a chat or an ordinary tool
 argument.
 
 The service stores credentials in the operating-system credential service. If that service
-is unavailable, it uses process memory and reports the connection as session-only. Existing
+is unavailable, the running MCP server uses process memory and reports the connection as
+session-only. Standalone CLI login requires persistent secure storage because its process
+exits after login. Existing
 plaintext credentials in `~/.delta-exchange-mcp/config.env` are migrated to the credential
 service when possible; new secrets are never written to that file.
 
@@ -174,6 +178,47 @@ permits only session consent.
 > [!IMPORTANT]
 > A credential sent as a chat message becomes part of the conversation. Manage Connection
 > exists so the model does not receive the key or secret.
+
+### Terminal and headless login
+
+```bash
+delta-exchange-mcp login                       # automatically choose browser or terminal
+delta-exchange-mcp login --browser             # force the browser connection page
+delta-exchange-mcp login --device              # hidden terminal API key and secret prompts
+delta-exchange-mcp login --no-browser          # alias for --device
+delta-exchange-mcp login --api-key '<key>' --api-secret '<secret>'
+```
+
+Prefix these commands with `uvx` if the executable is not installed on your PATH.
+SSH sessions, Linux sessions without `DISPLAY` or `WAYLAND_DISPLAY`, and sessions without a
+browser controller use terminal entry. If automatic browser launch fails, login falls back
+to terminal entry. Browser availability is a best-effort check; use `--no-browser` when the
+session looks graphical but cannot display a usable browser. `--browser` prints the local
+URL even if launching fails. `--device` is a terminal-entry alias, not an OAuth device-code
+flow, and does not require a browser on another machine.
+
+Terminal entry hides both values and requires an interactive terminal. Supplying both
+credential arguments skips prompts and works without a TTY; a missing or empty half fails.
+Command-line values can appear in shell history and process listings, so prefer the hidden
+prompts when typing credentials yourself. Never put real credentials in chat or MCP tool
+arguments. `--env india_testnet` selects testnet for terminal/direct login; the default is the
+current environment. Browser users select the environment on the page.
+
+Terminal login optionally asks for the exact MCP client name reported by
+`get_connection_status`. You can also supply `--client NAME`. Trading stays off unless you
+explicitly type `yes` to approve all 13 trading tools; production asks for another `yes` to
+acknowledge real orders. Credential arguments alone never enable trading, even with
+`--client`. Browser login accepts `--client NAME` to bind approval to that client.
+
+Both entry points use the same validation, credential replacement, and consent service.
+Rejected credentials leave the previous connection unchanged. Unreachable or inconclusive
+validation is reported as unverified. Rotation revokes previous trading approval.
+
+Standalone login needs an available, unlocked native credential service on the same machine
+and OS user account as the MCP process. On a headless Linux server, configure Secret Service
+first; a terminal by itself does not provide persistent secure storage. Login fails clearly
+when only process memory is available. It never writes new secrets to `config.env`.
+The CLI and MCP client must use the same `DELTA_MCP_CONFIG_FILE` location if overridden.
 
 ### Getting the key itself
 
@@ -414,7 +459,7 @@ The page does not independently verify user identity or presence. This is an acc
 exception to the MCP URL elicitation security requirements. Read the
 [local security model](docs/security.md) before you connect a client.
 
-- **Request-time authorization.** All tools stay visible, but account calls require a current credential and real mutations require browser consent for the exact client, environment, and credential identity.
+- **Request-time authorization.** All tools stay visible, but account calls require a current credential and real mutations require explicit consent for the exact client, environment, and credential identity.
 - **Credential isolation.** Manage Connection sends secrets only to the local loopback service. The model never receives them.
 - **Fail-closed changes.** Credential rotation, disconnect, environment changes, consent-store failures, and process-pair changes disable trading until fresh consent is recorded.
 - **Auditable mutations.** Mutations are dry-runnable, audit-logged by default, and never retried automatically.
@@ -471,8 +516,9 @@ New tools appear only after the respawn. The MCP `list_changed` notification ref
 
 An authorization response includes a clickable Manage Connection URL even when the client
 does not open the browser itself. Open that URL while the MCP server is still running. You
-can also call `setup_credentials` or run `uvx delta-exchange-mcp login`; both open the same
-loopback page. The page expires after ten minutes.
+can also call `setup_credentials` or run `uvx delta-exchange-mcp login --browser`; both open
+the same loopback page. The page expires after ten minutes. On a headless machine, run
+`uvx delta-exchange-mcp login --no-browser` in your own terminal instead.
 
 Do not put credentials in `config.env` as a fallback. That file is for non-secret settings.
 
