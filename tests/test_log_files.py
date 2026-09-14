@@ -127,6 +127,38 @@ def test_rejects_foreign_owner_before_any_data(tmp_path, monkeypatch):
     assert path.read_bytes() == b""
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership")
+def test_directory_alias_checks_intermediate_symlink_owners(tmp_path, monkeypatch):
+    from delta_exchange_mcp.log_files import open_log
+
+    cache = tmp_path / "private"
+    deep = cache / "deep"
+    deep.mkdir(parents=True)
+    log = deep / "audit.log"
+    log.write_text("untouched")
+    log.chmod(0o600)
+    (deep / "jump").symlink_to(cache, target_is_directory=True)
+    outside = tmp_path / "back"
+    outside.symlink_to(deep, target_is_directory=True)
+    alias = deep / "alias"
+    alias.symlink_to("jump/../back", target_is_directory=True)
+    original = Path.lstat
+
+    def foreign_intermediate(path):
+        info = original(path)
+        if path == outside:
+            values = list(info)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", foreign_intermediate)
+    with pytest.raises(PermissionError, match="owned by another user"):
+        with open_log(alias / "audit.log") as stream:
+            stream.write("private data")
+    assert log.read_text() == "untouched"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_permission_failure_closes_descriptor_and_disables_logging(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "debug.log"))
