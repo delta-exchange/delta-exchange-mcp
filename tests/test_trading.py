@@ -313,8 +313,8 @@ async def test_batch_cap_enforced():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
+    preferences = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 999}})
     )
     close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -325,7 +325,7 @@ async def test_close_all_fetches_and_caches_user_id():
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
 
-    assert profile.call_count == 1  # cached after first fetch
+    assert preferences.call_count == 1  # cached after first fetch
     assert close.call_count == 2
     assert b'"user_id":999' in close.calls[0].request.content
 
@@ -549,8 +549,8 @@ async def test_close_all_requires_a_scope():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_explicit_scope_not_broadened():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 7}})
     )
     route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
@@ -666,6 +666,24 @@ async def test_tick_rounding_skipped_when_unresolved():
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
     assert "price_adjustments" not in out[1]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_trading_permission_error_does_not_name_the_validation_endpoint() -> None:
+    respx.delete(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": "UnauthorizedApiAccess"}},
+        )
+    )
+
+    with pytest.raises(Exception) as exc:
+        await _call(_client(), "cancel_order", product_id=27, id=81)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
 
 
 # ------------------------------------------------------- transport-failure safety
@@ -806,10 +824,10 @@ async def test_unknown_outcome_names_the_correct_state_checks(
     expected: tuple[str, ...],
 ) -> None:
     if tool == "close_all_positions":
-        respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+        respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
             return_value=httpx.Response(
                 200,
-                json={"success": True, "result": {"id": 99}},
+                json={"success": True, "result": {"user_id": 99}},
             )
         )
     respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(

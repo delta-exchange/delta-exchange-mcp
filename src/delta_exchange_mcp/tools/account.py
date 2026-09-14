@@ -8,6 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
 
 TOOL_NAMES = frozenset(
@@ -23,7 +24,6 @@ TOOL_NAMES = frozenset(
         "get_product_leverage",
         "get_trading_stats",
         "get_trading_preferences",
-        "get_profile",
         "bulk_fills_export",
     }
 )
@@ -364,12 +364,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     @mcp.tool()
     async def get_trading_preferences() -> dict[str, Any]:
         """User trading preferences (margin mode, notifications, etc.)."""
-        return await client.get("/users/trading_preferences", auth=True)
-
-    @mcp.tool()
-    async def get_profile() -> dict[str, Any]:
-        """User profile."""
-        return await client.get("/profile", auth=True)
+        return (await fetch_account_identity(client)).response
 
     @mcp.tool()
     async def bulk_fills_export(

@@ -16,12 +16,12 @@ _AUTH_HINTS: dict[str, str] = {
         "matches the dashboard the key was created on."
     ),
     "UnauthorizedApiAccess": (
-        "API key lacks permission for this endpoint. Enable Read Data (or Trading) on "
-        "the key in Delta API management."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "unauthorized_api_access": (
-        "API key lacks permission for this endpoint. Enable Read Data (or Trading) on "
-        "the key in Delta API management."
+        "API key lacks permission for this endpoint. Update the key's permissions in "
+        "Delta API management."
     ),
     "ip_not_whitelisted_for_api_key": (
         "request IP not whitelisted for this API key. Add the IP shown in the error "
@@ -35,10 +35,14 @@ _AUTH_HINTS: dict[str, str] = {
     ),
 }
 
+_PERMISSION_FAILURE_CODES = frozenset(
+    {"UnauthorizedApiAccess", "unauthorized_api_access"}
+)
+
 # A response carrying one of these codes proves that the submitted credential pair
-# itself is unusable. Other API failures — especially a rate limit or service outage —
-# only prove that Delta could not verify it at that moment.
-_AUTH_FAILURE_CODES = frozenset(_AUTH_HINTS)
+# cannot authenticate. A missing endpoint permission is separate because the key can
+# still authenticate for another endpoint.
+_AUTH_FAILURE_CODES = frozenset(_AUTH_HINTS) - _PERMISSION_FAILURE_CODES
 
 
 def extract_ip(context: Any) -> str | None:
@@ -78,6 +82,11 @@ class DeltaApiError(Exception):
 def is_auth_failure(error: DeltaApiError) -> bool:
     """Whether an API error decisively rejects the submitted credentials."""
     return error.code in _AUTH_FAILURE_CODES
+
+
+def is_permission_failure(error: DeltaApiError) -> bool:
+    """Whether valid credentials lack permission for the requested endpoint."""
+    return error.code in _PERMISSION_FAILURE_CODES
 
 
 class ConfigError(Exception):
