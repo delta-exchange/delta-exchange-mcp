@@ -10,10 +10,15 @@
 # Pinning a commit SHA is also the integrity control: a git SHA is a hash of the tree, so
 # this is content-addressed in a way an npm version range is not.
 set -euo pipefail
+umask 077
 
 # modelcontextprotocol/mcpb main @ 2026-04-22. Bump deliberately, never to a moving ref.
 MCPB_SHA="70fe3b34cd6dff1b3bba046638edc72a6467a4fb"
-CACHE="${MCPB_CLI_CACHE:-${TMPDIR:-/tmp}/mcpb-cli}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_HELPER=(uv run --no-project python "$HERE/cache.py")
+# Cached files are executable code. Establish ownership before reuse or cleanup;
+# a public temporary-directory name is not protected by the pinned upstream SHA.
+CACHE="$("${CACHE_HELPER[@]}" "${MCPB_CLI_CACHE:-}")"
 BUILT="$CACHE/$MCPB_SHA/dist/cli/cli.js"
 
 if [[ ! -f "$BUILT" ]]; then
@@ -35,6 +40,8 @@ if [[ ! -f "$BUILT" ]]; then
   ( cd "$CACHE/$MCPB_SHA" && ./node_modules/.bin/tsc ) >&2 || true
 fi
 
+# Check newly installed dependencies too, before running the resulting CLI.
+"${CACHE_HELPER[@]}" "$CACHE" >/dev/null
 if [[ ! -f "$BUILT" ]]; then
   echo "mcpb CLI failed to build at $MCPB_SHA" >&2
   exit 1
