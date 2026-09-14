@@ -327,8 +327,87 @@ async def test_legacy_trade_mode_does_not_count_as_browser_consent() -> None:
     assert "Enable trading" in request.params.message
 
 
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
+@pytest.mark.parametrize("ready", [False, True])
+@pytest.mark.parametrize("name", ["get_positions", "bulk_fills_export"])
+async def test_resumed_account_call_respects_cancellation(
+    monkeypatch, tmp_path, action: str, ready: bool, name: str
+) -> None:
+    credentials_ready = False
+
+    async def access_state(ctx: Context) -> authorization.AccessState:
+        return authorization.AccessState(
+            credentials_ready=credentials_ready,
+            trading_enabled=False,
+            client_name=CLIENT_NAME,
+            final_trading_check=lambda: False,
+        )
+
+    monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "fills.csv"
+    output.write_bytes(b"existing export\n")
+    app = build_server(manage_url=manage_url, access_state=access_state)
+    requests: list[str] = []
+
+    async def get(path, params=None, *, auth=False):
+        requests.append(path)
+        return {"result": [{"product_id": 27}]}
+
+    async def get_raw(path, params=None, *, auth=False):
+        requests.append(path)
+        return b"product_id\n27\n"
+
+    monkeypatch.setattr(app.live_client, "get", get)
+    monkeypatch.setattr(app.live_client, "get_raw", get_raw)
+    arguments = (
+        {"product_id": 27}
+        if name == "get_positions"
+        else {"output_path": str(output), "start_time_us": 1}
+    )
+    try:
+        async with connected(
+            app, mode="2026-07-28", url_elicitation=True
+        ) as client:
+            first = await client.session.call_tool(
+                name, arguments, allow_input_required=True
+            )
+            assert isinstance(first, InputRequiredResult)
+            assert requests == []
+
+            credentials_ready = ready
+            second = await client.session.call_tool(
+                name,
+                arguments,
+                input_responses={
+                    "delta_exchange_authorization": types.ElicitResult(action=action)
+                },
+                request_state=first.request_state,
+                allow_input_required=True,
+            )
+    finally:
+        await app.close_live_client()
+
+    assert isinstance(second, CallToolResult)
+    if action == "accept" and ready:
+        assert second.is_error is False
+        assert requests == [
+            "/positions" if name == "get_positions" else "/fills/history/download/csv"
+        ]
+        if name == "bulk_fills_export":
+            assert output.read_bytes() == b"product_id\n27\n"
+    else:
+        assert second.is_error is True
+        assert second.structured_content["status"] == (
+            "authorization_pending" if action == "accept" else "authorization_cancelled"
+        )
+        assert requests == []
+        assert output.read_bytes() == b"existing export\n"
+
+
+@pytest.mark.parametrize("action", ["accept", "decline", "cancel"])
 async def test_resumed_trade_never_executes_the_pending_mutation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch, action: str,
 ) -> None:
     enabled = False
 
@@ -372,7 +451,7 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
                 "place_order",
                 arguments,
                 input_responses={
-                    "delta_exchange_authorization": types.ElicitResult(action="accept")
+                    "delta_exchange_authorization": types.ElicitResult(action=action)
                 },
                 request_state=first.request_state,
                 allow_input_required=True,
@@ -381,8 +460,10 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
         await app.close_live_client()
 
     assert isinstance(second, CallToolResult)
-    assert second.structured_content["status"] == "authorization_complete"
-    assert "pending trade was not sent" in second.content[0].text
+    assert second.structured_content["status"] == (
+        "authorization_complete" if action == "accept" else "authorization_cancelled"
+    )
+    assert second.is_error is (action != "accept")
     assert sent is False
 
 

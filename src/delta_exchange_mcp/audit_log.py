@@ -15,12 +15,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from delta_exchange_mcp.config import Config, setting
+from delta_exchange_mcp.log_files import fallback_path, open_log
 
 
 def _resolve_path(env: str) -> Path:
@@ -33,9 +33,10 @@ def _resolve_path(env: str) -> Path:
 
 
 class AuditLog:
-    def __init__(self, path: Path, env: str):
+    def __init__(self, path: Path, env: str, *, override: Path | None = None):
         self.path = path
         self._env = env
+        self._override = override
 
     def record(
         self,
@@ -59,7 +60,7 @@ class AuditLog:
         elif result is not None:
             entry["result"] = _summarize(result)
         try:
-            with self.path.open("a", encoding="utf-8") as f:
+            with open_log(self.path) as f:
                 f.write(json.dumps(entry, default=str) + "\n")
         except OSError as e:
             print(f"[delta-exchange-mcp] audit write failed: {e}", file=sys.stderr)
@@ -94,33 +95,26 @@ def configure(cfg: Config) -> AuditLog | None:
     if (setting("DELTA_MCP_AUDIT") or "").lower() in _DISABLE:
         return None
     override = setting("DELTA_MCP_AUDIT_FILE")
+    requested_override = Path(override).expanduser() if override else None
     current = _INSTANCES.get(cfg.env)
-    if current is not None and (
-        not override or current.path == Path(override).expanduser()
-    ):
+    if current is not None and current._override == requested_override:
         return current
 
     path = _resolve_path(cfg.env)
     try:
         path = _open(path)
     except OSError:
-        fallback = Path(tempfile.gettempdir()) / "delta-exchange-mcp" / path.name
         try:
-            path = _open(fallback)
+            path = _open(fallback_path(path.name))
         except OSError as e:
             print(f"[delta-exchange-mcp] audit logging disabled: {e}", file=sys.stderr)
             return None
-    configured = AuditLog(path, cfg.env)
+    configured = AuditLog(path, cfg.env, override=requested_override)
     _INSTANCES[cfg.env] = configured
     return configured
 
 
 def _open(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Create empty + tighten to owner-only before any entry is written (umask is often 0644).
-    path.touch(exist_ok=True)
-    try:
-        path.chmod(0o600)
-    except OSError:
+    with open_log(path):
         pass
     return path

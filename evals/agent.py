@@ -182,14 +182,10 @@ async def _call(
         raise RuntimeError(
             f"{name} did not honour dry_run, refusing to continue: {parsed!r}"
         )
-    # Recorded args are the model's own (pre-forcing) — asserts and the judge
-    # should score its intent, not the harness's safety override.
-    recorded = (
-        {k: v for k, v in args.items() if k != "dry_run"} if name in mutating else args
-    )
+    # Score every original model argument, including its own dry_run value.
     return ToolCall(
         name=name,
-        args=recorded,
+        args=args,
         result=parsed,
         is_error=bool(res.is_error),
     )

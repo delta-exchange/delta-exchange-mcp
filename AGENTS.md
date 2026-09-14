@@ -28,7 +28,10 @@ uv run ruff check src tests scripts packaging
 actionlint
 
 uv run delta-exchange-mcp
-uv run delta-exchange-mcp login             # optional browser-opening convenience
+uv run delta-exchange-mcp login             # automatic browser or masked terminal entry
+uv run delta-exchange-mcp login --no-browser # force terminal entry
+uv run delta-exchange-mcp config            # manage saved connection
+uv run delta-exchange-mcp config --mode read --client Codex
 
 bash scripts/inspect.sh --cli --method tools/list
 bash scripts/inspect.sh --cli --method tools/call --tool-name get_ticker --tool-arg symbol=BTCUSD
@@ -118,6 +121,36 @@ The validation endpoint is `GET /v2/users/trading_preferences`. It supplies the 
 not proof of an invalid key. Only explicit invalid-key and invalid-signature responses
 reject a candidate as invalid. An unreachable candidate can be stored as `unverified`.
 
+## Connection CLI
+
+`connection_cli.py` shares browser/terminal selection, native-store checks, masked input,
+and cleanup between `login.py` and `config_cli.py`. Plain `login` detects SSH, missing Linux
+displays, and missing browser controllers; failed automatic browser launch falls back to
+the terminal. `--browser` forces the page, and `--device` / `--no-browser` force masked
+terminal entry. `--device` is not OAuth. Both `--api-key` and `--api-secret` are required for
+direct login without prompts. These are user-operated CLI flags, never MCP tool arguments.
+
+Reuse `ConnectionService.actions()` for validation, replacement, and consent. Capture the
+expected revision before credential input and reuse the replacement result's revision for
+consent, so concurrent changes cannot be overwritten or approved. A complete direct pair
+never enables trading. Interactive consent needs an exact client name and explicit approval;
+production also needs a separate real-orders acknowledgement.
+
+Standalone login must fail if secure storage is unavailable: its process exits and cannot
+keep a memory-only connection alive. Never reintroduce plaintext storage as a fallback.
+
+`config` manages the saved connection without rotating credentials. Its menu applies each
+change immediately. `--env` and `--mode read|trade` select terminal shortcuts; read mode and
+environment selection can run without a TTY, while trade approval requires an interactive
+terminal and an exact client name. Reuse the connection service's activate, replace,
+disconnect, and consent actions. Do not use `DELTA_MCP_MODE` to bypass consent. Do not claim
+persistent approval for process-only credentials.
+
+Secret prompts use prompt-toolkit password rendering with asterisks, a dummy history and
+clipboard, and history-search/editor/system-prompt access disabled. Keep terminal input and output checks;
+never fall back to plaintext echo. Cover rendering, editing, paste, cancellation, and stale
+configuration changes in the CLI tests.
+
 ## Manage Connection browser
 
 `setup.py` owns the loopback listener. `form.py` owns the shared inline HTML. The listener
@@ -196,7 +229,8 @@ This project is local stdio only. Do not add a shared hosted MCP, HTTP transport
 image, or OAuth flow without a separate design review.
 
 The MCPB manifest is generated from the live stable tool list. It must not ask for an API
-key, secret, environment, or trading mode. The browser is the configuration interface.
+key, secret, environment, or trading mode. The browser and user-operated login CLI are the
+configuration interfaces.
 
 Before release:
 

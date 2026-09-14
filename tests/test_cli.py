@@ -16,7 +16,7 @@ def test_help_exits_zero_and_prints_usage(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "usage: delta-exchange-mcp" in out
-    assert "Manage Connection is the normal environment" in out
+    assert "config manages saved environments" in out
     assert "advanced externally managed compatibility overrides" in out
     assert "process memory and no plaintext" in out
     assert "DELTA_MCP_ENV" in out
@@ -41,54 +41,52 @@ def test_parser_help_is_not_empty():
     assert "stdio" in build_parser().format_help()
 
 
-def test_login_opens_manage_connection_without_requesting_secrets(
-    monkeypatch, capsys
-):
-    class FakePage:
-        url = "http://127.0.0.1:43123/manage"
+@pytest.mark.parametrize(
+    ("argv", "mode", "key", "secret"),
+    [
+        (["login"], "auto", None, None),
+        (["login", "--browser"], "browser", None, None),
+        (["login", "--device"], "terminal", None, None),
+        (["login", "--no-browser"], "terminal", None, None),
+        (
+            ["login", "--api-key", "example-key", "--api-secret", "example-secret"],
+            "auto",
+            "example-key",
+            "example-secret",
+        ),
+    ],
+)
+def test_login_routes_arguments(monkeypatch, argv, mode, key, secret):
+    calls = []
 
-        def __init__(self):
-            self.waited = False
+    def run(**arguments):
+        calls.append(arguments)
+        return 0
 
-        def wait(self):
-            self.waited = True
+    monkeypatch.setattr(server_mod.login, "run", run)
+    main(argv)
+    assert calls == [
+        {
+            "mode": mode,
+            "api_key": key,
+            "api_secret": secret,
+            "environment": None,
+            "client_name": "",
+        }
+    ]
 
-    class FakeClient:
-        def __init__(self):
-            self.closed = False
 
-        async def aclose(self):
-            self.closed = True
+def test_login_forwards_failure_exit_code(monkeypatch):
+    monkeypatch.setattr(server_mod.login, "run", lambda **arguments: 2)
+    with pytest.raises(SystemExit) as exc:
+        main(["login"])
+    assert exc.value.code == 2
 
-    class FakeConnection:
-        def __init__(self):
-            self.page = FakePage()
-            self.client = FakeClient()
-            self.open_browser = False
-            self.closed = False
 
-        def open_page(self, *, open_browser=False):
-            self.open_browser = open_browser
-            return self.page
-
-        def close(self):
-            self.closed = True
-
-    connection = FakeConnection()
-    monkeypatch.setattr(
-        server_mod.ConnectionService,
-        "open",
-        staticmethod(lambda: connection),
-    )
-
-    main(["login"])
-
-    error = capsys.readouterr().err
-    assert connection.open_browser is True
-    assert connection.page.waited is True
-    assert connection.closed is True
-    assert connection.client.closed is True
-    assert "Manage Connection: http://127.0.0.1:43123/manage" in error
+def test_login_modes_are_mutually_exclusive():
+    with pytest.raises(SystemExit) as exc:
+        main(["login", "--browser", "--device"])
+    assert exc.value.code == 2
 
 
 def test_help_documents_every_environment_variable_the_code_reads():
@@ -107,8 +105,12 @@ def test_help_documents_every_environment_variable_the_code_reads():
         for name in re.findall(pattern, path.read_text(encoding="utf-8"))
     }
     documented = set(re.findall(r"DELTA_[A-Z_]+", build_parser().format_help()))
-    assert read_by_code, "env var scan found nothing — the pattern above stopped matching"
-    assert read_by_code <= documented, f"undocumented in --help: {sorted(read_by_code - documented)}"
+    assert read_by_code, (
+        "env var scan found nothing — the pattern above stopped matching"
+    )
+    assert read_by_code <= documented, (
+        f"undocumented in --help: {sorted(read_by_code - documented)}"
+    )
 
 
 def test_handshake_reports_our_version_not_the_sdk_version():
@@ -118,3 +120,68 @@ def test_handshake_reports_our_version_not_the_sdk_version():
     server_version = build_server(_cfg()).version
     assert server_version == PACKAGE_VERSION
     assert server_version != version("mcp")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["config"],
+            {
+                "mode": "auto",
+                "environment": None,
+                "trading_mode": None,
+                "client_name": "",
+            },
+        ),
+        (
+            [
+                "config",
+                "--no-browser",
+                "--env",
+                "india_testnet",
+                "--mode",
+                "read",
+                "--client",
+                "Codex",
+            ],
+            {
+                "mode": "terminal",
+                "environment": "india_testnet",
+                "trading_mode": "read",
+                "client_name": "Codex",
+            },
+        ),
+    ],
+)
+def test_config_routes_arguments(monkeypatch, argv, expected):
+    calls = []
+
+    def run(**arguments):
+        calls.append(arguments)
+        return 0
+
+    monkeypatch.setattr(server_mod.config_cli, "run", run)
+    main(argv)
+    assert calls == [expected]
+
+
+def test_config_forwards_failure_exit_code(monkeypatch):
+    monkeypatch.setattr(server_mod.config_cli, "run", lambda **arguments: 2)
+    with pytest.raises(SystemExit) as exc:
+        main(["config"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["config", "--mode", "invalid"],
+        ["config", "--env", "india_devnet"],
+        ["config", "--browser", "--no-browser"],
+    ],
+)
+def test_config_rejects_invalid_arguments(argv):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
