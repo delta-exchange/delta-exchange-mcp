@@ -33,9 +33,10 @@ def _resolve_path(env: str) -> Path:
 
 
 class AuditLog:
-    def __init__(self, path: Path, env: str):
+    def __init__(self, path: Path, env: str, *, override: Path | None = None):
         self.path = path
         self._env = env
+        self._override = override
 
     def record(
         self,
@@ -94,10 +95,9 @@ def configure(cfg: Config) -> AuditLog | None:
     if (setting("DELTA_MCP_AUDIT") or "").lower() in _DISABLE:
         return None
     override = setting("DELTA_MCP_AUDIT_FILE")
+    requested_override = Path(override).expanduser() if override else None
     current = _INSTANCES.get(cfg.env)
-    if current is not None and (
-        not override or current.path == Path(override).expanduser()
-    ):
+    if current is not None and current._override == requested_override:
         return current
 
     path = _resolve_path(cfg.env)
@@ -109,7 +109,7 @@ def configure(cfg: Config) -> AuditLog | None:
         except OSError as e:
             print(f"[delta-exchange-mcp] audit logging disabled: {e}", file=sys.stderr)
             return None
-    configured = AuditLog(path, cfg.env)
+    configured = AuditLog(path, cfg.env, override=requested_override)
     _INSTANCES[cfg.env] = configured
     return configured
 
