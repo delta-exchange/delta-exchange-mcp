@@ -13,6 +13,8 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.clipboard import DummyClipboard
 from prompt_toolkit.history import DummyHistory
 from prompt_toolkit.input.defaults import create_input
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.output.defaults import create_output
 
 from delta_exchange_mcp.auth.connection import ConnectionService
@@ -68,10 +70,19 @@ def read_secret(label: str) -> str:
         raise TerminalInputError(
             "Masked credential input needs an interactive terminal."
         )
+    bindings = KeyBindings()
+
+    @bindings.add("c-r", eager=True)
+    @bindings.add("c-s", eager=True)
+    def ignore_search(event: KeyPressEvent) -> None:
+        # History search has its own unmasked buffer, even with DummyHistory.
+        del event
+
     try:
         with closing(create_input(stdin=sys.stdin)) as terminal_input:
             session = PromptSession(
                 is_password=True,
+                key_bindings=bindings,
                 history=DummyHistory(),
                 clipboard=DummyClipboard(),
                 input=terminal_input,
