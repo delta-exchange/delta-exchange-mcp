@@ -51,7 +51,7 @@ def test_help_documents_every_environment_variable_the_code_reads():
     read_by_code = {
         name
         for path in src.rglob("*.py")
-        for name in re.findall(pattern, path.read_text())
+        for name in re.findall(pattern, path.read_text(encoding="utf-8"))
     }
     documented = set(re.findall(r"DELTA_[A-Z_]+", build_parser().format_help()))
     assert read_by_code, "env var scan found nothing — the pattern above stopped matching"
