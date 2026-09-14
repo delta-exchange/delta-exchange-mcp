@@ -250,6 +250,20 @@ def test_external_dependency_alias_cannot_return_to_cache(harness):
     assert _commands(harness) == []
 
 
+def test_parent_component_cannot_leave_and_reenter_cache(tmp_path, cache_helper):
+    cache = tmp_path / "cache"
+    deep = cache / "deep"
+    _write(deep / "file.js")
+    (deep / "jump").symlink_to(cache, target_is_directory=True)
+    (tmp_path / "back").symlink_to(deep, target_is_directory=True)
+    alias = deep / "alias"
+    alias.symlink_to("jump/../back/file.js")
+    assert alias.resolve().is_relative_to(cache)
+
+    with pytest.raises(PermissionError, match="symlink leaves the cache"):
+        cache_helper.prepare_cache(str(cache))
+
+
 def test_cold_build_output_is_checked_before_cli_execution(harness):
     outside = _write(harness[0] / "outside.js")
     harness[3]["TEST_UNSAFE_BUILD"] = str(outside)
