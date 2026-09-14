@@ -1,14 +1,12 @@
 """CLI login against the real connection, credential, and consent services."""
 
-import getpass
-import warnings
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from delta_exchange_mcp import credentials as credential_check
-from delta_exchange_mcp import login
+from delta_exchange_mcp import connection_cli, login
 from delta_exchange_mcp.auth.connection import ConnectionService
 from delta_exchange_mcp.auth.store import (
     BackendOperationError,
@@ -43,15 +41,17 @@ def connections(monkeypatch, tmp_path):
         return connection
 
     monkeypatch.setattr(ConnectionService, "open", staticmethod(open_connection))
-    monkeypatch.setattr(login, "browser_available", lambda: False)
-    monkeypatch.setattr(login.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: False)
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(
-        login.webbrowser, "open", Mock(side_effect=AssertionError("unexpected browser"))
+        connection_cli.webbrowser,
+        "open",
+        Mock(side_effect=AssertionError("unexpected browser")),
     )
     yield opened
     for connection in opened:
         connection.close()
-        login.anyio.run(connection.client.aclose)
+        connection_cli.anyio.run(connection.client.aclose)
 
 
 def enter(monkeypatch, answers, *, secrets=("example-key", "example-secret")):
@@ -59,7 +59,7 @@ def enter(monkeypatch, answers, *, secrets=("example-key", "example-secret")):
     secrets = iter(secrets)
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     hidden = Mock(side_effect=lambda prompt: next(secrets))
-    monkeypatch.setattr(login.getpass, "getpass", hidden)
+    monkeypatch.setattr(connection_cli, "read_secret", hidden)
     return hidden
 
 
@@ -69,7 +69,7 @@ def test_direct_login_survives_reopen_without_prompts_or_trading(
     tmp_path,
     capsys,
 ):
-    monkeypatch.setattr(login.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(
         "builtins.input", Mock(side_effect=AssertionError("unexpected prompt"))
     )
@@ -117,10 +117,10 @@ def test_headless_login_and_explicit_terminal_modes_use_hidden_input(
 ):
     hidden = enter(monkeypatch, ["", "india_testnet"])
     if flag:
-        monkeypatch.setattr(login, "browser_available", lambda: True)
+        monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
     main(["login", *([flag] if flag else [])])
     assert hidden.call_count == 2
-    assert all("hidden" in call.args[0] for call in hidden.call_args_list)
+    assert all("masked" in call.args[0] for call in hidden.call_args_list)
     assert connections[0].credentials.get("india_testnet").api_key == "example-key"
     assert connections[0].status(context("Codex"))["trading"]["enabled"] is False
 
@@ -178,7 +178,7 @@ def test_bad_credential_arguments_fail_before_opening_store(
 
 
 def test_no_tty_does_not_read_piped_credentials(connections, monkeypatch):
-    monkeypatch.setattr(login.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
     assert login.run() == 2
     assert connections == []
 
@@ -198,19 +198,16 @@ def test_memory_only_store_cannot_claim_persistent_login(
 
 
 @pytest.mark.parametrize(
-    "failure", [KeyboardInterrupt, EOFError, getpass.GetPassWarning]
+    "failure", [KeyboardInterrupt, EOFError, connection_cli.TerminalInputError]
 )
 def test_interrupted_or_unhidden_input_does_not_save(connections, monkeypatch, failure):
     enter(monkeypatch, ["", ""])
 
     def fail(prompt):
-        if failure is getpass.GetPassWarning:
-            warnings.warn("input could be echoed", getpass.GetPassWarning)
-        else:
-            raise failure
+        raise failure
 
-    monkeypatch.setattr(login.getpass, "getpass", fail)
-    assert login.run() == (1 if failure is getpass.GetPassWarning else 130)
+    monkeypatch.setattr(connection_cli, "read_secret", fail)
+    assert login.run() == (1 if failure is connection_cli.TerminalInputError else 130)
     assert connections[0].credentials.get("india_prod") is None
 
 
@@ -316,7 +313,7 @@ def test_concurrent_replacement_during_input_is_not_overwritten(
             )
         return "example-key" if "API key" in prompt else "example-secret"
 
-    monkeypatch.setattr(login.getpass, "getpass", secret)
+    monkeypatch.setattr(connection_cli, "read_secret", secret)
     assert (
         login.run(mode="terminal", environment="india_testnet", client_name="Codex")
         == 1
@@ -361,9 +358,9 @@ def test_browser_mode_preserves_page_and_cleanup(
     connections, monkeypatch, capsys, mode, opened
 ):
     page = browser_page(monkeypatch, ConnectionService.open())
-    monkeypatch.setattr(login, "browser_available", lambda: mode == "auto")
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: mode == "auto")
     opener = Mock(return_value=opened)
-    monkeypatch.setattr(login.webbrowser, "open", opener)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", opener)
     assert login.run(mode=mode) == 0
     opener.assert_called_once_with(page.url)
     page.wait.assert_called_once()
@@ -375,30 +372,31 @@ def test_browser_credential_only_save_is_success_after_page_closes(
     connections, monkeypatch
 ):
     browser_page(monkeypatch, ConnectionService.open(), complete=False, save=True)
-    monkeypatch.setattr(login.webbrowser, "open", Mock(return_value=True))
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=True))
     assert login.run(mode="browser") == 0
 
 
 def test_browser_closure_without_login_returns_failure(connections, monkeypatch):
     browser_page(monkeypatch, ConnectionService.open(), complete=False)
-    monkeypatch.setattr(login.webbrowser, "open", Mock(return_value=True))
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=True))
     assert login.run(mode="browser") == 1
 
 
 @pytest.mark.parametrize(
-    "failure", [False, OSError("cannot launch"), login.webbrowser.Error("no browser")]
+    "failure",
+    [False, OSError("cannot launch"), connection_cli.webbrowser.Error("no browser")],
 )
 def test_failed_automatic_browser_launch_falls_back_to_terminal(
     connections, monkeypatch, failure
 ):
     page = browser_page(monkeypatch, ConnectionService.open())
-    monkeypatch.setattr(login, "browser_available", lambda: True)
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
     opener = (
         Mock(side_effect=failure)
         if isinstance(failure, Exception)
         else Mock(return_value=False)
     )
-    monkeypatch.setattr(login.webbrowser, "open", opener)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", opener)
     enter(monkeypatch, ["", ""])
     assert login.run() == 0
     page.wait.assert_not_called()
@@ -408,9 +406,9 @@ def test_failed_automatic_browser_launch_falls_back_to_terminal(
 
 def test_failed_browser_without_tty_returns_actionable_error(connections, monkeypatch):
     browser_page(monkeypatch, ConnectionService.open())
-    monkeypatch.setattr(login, "browser_available", lambda: True)
-    monkeypatch.setattr(login.webbrowser, "open", Mock(return_value=False))
-    monkeypatch.setattr(login.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=False))
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
     assert login.run() == 2
     assert connections[0].credentials.get("india_prod") is None
 
@@ -439,19 +437,21 @@ def test_browser_detection(monkeypatch, platform, variables, expected):
         monkeypatch.delenv(name, raising=False)
     for name, value in variables.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(login.sys, "platform", platform)
-    monkeypatch.setattr(login.webbrowser, "get", Mock())
-    assert login.browser_available() is expected
+    monkeypatch.setattr(connection_cli.sys, "platform", platform)
+    monkeypatch.setattr(connection_cli.webbrowser, "get", Mock())
+    assert connection_cli.browser_available() is expected
 
 
 def test_missing_browser_controller_selects_terminal(monkeypatch):
     for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(login.sys, "platform", "darwin")
+    monkeypatch.setattr(connection_cli.sys, "platform", "darwin")
     monkeypatch.setattr(
-        login.webbrowser, "get", Mock(side_effect=login.webbrowser.Error)
+        connection_cli.webbrowser,
+        "get",
+        Mock(side_effect=connection_cli.webbrowser.Error),
     )
-    assert login.browser_available() is False
+    assert connection_cli.browser_available() is False
 
 
 @pytest.mark.parametrize("mode", ["auto", "browser"])
@@ -461,7 +461,7 @@ def test_loopback_start_failure_falls_back_only_in_auto_mode(
     connection = ConnectionService.open()
     connection.page_factory = Mock(side_effect=OSError("cannot bind"))
     monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
-    monkeypatch.setattr(login, "browser_available", lambda: True)
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
     enter(monkeypatch, ["", ""])
     assert login.run(mode=mode) == (0 if mode == "auto" else 1)
     assert (connection.credentials.get("india_prod") is not None) is (mode == "auto")
@@ -487,7 +487,9 @@ def test_secure_store_write_failure_does_not_report_success(
     connections, monkeypatch, capsys
 ):
     connection = ConnectionService.open()
-    connection.credentials._backend.set = Mock(side_effect=BackendOperationError("store locked"))
+    connection.credentials._backend.set = Mock(
+        side_effect=BackendOperationError("store locked")
+    )
     monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
     assert login.run(api_key="example-key", api_secret="example-secret") == 1
     assert connection.credentials.get("india_prod") is None

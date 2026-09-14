@@ -50,10 +50,11 @@ legacy trading mode as consent.
 
 ## User-operated CLI login
 
-The login CLI can collect a key and secret with hidden terminal prompts, or accept a complete
+The login CLI can collect a key and secret with asterisk-masked terminal prompts, or accept a complete
 pair through `--api-key` and `--api-secret`. These values never enter an MCP tool call or
 result. Explicit command-line values may be visible to shell history and process inspection;
-hidden prompts avoid those copies. Interactive input stops if the terminal cannot hide it.
+masked prompts avoid those copies. Interactive input stops if terminal input or output is unavailable. Asterisks reveal the
+number of entered characters, while the input value is excluded from history and clipboard.
 
 Browser and terminal entry share credential validation, atomic replacement, and consent
 checks. Standalone login requires an approved native store; a memory-only connection would
@@ -65,3 +66,10 @@ an exact client name and an explicit `yes`, plus a second acknowledgement for pr
 The same revision checks prevent a concurrent credential change or revocation from being
 approved by an older prompt. As with browser consent, a local program running as the same OS
 user can imitate this input; the operating-system account remains the security boundary.
+
+The `config` command shares these boundaries and can manage an existing saved credential
+without replacing it. Environment selection is shared by clients at the same settings
+location; read/trade approval is scoped to the exact client binding. Trade-mode shortcuts
+require interactive approval. Environment and read-mode shortcuts can run without a TTY.
+Each change is applied separately using the current revision; a later failure does not undo
+an already-completed change. Process-only consent must be managed in its running MCP client.

@@ -16,6 +16,7 @@ from mcp.types import CallToolResult, InputRequiredResult, TextContent
 from delta_exchange_mcp import analytics, audit_log
 from delta_exchange_mcp import authorization
 from delta_exchange_mcp import connection_app
+from delta_exchange_mcp import config_cli
 from delta_exchange_mcp import login
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
@@ -28,14 +29,14 @@ from delta_exchange_mcp.version import PACKAGE_VERSION
 
 _ENV_HELP = """\
 normal account setup:
-  Call setup_credentials from the MCP client. Manage Connection is the normal environment
-  selector and credential interface.
+  Call setup_credentials from the MCP client to open Manage Connection.
+  Run login to connect credentials; config manages saved environments and trading approval.
 
 advanced externally managed compatibility overrides:
   DELTA_MCP_ENV         force india_prod, india_testnet, or india_devnet from the launcher
   DELTA_API_KEY         externally managed process credential, used with DELTA_API_SECRET
   DELTA_API_SECRET      externally managed process credential, used with DELTA_API_KEY
-  DELTA_MCP_MODE        ignored for authorization; browser trading consent is required
+  DELTA_MCP_MODE        ignored for authorization; explicit trading approval is required
 
 non-secret diagnostics and paths:
   DELTA_MCP_DEBUG       1/true/yes/on to trace HTTP requests and responses to a file
@@ -45,12 +46,14 @@ non-secret diagnostics and paths:
   DELTA_MCP_AUDIT_FILE  override the audit log path
   DELTA_MCP_CONFIG_FILE override the shared settings file path
 
-API keys and secrets are managed in the browser. The server uses the operating-system
-credential service when available. Otherwise it uses process memory and no plaintext
-fallback. Existing complete DELTA_API_KEY and DELTA_API_SECRET process values remain
+Use config to manage saved environments, credentials, and trading approval in the browser
+or terminal. Login connects a new credential pair. Terminal secret input shows asterisks.
+The server uses the operating-system credential service when available. Otherwise it uses
+process memory and no plaintext fallback. Standalone login and config require persistent
+native storage. Existing complete DELTA_API_KEY and DELTA_API_SECRET process values remain
 supported as externally managed compatibility settings. Manage Connection reports these
-overrides but cannot change their launcher source. Trading requires browser consent for the
-exact client name, environment, and credential revision.
+overrides but cannot change their launcher source. Trading requires explicit approval for
+the exact client name, environment, and credential revision.
 
 Production and testnet API keys are separate. Select the environment where the key was
 created. The server speaks MCP over stdio and is normally launched by a client rather than
@@ -280,11 +283,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="connect through a browser or enter credentials in the terminal",
     )
     login.add_arguments(login_parser)
+    config_parser = sub.add_parser(
+        "config", help="manage saved environments, credentials, and trading approval",
+    )
+    config_cli.add_arguments(config_parser)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+
+    if args.command == "config":
+        result = config_cli.run(
+            mode=args.login_mode, environment=args.env,
+            trading_mode=args.mode, client_name=args.client,
+        )
+        if result:
+            raise SystemExit(result)
+        return
 
     if args.command == "login":
         result = login.run(

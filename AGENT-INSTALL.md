@@ -63,7 +63,7 @@ uvx delta-exchange-mcp login
 ```
 
 The CLI automatically chooses terminal entry when a browser is unavailable. `--no-browser`
-or `--device` forces hidden terminal prompts; `--browser` forces the local browser page.
+or `--device` forces asterisk-masked terminal prompts; `--browser` forces the local browser page.
 Let the user enter the secrets directly. Do not collect them through an agent tool or chat.
 The user can supply the exact MCP client name reported by `get_connection_status`, either
 at the terminal prompt or using `--client NAME`, if they want to approve trading.
@@ -81,6 +81,19 @@ If the selected environment reports `reconnect_required`, open Manage Connection
 This means the OS record comes from the earlier draft or another metadata location. The
 server preserves that record but does not use it. Let the user enter the pair in the browser
 or their own terminal and approve trading again. Do not try to copy the old record or request the pair in chat.
+
+For changes to an existing connection, hand the user `uvx delta-exchange-mcp config`.
+It manages environment, read/trade mode, saved credentials, disconnect, and client selection
+from the same browser page or a terminal menu. Environment changes reuse a saved key for
+that environment; the user only enters credentials when connecting or replacing a pair.
+Terminal secrets appear as asterisks while typing. Changes apply immediately.
+
+`config --env india_testnet` selects the saved testnet environment. `config --mode read
+--client NAME` revokes approval for the exact client while retaining its credential.
+`config --mode trade --client NAME` asks the user for approval in their own interactive
+terminal; production requires a separate acknowledgement. Do not enter that confirmation
+for the user. Environment changes are shared across clients at the same settings location,
+while trading approval is scoped to the exact client binding.
 
 ## 4. Keep trading as a separate decision
 

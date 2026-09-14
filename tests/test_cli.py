@@ -16,7 +16,7 @@ def test_help_exits_zero_and_prints_usage(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "usage: delta-exchange-mcp" in out
-    assert "Manage Connection is the normal environment" in out
+    assert "config manages saved environments" in out
     assert "advanced externally managed compatibility overrides" in out
     assert "process memory and no plaintext" in out
     assert "DELTA_MCP_ENV" in out
@@ -120,3 +120,68 @@ def test_handshake_reports_our_version_not_the_sdk_version():
     server_version = build_server(_cfg()).version
     assert server_version == PACKAGE_VERSION
     assert server_version != version("mcp")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["config"],
+            {
+                "mode": "auto",
+                "environment": None,
+                "trading_mode": None,
+                "client_name": "",
+            },
+        ),
+        (
+            [
+                "config",
+                "--no-browser",
+                "--env",
+                "india_testnet",
+                "--mode",
+                "read",
+                "--client",
+                "Codex",
+            ],
+            {
+                "mode": "terminal",
+                "environment": "india_testnet",
+                "trading_mode": "read",
+                "client_name": "Codex",
+            },
+        ),
+    ],
+)
+def test_config_routes_arguments(monkeypatch, argv, expected):
+    calls = []
+
+    def run(**arguments):
+        calls.append(arguments)
+        return 0
+
+    monkeypatch.setattr(server_mod.config_cli, "run", run)
+    main(argv)
+    assert calls == [expected]
+
+
+def test_config_forwards_failure_exit_code(monkeypatch):
+    monkeypatch.setattr(server_mod.config_cli, "run", lambda **arguments: 2)
+    with pytest.raises(SystemExit) as exc:
+        main(["config"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["config", "--mode", "invalid"],
+        ["config", "--env", "india_devnet"],
+        ["config", "--browser", "--no-browser"],
+    ],
+)
+def test_config_rejects_invalid_arguments(argv):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2

@@ -70,7 +70,7 @@ endpoint. This project does not make that claim.
 ```bash
 delta-exchange-mcp login                       # automatically choose browser or terminal
 delta-exchange-mcp login --browser             # force the browser connection page
-delta-exchange-mcp login --device              # hidden terminal API key and secret prompts
+delta-exchange-mcp login --device              # asterisk-masked terminal API key and secret prompts
 delta-exchange-mcp login --no-browser          # alias for --device
 delta-exchange-mcp login --api-key '<key>' --api-secret '<secret>'
 ```
@@ -83,9 +83,9 @@ session looks graphical but cannot display a usable browser. `--browser` prints 
 URL even if launching fails. `--device` is a terminal-entry alias, not an OAuth device-code
 flow, and does not require a browser on another machine.
 
-Terminal entry hides both values and requires an interactive terminal. Supplying both
+Terminal entry shows asterisks for both values and requires an interactive terminal. Supplying both
 credential arguments skips prompts and works without a TTY; a missing or empty half fails.
-Command-line values can appear in shell history and process listings, so prefer the hidden
+Command-line values can appear in shell history and process listings, so prefer the masked
 prompts when typing credentials yourself. Never put real credentials in chat or MCP tool
 arguments. `--env india_testnet` selects testnet for terminal/direct login; the default is the
 current environment. Browser users select the environment on the page.
@@ -105,6 +105,41 @@ and OS user account as the MCP process. On a headless Linux server, configure Se
 first; a terminal by itself does not provide persistent secure storage. Login fails clearly
 when only process memory is available. It never writes new secrets to `config.env`.
 The CLI and MCP client must use the same `DELTA_MCP_CONFIG_FILE` location if overridden.
+
+### Manage the saved connection
+
+```bash
+delta-exchange-mcp config                          # automatically choose browser or terminal
+delta-exchange-mcp config --browser                # Manage Connection page
+delta-exchange-mcp config --no-browser --client Codex
+delta-exchange-mcp config --env india_testnet       # activate the saved testnet connection
+delta-exchange-mcp config --mode read --client Codex
+delta-exchange-mcp config --mode trade --client Codex
+```
+
+`config` manages an existing connection without replacing its keys. Its terminal menu offers
+environment selection, read/trade mode, connect or replace credentials, disconnect, and
+client selection. Changes apply immediately; choose Done to exit. Changing environments
+uses that environment's saved credential. When none is present, the menu offers to connect.
+The credential prompts show asterisks and support normal editing and paste. They do not
+keep an input history or use a plaintext fallback.
+
+`--env` and `--mode` are terminal shortcuts and cannot be combined with `--browser`.
+`--device` is an alias for `--no-browser`. Environment selection and `--mode read` can run
+without a TTY; changing mode requires an exact `--client` name. `--mode trade` requires an
+interactive terminal and explicit approval, including a separate acknowledgement for
+production. It never executes a trade. The mode flag belongs to `config`; the legacy
+`DELTA_MCP_MODE` setting remains ignored.
+
+Environment selection is shared by MCP processes using the same settings location. Trading
+approval is scoped to the selected client, environment, and credential. Switching
+environments revokes approval for the affected environments; selecting the current
+environment keeps existing approval. Read mode retains the credential and revokes only the
+selected client's approval. `get_connection_status` reports the exact client name.
+
+Both standalone commands require a persistent native credential store. Config reports a
+process-managed environment override instead of silently changing it. Process-only trading
+approval must be managed in the running MCP client because it cannot survive the CLI's exit.
 
 ### Where the credential is stored
 
