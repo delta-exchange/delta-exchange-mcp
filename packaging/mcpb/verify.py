@@ -8,7 +8,6 @@ fails here rather than on someone's machine.
 import json
 import os
 import queue
-import re
 import shutil
 import struct
 import subprocess
@@ -74,45 +73,43 @@ def check_archive(mcpb: Path) -> None:
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
-    """The environment a host would build, over a deliberately hostile one.
+def check_connection_contract(manifest: dict) -> None:
+    """Require the bundle to defer credentials and consent to Manage Connection."""
+    if manifest.get("user_config"):
+        raise SystemExit("bundle must not request credentials, environment, or mode")
+    injected = manifest["server"]["mcp_config"].get("env", {})
+    prohibited = {
+        "DELTA_API_KEY",
+        "DELTA_API_SECRET",
+        "DELTA_MCP_ENV",
+        "DELTA_MCP_MODE",
+    }
+    if prohibited.intersection(injected):
+        raise SystemExit(
+            "bundle must not inject credentials, environment, or legacy mode"
+        )
+    print("  connection: no install-time secrets or authorization settings")
 
-    The ambient half sets DELTA_MCP_MODE=trade and supplies credentials, which is what a
-    machine with those exported looks like. The manifest half is then applied on top with
-    ${user_config.x} resolved the way the host resolves it. Checking the result is what
-    makes "the form decides the mode, not the environment" an actual test rather than an
-    assertion that passes because no credentials were present.
 
-    DELTA_MCP_DEBUG is in the ambient half and *not* declared by the manifest, which is the
-    point: the manifest env is applied over the user's environment, so an undeclared variable
-    reaches the server untouched and registers `get_debug_status`. Left out of here, the
-    undeclared-tool check in `main` could only ever pass, because CI's own shell has no such
-    variable. With it, that check is what proves the declared list is a real ceiling.
-
-    Everything the server writes is pointed at `workdir`, the throwaway unpack: the debug log
-    that turning debug on creates, the audit log that trade mode with credentials opens, and
-    the shared settings file. That last one is not tidiness — the server reads
-    ~/.delta-exchange-mcp/config.env for anything the manifest does not declare, so a
-    developer with DELTA_MCP_DEBUG=1 in their own file would fail the undeclared-tool check
-    here for a reason CI could never reproduce. Left at their defaults, every build also
-    wrote three files into a home directory a build has no business touching.
-    """
-    config = {k: v.get("default", "") for k, v in manifest["user_config"].items()}
-    config.update({"mode": mode, "api_key": "placeholder", "api_secret": "placeholder"})
-
-    env = dict(os.environ)
-    env.update({
-        "DELTA_MCP_MODE": "trade",
-        "DELTA_API_KEY": "ambient",
-        "DELTA_API_SECRET": "ambient",
-        "DELTA_MCP_DEBUG": "1",
-        "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
-        "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
-        "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
-    })
-    for key, raw in manifest["server"]["mcp_config"]["env"].items():
-        env[key] = re.sub(
-            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), "")), raw
+def launch_env(workdir: Path, *, hostile: bool) -> dict[str, str]:
+    """Build an isolated public or externally managed process environment."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("DELTA_")}
+    env.update(
+        {
+            "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
+            "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
+            "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
+        }
+    )
+    if hostile:
+        env.update(
+            {
+                "DELTA_MCP_MODE": "trade",
+                "DELTA_MCP_ENV": "india_devnet",
+                "DELTA_API_KEY": "synthetic-key",
+                "DELTA_API_SECRET": "synthetic-secret",
+                "DELTA_MCP_DEBUG": "1",
+            }
         )
     return env
 
@@ -277,16 +274,17 @@ def main() -> None:
         with zipfile.ZipFile(mcpb) as z:
             z.extractall(tmp)
         manifest = json.loads((tmp / "manifest.json").read_text())
+        check_connection_contract(manifest)
 
         modern = handshake(
             tmp,
             modern=True,
-            env=launch_env(manifest, manifest["user_config"]["mode"]["default"], tmp),
+            env=launch_env(tmp, hostile=False),
         )
         legacy = handshake(
             tmp,
             modern=False,
-            env=launch_env(manifest, "trade", tmp),
+            env=launch_env(tmp, hostile=True),
         )
         if set(modern) != set(legacy):
             raise SystemExit(

@@ -1,3 +1,5 @@
+import pytest
+
 from delta_exchange_mcp.errors import DeltaApiError, extract_ip
 
 
@@ -27,3 +29,14 @@ def test_only_a_valid_ip_address_is_exposed_in_an_allowlist_hint() -> None:
 
     assert extract_ip(error.context) == "2001:db8::1"
     assert "request IP: 2001:db8::1" in str(error)
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["UnauthorizedApiAccess", "unauthorized_api_access"],
+)
+def test_shared_permission_hint_is_endpoint_neutral(code: str) -> None:
+    message = str(DeltaApiError(code, status=403))
+
+    assert "permission for this endpoint" in message
+    assert "trading preferences" not in message

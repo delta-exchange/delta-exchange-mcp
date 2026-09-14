@@ -1,5 +1,6 @@
 import pytest
 
+from delta_exchange_mcp import server as server_mod
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.server import build_parser, build_server, main
 from delta_exchange_mcp.version import PACKAGE_VERSION
@@ -38,6 +39,54 @@ def test_parser_help_is_not_empty():
     assert "stdio" in build_parser().format_help()
 
 
+@pytest.mark.parametrize(
+    ("argv", "mode", "key", "secret"),
+    [
+        (["login"], "auto", None, None),
+        (["login", "--browser"], "browser", None, None),
+        (["login", "--device"], "terminal", None, None),
+        (["login", "--no-browser"], "terminal", None, None),
+        (
+            ["login", "--api-key", "example-key", "--api-secret", "example-secret"],
+            "auto",
+            "example-key",
+            "example-secret",
+        ),
+    ],
+)
+def test_login_routes_arguments(monkeypatch, argv, mode, key, secret):
+    calls = []
+
+    def run(**arguments):
+        calls.append(arguments)
+        return 0
+
+    monkeypatch.setattr(server_mod.login, "run", run)
+    main(argv)
+    assert calls == [
+        {
+            "mode": mode,
+            "api_key": key,
+            "api_secret": secret,
+            "environment": None,
+            "client_name": "",
+        }
+    ]
+
+
+def test_login_forwards_failure_exit_code(monkeypatch):
+    monkeypatch.setattr(server_mod.login, "run", lambda **arguments: 2)
+    with pytest.raises(SystemExit) as exc:
+        main(["login"])
+    assert exc.value.code == 2
+
+
+def test_login_modes_are_mutually_exclusive():
+    with pytest.raises(SystemExit) as exc:
+        main(["login", "--browser", "--device"])
+    assert exc.value.code == 2
+
+
 def test_help_documents_every_environment_variable_the_code_reads():
     """Help is the only configuration reference, so a new env var must not slip in undocumented."""
     import pathlib
@@ -54,8 +103,12 @@ def test_help_documents_every_environment_variable_the_code_reads():
         for name in re.findall(pattern, path.read_text(encoding="utf-8"))
     }
     documented = set(re.findall(r"DELTA_[A-Z_]+", build_parser().format_help()))
-    assert read_by_code, "env var scan found nothing — the pattern above stopped matching"
-    assert read_by_code <= documented, f"undocumented in --help: {sorted(read_by_code - documented)}"
+    assert read_by_code, (
+        "env var scan found nothing — the pattern above stopped matching"
+    )
+    assert read_by_code <= documented, (
+        f"undocumented in --help: {sorted(read_by_code - documented)}"
+    )
 
 
 def test_handshake_reports_our_version_not_the_sdk_version():
@@ -65,3 +118,68 @@ def test_handshake_reports_our_version_not_the_sdk_version():
     server_version = build_server(_cfg()).version
     assert server_version == PACKAGE_VERSION
     assert server_version != version("mcp")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["config"],
+            {
+                "mode": "auto",
+                "environment": None,
+                "trading_mode": None,
+                "client_name": "",
+            },
+        ),
+        (
+            [
+                "config",
+                "--no-browser",
+                "--env",
+                "india_testnet",
+                "--mode",
+                "read",
+                "--client",
+                "Codex",
+            ],
+            {
+                "mode": "terminal",
+                "environment": "india_testnet",
+                "trading_mode": "read",
+                "client_name": "Codex",
+            },
+        ),
+    ],
+)
+def test_config_routes_arguments(monkeypatch, argv, expected):
+    calls = []
+
+    def run(**arguments):
+        calls.append(arguments)
+        return 0
+
+    monkeypatch.setattr(server_mod.config_cli, "run", run)
+    main(argv)
+    assert calls == [expected]
+
+
+def test_config_forwards_failure_exit_code(monkeypatch):
+    monkeypatch.setattr(server_mod.config_cli, "run", lambda **arguments: 2)
+    with pytest.raises(SystemExit) as exc:
+        main(["config"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["config", "--mode", "invalid"],
+        ["config", "--env", "india_devnet"],
+        ["config", "--browser", "--no-browser"],
+    ],
+)
+def test_config_rejects_invalid_arguments(argv):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
