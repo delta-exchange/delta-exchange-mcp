@@ -147,7 +147,7 @@ disconnect, and consent actions. Do not use `DELTA_MCP_MODE` to bypass consent. 
 persistent approval for process-only credentials.
 
 Secret prompts use prompt-toolkit password rendering with asterisks, a dummy history and
-clipboard, and editor/system-prompt access disabled. Keep terminal input and output checks;
+clipboard, and history-search/editor/system-prompt access disabled. Keep terminal input and output checks;
 never fall back to plaintext echo. Cover rendering, editing, paste, cancellation, and stale
 configuration changes in the CLI tests.
 

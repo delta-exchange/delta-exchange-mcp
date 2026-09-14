@@ -15,6 +15,8 @@ from delta_exchange_mcp import connection_cli
     ("typed", "expected"),
     [
         ("example-secret\r", "example-secret"),
+        ("\x12example-secret\r\r", "example-secret"),
+        ("\x13example-secret\r\r", "example-secret"),
         ("example-secrex\x7ft\r", "example-secret"),
         ("discard-me\x15example-secret\r", "example-secret"),
         ("\x1b[200~example-secret\x1b[201~\r", "example-secret"),
