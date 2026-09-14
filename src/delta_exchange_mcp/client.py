@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from delta_exchange_mcp import analytics
 from delta_exchange_mcp.config import Config
 from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.version import PACKAGE_VERSION
@@ -240,7 +241,7 @@ class DeltaClient:
         # Captured once: a form save may rebind the process while this request is awaiting
         # the network, and its base URL, signing prefix and credential pair must stay one tuple.
         config = state.config
-        headers: dict[str, str] = {}
+        headers = analytics.headers()
         # Delta signs the EXACT request body bytes. Serialize once (compact, no spaces) and
         # feed the same string to both sign() and httpx via content= — using json= would let
         # httpx re-serialize with different spacing and break the signature. Mirrors the
