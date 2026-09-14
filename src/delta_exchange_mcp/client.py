@@ -37,6 +37,7 @@ class _ClientState:
     """One coherent HTTP destination and signing identity for a request."""
 
     config: Config
+    generation: int
     base_path: str
     http: httpx.AsyncClient
     active: int = 0
@@ -45,6 +46,7 @@ class _ClientState:
 
 class DeltaClient:
     def __init__(self, config: Config, http: httpx.AsyncClient | None = None):
+        self._next_generation = 1
         self._state = self._new_state(config, http)
         self._pinned_state: ContextVar[_ClientState | None] = ContextVar(
             f"delta_client_state_{id(self)}", default=None
@@ -52,8 +54,9 @@ class DeltaClient:
         self._retired: dict[int, _ClientState] = {}
         self._closing: set[asyncio.Task[None]] = set()
 
-    @staticmethod
-    def _new_state(config: Config, http: httpx.AsyncClient | None = None) -> _ClientState:
+    def _new_state(
+        self, config: Config, http: httpx.AsyncClient | None = None
+    ) -> _ClientState:
         # Delta signs the FULL path including the `/v2` prefix; httpx joins base_url+path
         # at request time, but `sign()` only sees the relative path we pass in. Capture
         # the prefix once so authed calls can produce the documented payload shape.
@@ -67,11 +70,23 @@ class DeltaClient:
                 "Accept": "application/json",
             },
         )
-        return _ClientState(config=config, base_path=base_path, http=transport)
+        generation = self._next_generation
+        self._next_generation += 1
+        return _ClientState(
+            config=config,
+            generation=generation,
+            base_path=base_path,
+            http=transport,
+        )
 
     @property
     def config(self) -> Config:
         return self._state.config
+
+    @property
+    def binding_generation(self) -> int:
+        """Identify the HTTP destination and signing pair pinned to this task."""
+        return (self._pinned_state.get() or self._state).generation
 
     def rebind(self, config: Config) -> None:
         """Atomically move future calls to ``config`` without disrupting current calls.
