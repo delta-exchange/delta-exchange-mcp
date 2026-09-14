@@ -53,6 +53,36 @@ def _directory(path: Path, uid: int) -> Path:
             current = candidate
 
 
+def _confined_link(root: Path, path: Path) -> None:
+    """Resolve each component without ever passing through an external directory."""
+    current = path.parent
+    pending = deque([path.name])
+    links = 0
+    while pending:
+        component = pending.popleft()
+        if component == "..":
+            current = current.parent
+            if not current.is_relative_to(root):
+                raise PermissionError(f"MCPB cache symlink leaves the cache: {path}")
+            continue
+        candidate = current / component
+        info = candidate.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            links += 1
+            if links > 40:
+                raise OSError("too many MCPB cache symlinks")
+            target = Path(os.readlink(candidate))
+            if target.is_absolute():
+                if not target.is_relative_to(root):
+                    raise PermissionError(f"MCPB cache symlink leaves the cache: {path}")
+                current = root
+                pending.extendleft(reversed(target.relative_to(root).parts))
+            else:
+                pending.extendleft(reversed(target.parts))
+        else:
+            current = candidate
+
+
 def _tree(root: Path, uid: int) -> None:
     pending = [root]
     while pending:
@@ -61,14 +91,7 @@ def _tree(root: Path, uid: int) -> None:
         if info.st_uid != uid:
             raise PermissionError(f"untrusted MCPB cache entry: {path}")
         if stat.S_ISLNK(info.st_mode):
-            target = Path(os.readlink(path))
-            if not target.is_absolute():
-                target = path.parent / target
-            # Check the written target as well as its final destination: an external
-            # alias that happens to lead back into the cache must not become trusted.
-            lexical = Path(os.path.abspath(target))
-            if not lexical.is_relative_to(root) or not path.resolve(strict=True).is_relative_to(root):
-                raise PermissionError(f"MCPB cache symlink leaves the cache: {path}")
+            _confined_link(root, path)
         elif stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode):
             if info.st_mode & 0o022:
                 raise PermissionError(f"MCPB cache entry is writable by other users: {path}")
