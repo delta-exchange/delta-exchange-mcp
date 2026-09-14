@@ -31,6 +31,15 @@ def test_only_a_valid_ip_address_is_exposed_in_an_allowlist_hint() -> None:
     assert "request IP: 2001:db8::1" in str(error)
 
 
+def test_invalid_key_hint_uses_manage_connection() -> None:
+    for code in ("InvalidApiKey", "invalid_api_key"):
+        message = str(DeltaApiError(code, status=401))
+
+        assert "Open Manage Connection" in message
+        assert "environment is externally managed" in message
+        assert "DELTA_MCP_ENV" not in message
+
+
 @pytest.mark.parametrize(
     "code",
     ["UnauthorizedApiAccess", "unauthorized_api_access"],

@@ -367,7 +367,7 @@ async def test_batch_cap_enforced():
 @pytest.mark.asyncio
 @respx.mock
 async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+    preferences = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             200,
             json={"success": True, "result": {"user_id": 999}},
@@ -385,7 +385,7 @@ async def test_close_all_fetches_and_caches_user_id():
     gate.bind_final_check(lambda: True)
     await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
 
-    assert profile.call_count == 1  # cached after first fetch
+    assert preferences.call_count == 1  # cached after first fetch
     assert close.call_count == 2
     assert b'"user_id":999' in close.calls[0].request.content
 
