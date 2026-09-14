@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ import respx
 from delta_exchange_mcp import audit_log
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
+from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
 from mcp.server.fastmcp import FastMCP
@@ -664,3 +666,166 @@ async def test_tick_rounding_skipped_when_unresolved():
     )
     assert b'"limit_price":"62000.07"' in route.calls[0].request.content
     assert "price_adjustments" not in out[1]
+
+
+# ------------------------------------------------------- transport-failure safety
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_is_never_resent_after_a_transport_failure():
+    """POST accepted, response lost, automatic re-POST — the duplicate-order path.
+
+    The status-code retry paths were always GET-only; the transport-error path was
+    not, and would resend a mutation whose outcome is unknown.
+    """
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=[
+            httpx.ReadTimeout("response never arrived"),
+            httpx.Response(200, json={"success": True, "result": {"id": 7}}),
+        ]
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "execution_outcome_unknown"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_mutation_connect_failure_says_nothing_was_sent():
+    """A connect failure provably sent nothing, so its error says a retry is safe."""
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+    with pytest.raises(DeltaApiError) as err:
+        await _client().post("/orders", {"product_id": 27, "size": 1}, auth=True)
+    assert route.call_count == 1
+    assert err.value.code == "upstream_unreachable"
+    assert "retry is safe" in str(err.value)
+    assert "no route to host" not in str(err.value)
+    assert isinstance(err.value.__cause__, httpx.ConnectError)
+
+
+@pytest.mark.asyncio
+async def test_serializer_error_keeps_credentials_out_of_the_tool_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "private-api-key-marker"
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+
+    connection_closed = asyncio.Event()
+
+    async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        connection_closed.set()
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    cfg = Config(
+        env="india_testnet",
+        base_url=f"http://127.0.0.1:{port}/v2",
+        api_key=f"{marker}\n",
+        api_secret="s1",
+        mode="trade",
+    )
+    audit = audit_log.configure(cfg)
+    assert audit is not None
+    client = DeltaClient(cfg)
+
+    try:
+        async with server:
+            with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
+                await _call(
+                    client,
+                    "place_order",
+                    audit=audit,
+                    product_id=27,
+                    size=1,
+                    side="buy",
+                    order_type="market_order",
+                )
+            await asyncio.wait_for(connection_closed.wait(), timeout=1)
+    finally:
+        await client.aclose()
+
+    error = str(caught.value)
+    audit_text = (tmp_path / "audit.log").read_text()
+    audit_error = json.loads(audit_text)["error"]
+    assert marker not in error
+    assert marker not in audit_text
+    assert "get_open_orders" in error
+    assert "get_order_history" in audit_error
+
+    causes: list[BaseException] = []
+    cause: BaseException | None = caught.value
+    while cause is not None:
+        causes.append(cause)
+        cause = cause.__cause__
+    assert any(isinstance(item, httpx.LocalProtocolError) for item in causes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "path", "arguments", "expected"),
+    [
+        (
+            "place_order",
+            "/orders",
+            {"product_id": 27, "size": 1, "side": "buy", "order_type": "market_order"},
+            ("get_open_orders", "get_order_history"),
+        ),
+        (
+            "adjust_position_margin",
+            "/positions/change_margin",
+            {"product_id": 27, "delta_margin": "5"},
+            ("get_margined_positions",),
+        ),
+        (
+            "set_product_leverage",
+            "/products/27/orders/leverage",
+            {"product_id": 27, "leverage": "10"},
+            ("get_product_leverage",),
+        ),
+        (
+            "close_all_positions",
+            "/positions/close_all",
+            {"close_all_portfolio": True},
+            ("get_margined_positions",),
+        ),
+    ],
+)
+@respx.mock
+async def test_unknown_outcome_names_the_correct_state_checks(
+    tool: str,
+    path: str,
+    arguments: dict[str, Any],
+    expected: tuple[str, ...],
+) -> None:
+    if tool == "close_all_positions":
+        respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "result": {"id": 99}},
+            )
+        )
+    respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(
+        side_effect=httpx.ReadTimeout("private transport detail")
+    )
+
+    with pytest.raises(Exception, match="execution_outcome_unknown") as caught:
+        await _call(_client(), tool, **arguments)
+
+    message = str(caught.value)
+    assert all(name in message for name in expected)
+    all_checks = {
+        "get_open_orders",
+        "get_order_history",
+        "get_product_leverage",
+        "get_margined_positions",
+    }
+    assert all(name not in message for name in all_checks.difference(expected))
+    assert "private transport detail" not in message
