@@ -15,12 +15,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from delta_exchange_mcp.config import Config, setting
+from delta_exchange_mcp.log_files import fallback_path, open_log
 
 
 def _resolve_path(env: str) -> Path:
@@ -59,7 +59,7 @@ class AuditLog:
         elif result is not None:
             entry["result"] = _summarize(result)
         try:
-            with self.path.open("a", encoding="utf-8") as f:
+            with open_log(self.path) as f:
                 f.write(json.dumps(entry, default=str) + "\n")
         except OSError as e:
             print(f"[delta-exchange-mcp] audit write failed: {e}", file=sys.stderr)
@@ -104,9 +104,8 @@ def configure(cfg: Config) -> AuditLog | None:
     try:
         path = _open(path)
     except OSError:
-        fallback = Path(tempfile.gettempdir()) / "delta-exchange-mcp" / path.name
         try:
-            path = _open(fallback)
+            path = _open(fallback_path(path.name))
         except OSError as e:
             print(f"[delta-exchange-mcp] audit logging disabled: {e}", file=sys.stderr)
             return None
@@ -116,11 +115,6 @@ def configure(cfg: Config) -> AuditLog | None:
 
 
 def _open(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Create empty + tighten to owner-only before any entry is written (umask is often 0644).
-    path.touch(exist_ok=True)
-    try:
-        path.chmod(0o600)
-    except OSError:
+    with open_log(path):
         pass
     return path
