@@ -55,6 +55,7 @@ pair through `--api-key` and `--api-secret`. These values never enter an MCP too
 result. Explicit command-line values may be visible to shell history and process inspection;
 masked prompts avoid those copies. Interactive input stops if terminal input or output is unavailable. Asterisks reveal the
 number of entered characters, while the input value is excluded from history and clipboard.
+History-search shortcuts are disabled because they otherwise open a separate unmasked input.
 
 Browser and terminal entry share credential validation, atomic replacement, and consent
 checks. Standalone login requires an approved native store; a memory-only connection would
