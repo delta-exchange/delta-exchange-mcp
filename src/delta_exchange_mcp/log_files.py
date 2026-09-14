@@ -5,31 +5,55 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import TextIO
 
 
-def _directory(path: Path) -> None:
+def _directory(path: Path) -> Path:
     """Reject directory entries another OS user can replace on POSIX."""
-    paths = [*reversed(path.absolute().parents), path.absolute()]
-    for part in paths:
-        try:
-            info = part.lstat()
-        except FileNotFoundError:
-            try:
-                part.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            info = part.lstat()
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    pending = deque(absolute.parts[1:])
+    links = 0
+    while True:
+        info = current.lstat()
         if os.name == "posix":
             if info.st_uid not in {0, os.geteuid()}:
-                raise PermissionError(f"log directory is owned by another user: {part}")
-            if not stat.S_ISLNK(info.st_mode) and (
-                info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX
-            ):
-                raise PermissionError(f"log directory is writable by other users: {part}")
-        if not part.is_dir():
-            raise NotADirectoryError(str(part))
+                raise PermissionError(f"log directory is owned by another user: {current}")
+            if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise PermissionError(f"log directory is writable by other users: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(str(current))
+        if not pending:
+            return current
+        component = pending.popleft()
+        if component == "..":
+            current = current.parent
+            continue
+        candidate = current / component
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            try:
+                candidate.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            info = candidate.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            if os.name == "posix" and info.st_uid not in {0, os.geteuid()}:
+                raise PermissionError(f"log directory link is owned by another user: {candidate}")
+            links += 1
+            if links > 40:
+                raise OSError("too many log directory symlinks")
+            target = Path(os.readlink(candidate))
+            if target.is_absolute():
+                current = Path(target.anchor)
+                pending.extendleft(reversed(target.parts[1:]))
+            else:
+                pending.extendleft(reversed(target.parts))
+        else:
+            current = candidate
 
 
 def open_log(path: Path) -> TextIO:
@@ -38,9 +62,7 @@ def open_log(path: Path) -> TextIO:
     POSIX directory ownership checks also cover aliases such as macOS /var. Windows
     retains its user-directory ACL boundary; chmod is not used to claim ACL isolation.
     """
-    _directory(path.parent)
-    parent = path.parent.resolve(strict=True)
-    _directory(parent)
+    parent = _directory(path.parent)
     target = parent / path.name
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL
     try:
