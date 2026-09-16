@@ -86,7 +86,7 @@ async def verified(
 
 
 def assert_place_order_blocked(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
     connection: ConnectionService,
     final_check: Callable[[], bool],
 ) -> None:
@@ -125,7 +125,7 @@ def assert_place_order_blocked(
 
 
 def assert_place_order_allowed(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
     connection: ConnectionService,
     final_check: Callable[[], bool],
 ) -> None:

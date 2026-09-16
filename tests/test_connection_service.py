@@ -183,7 +183,7 @@ def test_browser_can_return_from_shared_devnet_to_managed_environment() -> None:
 
 
 def test_two_services_serialize_environment_selection_with_page_cas(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.delenv("DELTA_MCP_ENV", raising=False)
     first = service(verified)
@@ -575,7 +575,7 @@ def test_credential_cas_detects_a_disconnect_tombstone() -> None:
 
 
 def test_process_partial_pair_fails_closed_even_with_a_stored_fallback(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     credentials, consent = stores()
     credentials.replace("india_prod", "stored-key", "stored-secret")
@@ -601,7 +601,7 @@ def test_process_partial_pair_fails_closed_even_with_a_stored_fallback(
 
 
 def test_process_pair_change_invalidates_session_only_consent(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_API_KEY", "external-key-1")
     monkeypatch.setenv("DELTA_API_SECRET", "external-secret-1")
@@ -681,7 +681,7 @@ def test_fixed_devnet_credentials_support_session_only_consent() -> None:
 
 
 def test_devnet_process_pair_change_invalidates_session_only_consent(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_ENV", "india_devnet")
     monkeypatch.setenv("DELTA_API_KEY", "dev-key")
@@ -707,7 +707,7 @@ def test_devnet_process_pair_change_invalidates_session_only_consent(
 
 
 def test_process_environment_credential_cannot_be_disconnected_in_browser(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_API_KEY", "external-key")
     monkeypatch.setenv("DELTA_API_SECRET", "external-secret")
@@ -1109,7 +1109,7 @@ def test_final_checker_rejects_cross_process_changes_before_mutation(
 
 
 def test_final_checker_rejects_process_session_generation_change(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_API_KEY", "process-key-1")
     monkeypatch.setenv("DELTA_API_SECRET", "process-secret-1")
@@ -1149,7 +1149,7 @@ def test_final_checker_rejects_process_session_generation_change(
 
 
 def test_final_checker_checks_consent_after_the_last_credential_read(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "key", "secret")
@@ -1340,7 +1340,7 @@ def test_candidate_validation_rechecks_the_browser_revision_before_commit() -> N
 
 @pytest.mark.asyncio
 async def test_store_open_failure_keeps_public_tools_available(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     def fail_open(
         cls: type[CredentialStore],
