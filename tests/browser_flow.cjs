@@ -32,7 +32,7 @@ class Element {
   }
 }
 
-async function run(html, reconnect, devnet = false) {
+function mount(html) {
   const script = html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)]
     .map((match) => [match[1], new Element()]));
@@ -53,6 +53,11 @@ async function run(html, reconnect, devnet = false) {
       assert.fail(`Unexpected selector: ${selector}`);
     },
   };
+  return { script, elements, buttons, inputs, document };
+}
+
+async function run(html, reconnect, devnet = false) {
+  const { script, elements, buttons, inputs, document } = mount(html);
   let isConnected = !reconnect;
   const activeEnvironment = devnet ? "india_devnet" : "india_prod";
   const connection = (enabled) => ({
@@ -89,10 +94,14 @@ async function run(html, reconnect, devnet = false) {
       : payload.action === "credentials"
       ? { status: "saved", message: "Connected." }
       : connection(false);
+    const body = JSON.stringify({ complete, result: { structuredContent: content } });
     return {
       ok: true,
       headers: { get() { return "next-csrf"; } },
-      async json() { return { complete, result: { structuredContent: content } }; },
+      // A real Response offers both, so the double cannot quietly bless whichever one the
+      // page happens to call.
+      async text() { return body; },
+      async json() { return JSON.parse(body); },
     };
   };
 
@@ -146,11 +155,33 @@ async function run(html, reconnect, devnet = false) {
   assert.equal(elements.get("prod-ack").hidden, true);
 }
 
+// The listener's port can outlive the listener and be reused by another local process, so
+// a stale tab can be answered by a stranger. Whatever it says, the user needs one message.
+async function runAgainstAStranger(html, reply) {
+  const { script, elements, document } = mount(html);
+  const fetch = reply;
+
+  vm.runInNewContext(script, { document, fetch });
+  await new Promise(setImmediate);
+
+  assert.equal(elements.get("notice").className, "bad");
+  assert.equal(elements.get("notice").textContent,
+    "This page is no longer connected to the local MCP service. " +
+    "Return to your MCP client and open Manage Connection again.");
+}
+
 async function main() {
   const html = fs.readFileSync(0, "utf8");
   await run(html, false);
   await run(html, true);
   await run(html, false, true);
+  await runAgainstAStranger(html, async () => ({
+    ok: true,
+    headers: { get() { return null; } },
+    async text() { return "<!DOCTYPE html><title>Someone else</title>"; },
+    async json() { throw new SyntaxError("Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON"); },
+  }));
+  await runAgainstAStranger(html, async () => { throw new TypeError("Failed to fetch"); });
 }
 
 main().catch((error) => {
