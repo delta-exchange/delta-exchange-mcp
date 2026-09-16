@@ -7,6 +7,7 @@ class Element {
   constructor() {
     this.children = [];
     this.handlers = new Map();
+    this.attributes = new Map();
     this.checked = false;
     this.disabled = false;
     this.hidden = false;
@@ -16,6 +17,9 @@ class Element {
 
   appendChild(child) { this.children.push(child); }
   addEventListener(event, handler) { this.handlers.set(event, handler); }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
+  removeAttribute(name) { this.attributes.delete(name); if (name === "href") delete this.href; }
 
   querySelector(selector) {
     const radios = this.children.flatMap((label) => label.children);
@@ -102,7 +106,9 @@ async function run(html, reconnect, devnet = false) {
     assert.equal(elements.get("show").disabled, true);
     assert.equal(elements.get("connect").disabled, true);
     assert.equal(elements.get("disconnect").disabled, true);
-    assert.equal(elements.get("dashboard").disabled, true);
+    // No public key page for devnet, so the link must not be followable.
+    assert.equal(elements.get("dashboard").getAttribute("aria-disabled"), "true");
+    assert.equal(elements.get("dashboard").getAttribute("href"), null);
     const devnetLabel = elements.get("envs").children.find((label) =>
       label.children.some((child) => child.value === "india_devnet"));
     assert.equal(devnetLabel.hidden, false);

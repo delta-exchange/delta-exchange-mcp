@@ -57,3 +57,12 @@ def test_install_links_do_not_request_credentials_or_mode() -> None:
         query = parse_qs(urlparse(_reference(readme, name)).query)
         assert "inputs" not in query
         _assert_credential_free(json.loads(query["config"][0]))
+
+
+def test_the_installed_package_carries_the_brand_faces() -> None:
+    """A wheel without these renders the page but raises when the style block builds."""
+    from delta_exchange_mcp import form
+
+    for name, _weight in form._FACES:
+        assert (form._FONTS / f"{name}.woff2").is_file(), name
+    assert (form._FONTS / "LICENSE").is_file()

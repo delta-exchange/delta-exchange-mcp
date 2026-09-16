@@ -4,10 +4,33 @@ The page sends credentials directly to the loopback HTTP service. It does not ex
 MCP tool-call transport, so credentials never become model-visible tool arguments.
 """
 
+import base64
 import hashlib
 import json
+from functools import lru_cache
+from pathlib import Path
 
 from delta_exchange_mcp.config import DASHBOARDS, DEFAULT_ENV
+
+_FONTS = Path(__file__).parent / "fonts"
+# Aileron is Delta's typeface (CC0; see fonts/LICENSE). The page's CSP is
+# default-src 'none', so the faces travel in the document rather than over the
+# network: the connection page renders on brand with no request of its own.
+_FACES = (("Aileron-Regular", 400), ("Aileron-SemiBold", 600), ("Aileron-Bold", 700))
+
+
+@lru_cache(maxsize=1)
+def font_faces() -> str:
+    """Return @font-face rules carrying the brand faces as data URIs."""
+    rules = []
+    for name, weight in _FACES:
+        encoded = base64.b64encode((_FONTS / f"{name}.woff2").read_bytes()).decode()
+        rules.append(
+            "  @font-face { font-family: Aileron; font-style: normal; "
+            f"font-weight: {weight}; font-display: swap; "
+            f'src: url("data:font/woff2;base64,{encoded}") format("woff2"); }}'
+        )
+    return "\n".join(rules)
 
 
 ENVIRONMENTS = [
@@ -34,25 +57,34 @@ _TEMPLATE = """<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>Manage Delta Exchange connection</title>
 <style__NONCE_ATTR__>
+__FONT_FACES__
   :root {
+    /* Delta Exchange design tokens, read from the live site's brand-india and
+       main scales. Each pair is light-dark(<light>, <dark>). */
     color-scheme: light dark;
-    --brand-strong: #c45302;
-    --brand-strong-hover: #ac4902;
+    --brand-strong: #fe6c02;
+    --brand-strong-hover: #e76202;
+    --brand-text: light-dark(#e76202, #fe8935);
+    --brand-muted: light-dark(#fff0e6, #2f231b);
+    --brand-muted-line: light-dark(#ffbb8b, #8c3b01);
     --on-brand: #ffffff;
-    --positive: light-dark(#00865e, #33b991);
-    --negative: light-dark(#cd4949, #ff5c5c);
-    --ink: canvastext;
-    --muted: color-mix(in srgb, canvastext 68%, canvas);
-    --line: color-mix(in srgb, canvastext 22%, canvas);
-    --field: color-mix(in srgb, canvastext 5%, canvas);
-    --surface: canvas;
-    --radius: .45rem;
+    --positive: light-dark(#00996b, #00a876);
+    --negative: light-dark(#dc4e4e, #eb5454);
+    --ink: light-dark(#121214, #e1e1e2);
+    --muted: #8e9298;
+    --line: light-dark(#d7dde7, #353845);
+    --field: light-dark(#ebecf0, #111114);
+    --control: light-dark(#e6e9ef, #2d303a);
+    --surface: light-dark(#f3f4f6, #18191e);
+    --surface-raised: light-dark(#ffffff, #22242c);
+    --radius: .25rem;
+    --radius-card: .5rem;
     --gap: 1rem;
     --gap-tight: .45rem;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--surface); color: var(--ink); }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.5; }
+  body { font-family: Aileron, ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.5; }
   main { max-width: 46rem; margin: 0 auto; padding: 1.25rem; }
   header { display: flex; align-items: center; gap: .7rem; margin-bottom: var(--gap); }
   .mark { width: 2rem; height: 2rem; flex: none; }
@@ -63,7 +95,8 @@ _TEMPLATE = """<!doctype html>
   .sub, .note { color: var(--muted); }
   .sub { margin-bottom: var(--gap); }
   section {
-    border: 1px solid var(--line); border-radius: var(--radius);
+    border: 1px solid var(--line); border-radius: var(--radius-card);
+    background: var(--surface-raised);
     padding: var(--gap); margin-bottom: var(--gap);
   }
   section > * + * { margin-top: var(--gap-tight); }
@@ -79,15 +112,19 @@ _TEMPLATE = """<!doctype html>
   }
   input[type=radio], input[type=checkbox] { accent-color: var(--brand-strong); }
   .row { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin-top: .8rem; }
-  button {
+  button, .button {
+    display: inline-flex; align-items: center; justify-content: center;
     min-height: 2.75rem; padding: .55rem .9rem; border-radius: var(--radius);
     border: 0; background: var(--brand-strong); color: var(--on-brand);
-    font: inherit; font-weight: 600; cursor: pointer;
+    font: inherit; font-weight: 600; text-decoration: none; cursor: pointer;
   }
-  button:hover { background: var(--brand-strong-hover); }
-  button.secondary { color: var(--ink); background: var(--field); border: 1px solid var(--line); }
+  button:hover, .button:hover { background: var(--brand-strong-hover); }
+  button.secondary, .button.secondary {
+    color: var(--ink); background: var(--control); border: 1px solid var(--line);
+  }
+  button.secondary:hover, .button.secondary:hover { border-color: var(--brand-strong); }
   button.danger { color: var(--negative); background: transparent; border: 1px solid currentcolor; }
-  button[disabled] { cursor: not-allowed; opacity: .55; }
+  button[disabled], .button[aria-disabled="true"] { cursor: not-allowed; opacity: .55; }
   :focus-visible { outline: 2px solid var(--brand-strong); outline-offset: 2px; }
   #notice { min-height: 1.5rem; margin-bottom: var(--gap); }
   #notice.good { color: var(--positive); }
@@ -105,11 +142,23 @@ _TEMPLATE = """<!doctype html>
 <body>
 <main>
   <header>
-    <svg class="mark" viewBox="0 0 53 52" aria-hidden="true">
-      <path fill="#FD7D02" d="M17.834 17.334 35.166 26 52.5 17.334 17.834 0v17.334Z"/>
-      <path fill="#219b21" d="M17.834 34.667V52L52.5 34.667 35.166 26l-17.332 8.667Z"/>
-      <path fill="#2CB72C" d="M52.5 34.667V17.333L35.167 26 52.5 34.667Z"/>
-      <path fill="#FF9300" d="M17.832 17.333v17.334L.5 26l17.332-8.667Z"/>
+    <svg class="mark" viewBox="0 0 30 30" aria-hidden="true">
+      <defs>
+        <linearGradient id="delta-mark-warm" x1="32.3212" y1="8.56271" x2="20.8051" y2="-1.10809"
+                        gradientUnits="userSpaceOnUse">
+          <stop stop-color="#E96C04"/>
+          <stop offset="1" stop-color="#FF9300"/>
+        </linearGradient>
+        <linearGradient id="delta-mark-cool" x1="22.8785" y1="10.7865" x2="11.9291" y2="20.6491"
+                        gradientUnits="userSpaceOnUse">
+          <stop stop-color="#168016"/>
+          <stop offset="1" stop-color="#2CB72C"/>
+        </linearGradient>
+      </defs>
+      <path fill="url(#delta-mark-warm)" d="M10.1209 10.0001L19.8791 15.0001L29.6372 10.0001L10.1209 0V10.0001Z"/>
+      <path fill="url(#delta-mark-cool)" d="M10.1212 19.9999V30L29.6375 19.9999L19.8793 14.9999L10.1212 19.9999Z"/>
+      <path fill="#2CB72C" d="M29.6381 20.0002V10.0001L19.8799 15.0002L29.6381 20.0002Z"/>
+      <path fill="#FF9300" d="M10.12 10.0001V20.0002L0.361877 15.0002L10.12 10.0001Z"/>
     </svg>
     <h1>Manage Delta Exchange connection</h1>
   </header>
@@ -151,7 +200,8 @@ _TEMPLATE = """<!doctype html>
     </div>
     <div class="row">
       <label><input id="show" type="checkbox"> Show what I typed</label>
-      <button id="dashboard" class="secondary" type="button">Open the API key page</button>
+      <a id="dashboard" class="button secondary" target="_blank"
+         rel="noopener noreferrer">Open the API key page</a>
     </div>
     <div class="row">
       <button id="connect" type="button">Connect or rotate</button>
@@ -300,7 +350,15 @@ _TEMPLATE = """<!doctype html>
     secret.disabled = credentialsLocked;
     show.disabled = credentialsLocked;
     document.getElementById("connect").disabled = credentialsLocked;
-    document.getElementById("dashboard").disabled = busy || !CONFIG.dashboards[selectedEnvironment()];
+    var dashboard = document.getElementById("dashboard");
+    var dashboardUrl = CONFIG.dashboards[selectedEnvironment()];
+    if (dashboardUrl && !busy) {
+      dashboard.setAttribute("href", dashboardUrl);
+      dashboard.removeAttribute("aria-disabled");
+    } else {
+      dashboard.removeAttribute("href");
+      dashboard.setAttribute("aria-disabled", "true");
+    }
     document.getElementById("enable-trading").disabled = busy || !selectedIsActive || !selected.connected || trading.enabled;
     document.getElementById("disable-trading").disabled = busy || !selectedIsActive || !trading.enabled;
   }
@@ -348,10 +406,6 @@ _TEMPLATE = """<!doctype html>
   show.addEventListener("change", function () {
     var type = show.checked ? "text" : "password";
     key.type = secret.type = type;
-  });
-  document.getElementById("dashboard").addEventListener("click", function () {
-    var url = CONFIG.dashboards[selectedEnvironment()];
-    if (url) window.open(url, "_blank", "noopener");
   });
   document.getElementById("activate").addEventListener("click", function () {
     run("credentials", { operation: "activate", environment: selectedEnvironment() }, "Environment changed.");
@@ -410,8 +464,10 @@ def _rendered(*, nonce: str = "", **extra: object) -> str:
     }
     settings.update(extra)
     nonce_attr = f' nonce="{nonce}"' if nonce else ""
-    return _TEMPLATE.replace("__CONFIG__", json.dumps(settings)).replace(
-        "__NONCE_ATTR__", nonce_attr
+    return (
+        _TEMPLATE.replace("__CONFIG__", json.dumps(settings))
+        .replace("__NONCE_ATTR__", nonce_attr)
+        .replace("__FONT_FACES__", font_faces())
     )
 
 
