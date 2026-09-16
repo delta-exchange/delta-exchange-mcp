@@ -232,7 +232,7 @@ class MemorySecretBackend:
 
 
 @contextmanager
-def _file_lock(target: Path) -> Iterator[tuple[int, Path]]:
+def file_lock(target: Path) -> Iterator[tuple[int, Path]]:
     lock_path = target.with_name(f".{target.name}.lock")
     try:
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -285,7 +285,7 @@ class FileMetadata:
     def __init__(self, path: Path):
         # The persistent lock exists before the first metadata write. Resolve its
         # filesystem spelling so case aliases use the same namespace from startup.
-        with _file_lock(path.resolve()) as (fd, lock_path):
+        with file_lock(path.resolve()) as (fd, lock_path):
             if os.name != "nt" and hasattr(fcntl, "F_GETPATH"):
                 raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
                 lock_path = Path(os.fsdecode(raw.split(b"\0", 1)[0]))
@@ -300,7 +300,7 @@ class FileMetadata:
     @contextmanager
     def lock(self) -> Iterator[None]:
         with self._thread_lock:
-            with _file_lock(self.path):
+            with file_lock(self.path):
                 yield
 
     def read(self) -> dict[str, EnvironmentState]:

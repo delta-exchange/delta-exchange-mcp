@@ -1,9 +1,8 @@
 """Authenticated trading tools (mutations).
 
-Registered only when DELTA_API_KEY/SECRET are set AND DELTA_MCP_MODE=trade. Every tool
-takes a `dry_run` flag that validates and echoes the payload without sending it, and every
-call (dry-run or real) is recorded to the audit log. Mutations never auto-retry (see
-DeltaClient retry policy) — a timeout is surfaced, not silently re-sent.
+All tools remain discoverable. Call-time authorization requires a current credential and
+browser consent before a real mutation. A `dry_run` validates and echoes the payload
+without consent or an HTTP mutation. Mutations never retry automatically.
 """
 
 from __future__ import annotations
@@ -21,9 +20,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp import hints
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
-from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.errors import DeltaApiError
 
 logger = logging.getLogger("delta_exchange_mcp")
@@ -124,8 +123,10 @@ class TradeGate:
     def lease(self) -> TradeLease:
         if not self.armed:
             raise ToolError(_REVOKED_MESSAGE)
-        checker = self._final_check.get() or self._in_memory_check
+        checker = self._final_check.get()
         self._final_check.set(None)
+        if checker is None:
+            raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE)
         return TradeLease(generation=self.generation, final_check=checker)
 
     def revoke(self) -> None:
@@ -139,10 +140,6 @@ class TradeGate:
             return lease.final_check() is True
         except Exception as exc:
             raise FinalTradingCheckError(_CHECK_FAILED_MESSAGE) from exc
-
-    def _in_memory_check(self) -> bool:
-        return self.armed
-
 
 def _bs(value: bool | None) -> str | None:
     """Delta's order-level flags are string enums "true"/"false", not JSON booleans."""
@@ -262,8 +259,12 @@ def register(
     active_lease: ContextVar[TradeLease | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
+    active_audit: ContextVar[AuditLog | None] = ContextVar(
+        f"delta_trade_audit_{id(gate)}", default=None
+    )
     _uid_cache: dict[int, int] = {}
-    # Include the pinned HTTP identity so old requests cannot fill a new account's cache.
+    # Each cache key includes the task-pinned HTTP identity. A rebind cannot reuse or
+    # repopulate product or account data under a different credential pair.
     _tick_cache: dict[tuple[int, int | str], Decimal] = {}
     _tick_list_loaded: set[int] = set()
 
@@ -288,12 +289,20 @@ def register(
             async def pinned(*args: Any, **kwargs: Any) -> Any:
                 if kwargs.get("dry_run") is True:
                     async with client.pin():
-                        return await function(*args, **kwargs)
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
                 lease = gate.lease()
                 token = active_lease.set(lease)
                 try:
                     async with client.pin():
-                        return await function(*args, **kwargs)
+                        audit_token = active_audit.set(current_audit())
+                        try:
+                            return await function(*args, **kwargs)
+                        finally:
+                            active_audit.reset(audit_token)
                 finally:
                     active_lease.reset(token)
 
@@ -349,7 +358,12 @@ def register(
                         _store_product(prod)
                 _tick_list_loaded.add(generation)
         except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
-            logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
+            logger.info(
+                "tick_size lookup failed for %s/%s: %s",
+                product_id,
+                product_symbol,
+                type(e).__name__,
+            )
             return None
         return _tick_cache.get(key) if key is not None else None
 
@@ -385,7 +399,7 @@ def register(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
     ) -> Any:
         payload = _clean(payload)
-        log = current_audit()
+        log = active_audit.get()
         if dry_run:
             if log:
                 log.record(tool, payload, dry_run=True)

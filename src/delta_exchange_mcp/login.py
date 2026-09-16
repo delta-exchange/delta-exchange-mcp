@@ -1,143 +1,152 @@
-"""Interactive `login` for people already sitting at a terminal.
+"""Connect an account through a browser or asterisk-masked terminal prompts."""
 
-One of several front-ends onto the same shared settings file — the in-chat form in
-`form` fills exactly the same three keys for people who never open a terminal, and
-hand-editing the file fills them too. The checking and writing live in `credentials`
-so all of them behave identically.
-
-This refuses to run without a terminal. `getpass` on its own does not: piping into it
-prints a warning and then reads stdin anyway, so `echo $KEY | delta-exchange-mcp login`
-would quietly succeed. That is exactly the shape an agent trying to be helpful would
-reach for, and it would put the secret into shell history and into the agent's
-transcript — the two places this whole design exists to keep it out of.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import getpass
+import argparse
 import sys
 
-from delta_exchange_mcp import credentials, store
-from delta_exchange_mcp.config import BASE_URLS, DASHBOARDS, DEFAULT_ENV
+from delta_exchange_mcp import connection_cli, setup
+from delta_exchange_mcp.auth.connection import (
+    BROWSER_MANAGED_ENVIRONMENTS,
+    ConnectionService,
+)
 
 
-def _ask_env(default: str = DEFAULT_ENV) -> str | None:
-    prompt = f"Environment {'/'.join(sorted(BASE_URLS))}\n  [{default}]: "
-    answer = input(prompt).strip().lower() or default
-    if answer not in BASE_URLS:
-        print(f"  not an environment: {answer}", file=sys.stderr)
-        return None
-    return answer
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    connection_cli.add_mode_arguments(parser)
+    parser.add_argument("--api-key", help="API key for direct login")
+    parser.add_argument("--api-secret", help="API secret for direct login")
+    parser.add_argument(
+        "--env",
+        choices=BROWSER_MANAGED_ENVIRONMENTS,
+        help="terminal/direct login environment; defaults to the current environment",
+    )
+    parser.add_argument(
+        "--client", default="", help="exact MCP client name for trading approval"
+    )
 
 
-def run(verify: bool = True) -> int:
-    """Prompt for credentials and write them to the shared settings file."""
-    if not sys.stdin.isatty():
-        print(
-            "login needs a terminal. Run it yourself rather than through a pipe or an "
-            "assistant — piping would put your API secret in shell history.",
-            file=sys.stderr,
+def run(
+    *,
+    mode: connection_cli.Mode = "auto",
+    api_key: str | None = None,
+    api_secret: str | None = None,
+    environment: str | None = None,
+    client_name: str = "",
+) -> int:
+    direct = api_key is not None or api_secret is not None
+    if direct and (
+        not api_key or not api_key.strip() or not api_secret or not api_secret.strip()
+    ):
+        return connection_cli.error(
+            "Supply both --api-key and --api-secret with non-empty values.", 2
         )
-        return 2
+    return connection_cli.run(
+        command="login",
+        mode=mode,
+        client_name=client_name,
+        terminal_requested=direct,
+        needs_tty=not direct,
+        environment=environment,
+        terminal_action=lambda connection: _terminal(
+            connection, api_key, api_secret, environment, client_name, direct
+        ),
+    )
 
-    path = store.ensure()
-    if path is None:
-        print(f"cannot write {store.path()}", file=sys.stderr)
-        return 1
 
-    shared = store.read()
-    saved_env_value = (shared.get("DELTA_MCP_ENV") or "").strip().lower()
-    saved_env = saved_env_value if saved_env_value in BASE_URLS else None
-    default_env = saved_env or DEFAULT_ENV
-    saved_key = (shared.get("DELTA_API_KEY") or "").strip()
-    saved_secret = (shared.get("DELTA_API_SECRET") or "").strip()
-    has_saved_pair = bool(saved_key and saved_secret)
-    can_keep_saved = has_saved_pair and saved_env is not None
-
-    print(f"Storing credentials in {path}")
-    print("Every MCP client on this machine reads it.")
-    if can_keep_saved:
-        print("Press Enter to keep the environment and saved credential pair.\n")
-    else:
-        print("Choose an environment and enter both parts of a credential pair.\n")
-
-    try:
-        env = _ask_env(default_env)
-        if env is None:
-            return 1
-        print(f"  create a key at {DASHBOARDS.get(env, DASHBOARDS[DEFAULT_ENV])}")
-        print("  the key must have permission for trading preferences")
-        print(
-            "  current Delta documentation does not establish whether Read Data alone "
-            "is sufficient\n"
+def _terminal(
+    connection: ConnectionService,
+    api_key: str | None,
+    api_secret: str | None,
+    environment: str | None,
+    client_name: str,
+    direct: bool,
+) -> int:
+    if not direct and not client_name:
+        client_name = input(
+            "MCP client name for trading approval (Enter skips): "
+        ).strip()
+    actions = connection.actions(client_name)
+    before = actions("status", {}, 0)
+    current = str(before.content["environment"])
+    if environment is None:
+        environment = (
+            current
+            if direct
+            else (
+                input(
+                    f"Environment ({'/'.join(BROWSER_MANAGED_ENVIRONMENTS)}) [{current}]: "
+                )
+                .strip()
+                .lower()
+                or current
+            )
         )
-        keep = "; Enter keeps saved" if can_keep_saved else ""
-        entered_key = getpass.getpass(f"API key (hidden{keep}): ").strip()
-        entered_secret = getpass.getpass(f"API secret (hidden{keep}): ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\ncancelled, nothing written", file=sys.stderr)
-        return 1
-
-    if bool(entered_key) != bool(entered_secret):
-        print(
-            "both a key and its secret are needed. Enter both to replace the saved "
-            "pair, or leave both blank to keep it.",
-            file=sys.stderr,
+    if environment not in BROWSER_MANAGED_ENVIRONMENTS:
+        return connection_cli.error("Choose india_prod or india_testnet.", 2)
+    if environment != current and before.content["environment_externally_managed"]:
+        return connection_cli.error(
+            "DELTA_MCP_ENV fixes the active environment. Unset it or choose the same environment.",
+            2,
         )
-        return 1
+    if not direct:
+        api_key = connection_cli.read_secret("API key (masked): ")
+        api_secret = connection_cli.read_secret("API secret (masked): ")
+    result = actions(
+        "credentials",
+        {
+            "operation": "replace",
+            "environment": environment,
+            "api_key": api_key,
+            "api_secret": api_secret,
+        },
+        before.revision,
+    )
+    if result.stale or result.content.get("status") not in {"saved", "unverified"}:
+        return connection_cli.error(str(result.content["message"]))
+    print(
+        f"Credentials saved for {environment} in the operating-system credential store."
+    )
+    if result.content["status"] == "unverified":
+        print(str(result.content["message"]), file=sys.stderr)
+    print("Trading is off until you explicitly approve it for an MCP client.")
+    if direct:
+        return 0
+    if not client_name:
+        return 0
+    return approve_trading(actions, result.revision, environment, client_name)
 
-    if entered_key:
-        key, secret = entered_key, entered_secret
-    elif not has_saved_pair:
-        print(
-            "No complete credential pair is saved. Enter both the API key and secret.",
-            file=sys.stderr,
+
+def approve_trading(
+    actions: setup.ActionHandler,
+    revision: setup.Revision,
+    environment: str,
+    client_name: str,
+) -> int:
+    """Collect explicit consent for the exact snapshot displayed to the user."""
+    answer = (
+        input(
+            f"Enable all 13 trading tools for {client_name!r} on {environment}? "
+            "There are no built-in order-size limits. Type 'yes' to approve: "
         )
-        return 1
-    elif saved_env is None:
-        print(
-            "The saved credential pair has no valid environment. Choose an environment "
-            "and enter a new API key and secret.",
-            file=sys.stderr,
-        )
-        return 1
-    elif env != saved_env:
-        print(
-            f"The saved credentials belong to {saved_env}; changing environments "
-            "requires a new API key and secret.",
-            file=sys.stderr,
-        )
-        return 1
-    else:
-        key, secret = saved_key, saved_secret
-
-    if verify:
-        print(f"\nChecking against {BASE_URLS[env]} ...")
-        result = asyncio.run(credentials.check(env, key, secret))
-        if not result.reachable:
-            # A flaky connection must not cost someone a key they typed correctly.
-            print(f"  {result.detail}\n  saving anyway, unverified", file=sys.stderr)
-        elif not result.ok:
-            print(f"  {result.detail}\n\nNothing was saved.", file=sys.stderr)
-            return 1
-        else:
-            print(f"  ok{' — ' + result.detail if result.detail else ''}")
-
-    problem = credentials.save(env, key, secret)
-    if problem is not None:
-        print(problem, file=sys.stderr)
-        return 1
-
-    print(f"\nSaved to {path}. Restart your MCP client.")
-
-    overridden = credentials.overridden_by_client()
-    if overridden:
-        # Set in this shell, so any client launched from here inherits it — and a client's
-        # own value always wins over the file, so the key just saved would do nothing.
-        print(
-            f"\nNote: {', '.join(overridden)} is set in this shell and takes precedence "
-            "over the file for any client launched from here.",
-            file=sys.stderr,
-        )
+        .strip()
+        .lower()
+    )
+    if answer != "yes":
+        return 0
+    acknowledged = (
+        environment != "india_prod"
+        or input("Production trading places real orders. Type 'yes' to confirm: ")
+        .strip()
+        .lower()
+        == "yes"
+    )
+    if not acknowledged:
+        return 0
+    result = actions(
+        "consent",
+        {"environment": environment, "enabled": True, "acknowledged": acknowledged},
+        revision,
+    )
+    if result.stale or result.content.get("status") != "enabled":
+        return connection_cli.error(str(result.content["message"]))
+    print(f"Trading approved for {client_name!r} on {environment}.")
     return 0

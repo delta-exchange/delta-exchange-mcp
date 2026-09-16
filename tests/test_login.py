@@ -1,331 +1,521 @@
-import httpx
+"""CLI login against the real connection, credential, and consent services."""
+
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
-import respx
 
-from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, login, store
-
-
-class FakeTty:
-    def isatty(self):
-        return True
+from delta_exchange_mcp import credentials as credential_check
+from delta_exchange_mcp import connection_cli, login
+from delta_exchange_mcp.auth.connection import ConnectionService
+from delta_exchange_mcp.auth.store import (
+    BackendOperationError,
+    CredentialSource,
+    CredentialState,
+    CredentialStore,
+    FileMetadata,
+    MemorySecretBackend,
+)
+from delta_exchange_mcp.server import main
+from tests.connection_support import action, context, verified
 
 
 @pytest.fixture
-def terminal(monkeypatch):
-    """Answer the prompts as a person at a keyboard would."""
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
-    secrets = iter(["a-real-key", "a-real-secret"])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(secrets))
+def connections(monkeypatch, tmp_path):
+    for name in ("DELTA_API_KEY", "DELTA_API_SECRET", "DELTA_MCP_ENV"):
+        monkeypatch.delenv(name, raising=False)
+    backend = MemorySecretBackend()
+    opened = []
+    original_open = ConnectionService.open
+
+    def open_connection():
+        connection = original_open(
+            credentials=CredentialStore(
+                backend,
+                FileMetadata(tmp_path / "credentials.json"),
+                CredentialSource.OS_STORE,
+            ),
+            validator=verified,
+        )
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(open_connection))
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: False)
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        connection_cli.webbrowser,
+        "open",
+        Mock(side_effect=AssertionError("unexpected browser")),
+    )
+    yield opened
+    for connection in opened:
+        connection.close()
+        connection_cli.anyio.run(connection.client.aclose)
 
 
-def check_returning(**kwargs):
-    async def fake(env, key, secret):
-        return credentials.Check(**kwargs)
+def enter(monkeypatch, answers, *, secrets=("example-key", "example-secret")):
+    answers = iter(answers)
+    secrets = iter(secrets)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    hidden = Mock(side_effect=lambda prompt: next(secrets))
+    monkeypatch.setattr(connection_cli, "read_secret", hidden)
+    return hidden
 
-    return fake
+
+def test_direct_login_survives_reopen_without_prompts_or_trading(
+    connections,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", Mock(side_effect=AssertionError("unexpected prompt"))
+    )
+    main(
+        [
+            "login",
+            "--api-key",
+            "example-key",
+            "--api-secret",
+            "example-secret",
+            "--env",
+            "india_testnet",
+            "--client",
+            "Codex",
+        ]
+    )
+
+    reopened = ConnectionService.open()
+    status = reopened.status(context("Codex"))
+    assert status["environment"] == "india_testnet"
+    assert status["credentials_configured"] is True
+    assert status["trading"]["enabled"] is False
+    credential = reopened.credentials.get("india_testnet")
+    assert (credential.api_key, credential.api_secret) == (
+        "example-key",
+        "example-secret",
+    )
+    assert credential.state is CredentialState.VERIFIED
+    output = capsys.readouterr()
+    assert "saved" in output.out
+    for secret in ("example-key", "example-secret"):
+        assert secret not in output.out + output.err
+        assert all(
+            secret not in path.read_text()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        )
+
+
+@pytest.mark.parametrize("flag", [None, "--device", "--no-browser"])
+def test_headless_login_and_explicit_terminal_modes_use_hidden_input(
+    connections,
+    monkeypatch,
+    flag,
+):
+    hidden = enter(monkeypatch, ["", "india_testnet"])
+    if flag:
+        monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
+    main(["login", *([flag] if flag else [])])
+    assert hidden.call_count == 2
+    assert all("masked" in call.args[0] for call in hidden.call_args_list)
+    assert connections[0].credentials.get("india_testnet").api_key == "example-key"
+    assert connections[0].status(context("Codex"))["trading"]["enabled"] is False
 
 
 @pytest.mark.parametrize(
-    ("status", "code"),
-    [(429, "rate_limit_exceeded"), (503, "service_unavailable")],
+    ("environment", "answers", "enabled"),
+    [
+        ("india_prod", ["yes", "yes"], True),
+        ("india_prod", ["yes", "no"], False),
+        ("india_prod", [""], False),
+        ("india_testnet", ["yes"], True),
+        ("india_testnet", ["no"], False),
+    ],
 )
-@respx.mock
-async def test_api_unavailability_is_not_a_credential_rejection(
-    monkeypatch, status, code
+def test_terminal_consent_requires_explicit_approval_and_survives_restart(
+    connections,
+    monkeypatch,
+    environment,
+    answers,
+    enabled,
 ):
-    """A terminal retry response says nothing about whether the credentials work."""
-
-    async def no_sleep(_delay):
-        pass
-
-    monkeypatch.setattr("delta_exchange_mcp.client.asyncio.sleep", no_sleep)
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
-        return_value=httpx.Response(
-            status,
-            json={"success": False, "error": {"code": code}},
-        )
-    )
-
-    result = await credentials.check("india_testnet", "key", "secret")
-
-    assert route.call_count == 3
-    assert result.ok is False
-    assert result.reachable is False
+    enter(monkeypatch, answers)
+    main(["login", "--device", "--env", environment, "--client", "Codex"])
+    reopened = ConnectionService.open()
+    assert reopened.status(context("Codex"))["trading"]["enabled"] is enabled
+    assert reopened.status(context("Claude"))["trading"]["enabled"] is False
 
 
-@respx.mock
-async def test_api_key_rejection_is_a_credential_rejection():
-    """A documented authentication failure is decisive and must prevent a save."""
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
-        return_value=httpx.Response(
-            401,
-            json={"success": False, "error": {"code": "InvalidApiKey"}},
-        )
-    )
-
-    result = await credentials.check("india_testnet", "key", "secret")
-
-    assert route.call_count == 1
-    assert result.ok is False
-    assert result.reachable is True
-
-
-def test_refuses_without_a_terminal(monkeypatch, capsys):
-    """getpass alone would read a pipe and echo it.
-
-    `echo $KEY | delta-exchange-mcp login` is what an agent trying to help would run,
-    and it would put the secret in shell history and in that agent's transcript.
-    """
-
-    class NotATty:
-        def isatty(self):
-            return False
-
-    monkeypatch.setattr(login.sys, "stdin", NotATty())
-    assert login.run() == 2
-    assert "needs a terminal" in capsys.readouterr().err
-    assert not store.path().exists()
-
-
-def test_saves_after_a_successful_check(terminal, monkeypatch):
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
-    assert login.run() == 0
-
-    cfg = config_mod.load()
-    assert (cfg.api_key, cfg.api_secret) == ("a-real-key", "a-real-secret")
-    assert cfg.env == "india_testnet"
-
-
-def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
-    """The file has to stay hand-editable after login has written to it."""
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
-    login.run()
-
-    body = store.path().read_text()
-    assert "permission for trading preferences" in body
-    assert "Read Data alone is sufficient" in body
-    assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
-
-
-def test_login_does_not_claim_read_data_is_sufficient(terminal, monkeypatch, capsys):
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
-    login.run()
-
-    body = capsys.readouterr().out
-    assert "permission for trading preferences" in body
-    assert "does not establish whether Read Data alone is sufficient" in body
-    assert "permission is enough" not in body
-
-
-def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):
-    """Saving a key that does not work would register the account tools and fail every call.
-
-    That is the state placeholder credentials used to produce, and the reason the check
-    exists at all.
-    """
-    monkeypatch.setattr(
-        credentials,
-        "check",
-        check_returning(
-            ok=False,
-            reachable=True,
-            detail="delta api error: InvalidApiKey — API key not found.",
-        ),
-    )
-    assert login.run() == 1
-    assert "Nothing was saved" in capsys.readouterr().err
-    assert config_mod.load().has_credentials is False
-
-
-def test_an_unreachable_api_still_saves(terminal, monkeypatch, capsys):
-    """A flaky connection must not cost someone a key they typed correctly."""
-    monkeypatch.setattr(
-        credentials,
-        "check",
-        check_returning(ok=False, reachable=False, detail="could not reach Delta: timeout"),
-    )
-    assert login.run() == 0
-    assert "unverified" in capsys.readouterr().err
-    assert config_mod.load().has_credentials is True
-
-
-def test_no_verify_skips_the_call(terminal, monkeypatch):
-    async def explode(env, key, secret):
-        raise AssertionError("--no-verify must not reach the API")
-
-    monkeypatch.setattr(credentials, "check", explode)
-    assert login.run(verify=False) == 0
-    assert config_mod.load().has_credentials is True
-
-
-def test_blank_answers_keep_a_saved_pair_and_its_environment(monkeypatch, capsys):
-    """Enter should mean keep, without displaying either half of the saved pair."""
-    saved_key = "saved-key-never-print"
-    saved_secret = "saved-secret-never-print"
+def test_prompted_client_uses_its_own_consent_revision(connections, monkeypatch):
+    enter(monkeypatch, ["Codex", "", "yes", "yes"])
+    main(["login"])
     assert (
-        store.write(
-            {
-                "DELTA_MCP_ENV": "india_testnet",
-                "DELTA_API_KEY": saved_key,
-                "DELTA_API_SECRET": saved_secret,
-            }
-        )
-        is None
+        ConnectionService.open().status(context("Codex"))["trading"]["enabled"] is True
     )
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "")
-    secret_prompts = []
-    answers = iter(["", ""])
-    monkeypatch.setattr(
-        login.getpass,
-        "getpass",
-        lambda prompt="": secret_prompts.append(prompt) or next(answers),
-    )
-    checked = []
-
-    async def successful_check(env, key, secret):
-        checked.append((env, key, secret))
-        return credentials.Check(ok=True, reachable=True, detail="")
-
-    monkeypatch.setattr(credentials, "check", successful_check)
-
-    assert login.run() == 0
-
-    assert "[india_testnet]" in prompts[0]
-    assert all("keep" in prompt.lower() for prompt in secret_prompts)
-    assert checked == [("india_testnet", saved_key, saved_secret)]
-    assert store.read() == {
-        "DELTA_API_KEY": saved_key,
-        "DELTA_API_SECRET": saved_secret,
-        "DELTA_MCP_ENV": "india_testnet",
-    }
-    output = capsys.readouterr()
-    rendered = output.out + output.err
-    assert saved_key not in rendered
-    assert saved_secret not in rendered
 
 
-def test_changing_environment_requires_a_new_pair_even_without_verify(
-    monkeypatch, capsys
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"api_key": "example-key"},
+        {"api_secret": "example-secret"},
+        {"api_key": " ", "api_secret": "example-secret"},
+        {"api_key": "example-key", "api_secret": ""},
+        {"mode": "browser", "api_key": "example-key", "api_secret": "example-secret"},
+    ],
+)
+def test_bad_credential_arguments_fail_before_opening_store(
+    connections, arguments, capsys
 ):
-    """An old key must not be rebound to another environment by blank answers."""
-    original = {
-        "DELTA_MCP_ENV": "india_prod",
-        "DELTA_API_KEY": "prod-key",
-        "DELTA_API_SECRET": "prod-secret",
-    }
-    assert store.write(original) is None
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
-    answers = iter(["", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
-
-    assert login.run(verify=False) == 1
-
-    assert "changing environments" in capsys.readouterr().err
-    assert store.read() == original
+    assert login.run(**arguments) == 2
+    assert connections == []
+    output = capsys.readouterr()
+    assert "example-key" not in output.out + output.err
+    assert "example-secret" not in output.out + output.err
 
 
-def test_a_new_pair_can_move_the_saved_environment(monkeypatch):
-    original = {
-        "DELTA_MCP_ENV": "india_prod",
-        "DELTA_API_KEY": "prod-key",
-        "DELTA_API_SECRET": "prod-secret",
-    }
-    assert store.write(original) is None
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
-    answers = iter(["testnet-key", "testnet-secret"])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
-
-    assert login.run(verify=False) == 0
-    assert store.read() == {
-        "DELTA_API_KEY": "testnet-key",
-        "DELTA_API_SECRET": "testnet-secret",
-        "DELTA_MCP_ENV": "india_testnet",
-    }
+def test_no_tty_does_not_read_piped_credentials(connections, monkeypatch):
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
+    assert login.run() == 2
+    assert connections == []
 
 
-def test_blank_credentials_without_a_saved_pair_are_explained(monkeypatch, capsys):
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
-    answers = iter(["", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
-
-    assert login.run(verify=False) == 1
-
-    assert "no complete credential pair is saved" in capsys.readouterr().err.lower()
-    assert config_mod.load().has_credentials is False
-
-
-def test_a_saved_pair_without_a_valid_environment_cannot_be_kept(monkeypatch, capsys):
-    original = {"DELTA_API_KEY": "old-key", "DELTA_API_SECRET": "old-secret"}
-    path = store.path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("DELTA_API_KEY=old-key\nDELTA_API_SECRET=old-secret\n")
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
-    prompts = []
-    answers = iter(["", ""])
+def test_memory_only_store_cannot_claim_persistent_login(
+    connections, monkeypatch, capsys
+):
+    connection = ConnectionService.open()
+    connection.credentials = CredentialStore.memory()
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
     monkeypatch.setattr(
-        login.getpass,
-        "getpass",
-        lambda prompt="": prompts.append(prompt) or next(answers),
+        "builtins.input", Mock(side_effect=AssertionError("unexpected prompt"))
+    )
+    assert login.run(mode="terminal") == 1
+    assert connection.credentials.get("india_prod") is None
+    assert "persistent credential store" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "failure", [KeyboardInterrupt, EOFError, connection_cli.TerminalInputError]
+)
+def test_interrupted_or_unhidden_input_does_not_save(connections, monkeypatch, failure):
+    enter(monkeypatch, ["", ""])
+
+    def fail(prompt):
+        raise failure
+
+    monkeypatch.setattr(connection_cli, "read_secret", fail)
+    assert login.run() == (1 if failure is connection_cli.TerminalInputError else 130)
+    assert connections[0].credentials.get("india_prod") is None
+
+
+@pytest.mark.parametrize(
+    ("code", "exit_code", "expected_key"),
+    [
+        ("InvalidApiKey", 1, "old-key"),
+        ("UnauthorizedApiAccess", 0, "example-key"),
+        ("", 0, "example-key"),
+    ],
+)
+def test_validation_preserves_rejected_key_and_reports_unverified(
+    connections,
+    monkeypatch,
+    capsys,
+    code,
+    exit_code,
+    expected_key,
+):
+    connection = ConnectionService.open()
+    action(
+        connection,
+        "Codex",
+        "credentials",
+        {
+            "environment": "india_prod",
+            "api_key": "old-key",
+            "api_secret": "old-secret",
+        },
+    )
+    action(
+        connection,
+        "Codex",
+        "consent",
+        {
+            "environment": "india_prod",
+            "enabled": True,
+            "acknowledged": True,
+        },
     )
 
-    assert login.run(verify=False) == 1
+    async def validate(environment, api_key, api_secret):
+        return credential_check.Check(
+            ok=False, reachable=bool(code), code=code, detail="not verified"
+        )
 
-    assert all("keep" not in prompt.lower() for prompt in prompts)
-    assert "no valid environment" in capsys.readouterr().err.lower()
-    assert store.read() == original
-
-
-def test_a_partial_replacement_never_mixes_with_the_saved_pair(monkeypatch, capsys):
-    original = {
-        "DELTA_MCP_ENV": "india_testnet",
-        "DELTA_API_KEY": "old-key",
-        "DELTA_API_SECRET": "old-secret",
-    }
-    assert store.write(original) is None
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
-    answers = iter(["new-key", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
-
-    assert login.run(verify=False) == 1
-
-    assert "enter both to replace" in capsys.readouterr().err.lower()
-    assert store.read() == original
+    connection.validator = validate
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
+    assert login.run(api_key="example-key", api_secret="example-secret") == exit_code
+    credential = connection.credentials.get("india_prod")
+    assert credential.api_key == expected_key
+    assert connection.status(context("Codex"))["trading"]["enabled"] is (exit_code == 1)
+    output = capsys.readouterr()
+    if exit_code == 0:
+        assert credential.state is CredentialState.UNVERIFIED
+        assert output.err
 
 
-def test_half_a_pair_is_refused(monkeypatch, capsys):
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
-    secrets = iter(["only-a-key", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(secrets))
+def test_concurrent_replacement_during_terminal_approval_is_not_authorized(
+    connections,
+    monkeypatch,
+):
+    enter(monkeypatch, [])
 
-    assert login.run() == 1
-    assert "both a key and its secret" in capsys.readouterr().err
-    assert config_mod.load().has_credentials is False
+    def approve(prompt):
+        action(
+            connections[0],
+            "Codex",
+            "credentials",
+            {
+                "environment": "india_testnet",
+                "api_key": "new-key",
+                "api_secret": "new-secret",
+            },
+        )
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", approve)
+    assert (
+        login.run(mode="terminal", environment="india_testnet", client_name="Codex")
+        == 1
+    )
+    assert connections[0].credentials.get("india_testnet").api_key == "new-key"
+    assert connections[0].status(context("Codex"))["trading"]["enabled"] is False
 
 
-def test_an_unknown_environment_is_refused(monkeypatch, capsys):
-    monkeypatch.setattr(login.sys, "stdin", FakeTty())
-    monkeypatch.setattr("builtins.input", lambda prompt="": "mainnet")
+def test_concurrent_replacement_during_input_is_not_overwritten(
+    connections, monkeypatch
+):
+    enter(monkeypatch, [])
 
-    assert login.run() == 1
-    assert "not an environment" in capsys.readouterr().err
+    def secret(prompt):
+        if "API key" in prompt:
+            action(
+                connections[0],
+                "Codex",
+                "credentials",
+                {
+                    "environment": "india_testnet",
+                    "api_key": "new-key",
+                    "api_secret": "new-secret",
+                },
+            )
+        return "example-key" if "API key" in prompt else "example-secret"
+
+    monkeypatch.setattr(connection_cli, "read_secret", secret)
+    assert (
+        login.run(mode="terminal", environment="india_testnet", client_name="Codex")
+        == 1
+    )
+    assert connections[0].credentials.get("india_testnet").api_key == "new-key"
 
 
-def test_a_shell_export_that_would_shadow_the_file_is_reported(terminal, monkeypatch, capsys):
-    """A client launched from this shell inherits the export, and the client always wins.
+def browser_page(monkeypatch, connection, *, complete=True, save=False):
+    page = SimpleNamespace(
+        url="http://127.0.0.1:43123/manage", running=True, stop=Mock()
+    )
 
-    Without this the key just saved would appear to do nothing at all.
-    """
-    monkeypatch.setenv("DELTA_API_KEY", "exported-in-the-shell")
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
+    def factory(*, actions, revision, open_browser):
+        assert open_browser is False
+
+        def wait():
+            if save:
+                result = actions(
+                    "credentials",
+                    {
+                        "environment": "india_prod",
+                        "api_key": "browser-key",
+                        "api_secret": "browser-secret",
+                    },
+                    revision,
+                )
+                assert result.content["status"] == "saved"
+            return complete
+
+        page.wait = Mock(side_effect=wait)
+        return page
+
+    connection.page_factory = factory
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
+    return page
+
+
+@pytest.mark.parametrize(
+    ("mode", "opened"), [("auto", True), ("browser", True), ("browser", False)]
+)
+def test_browser_mode_preserves_page_and_cleanup(
+    connections, monkeypatch, capsys, mode, opened
+):
+    page = browser_page(monkeypatch, ConnectionService.open())
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: mode == "auto")
+    opener = Mock(return_value=opened)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", opener)
+    assert login.run(mode=mode) == 0
+    opener.assert_called_once_with(page.url)
+    page.wait.assert_called_once()
+    page.stop.assert_called_once()
+    assert page.url in capsys.readouterr().err
+
+
+def test_browser_credential_only_save_is_success_after_page_closes(
+    connections, monkeypatch
+):
+    browser_page(monkeypatch, ConnectionService.open(), complete=False, save=True)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=True))
+    assert login.run(mode="browser") == 0
+
+
+def test_browser_closure_without_login_returns_failure(connections, monkeypatch):
+    browser_page(monkeypatch, ConnectionService.open(), complete=False)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=True))
+    assert login.run(mode="browser") == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [False, OSError("cannot launch"), connection_cli.webbrowser.Error("no browser")],
+)
+def test_failed_automatic_browser_launch_falls_back_to_terminal(
+    connections, monkeypatch, failure
+):
+    page = browser_page(monkeypatch, ConnectionService.open())
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
+    opener = (
+        Mock(side_effect=failure)
+        if isinstance(failure, Exception)
+        else Mock(return_value=False)
+    )
+    monkeypatch.setattr(connection_cli.webbrowser, "open", opener)
+    enter(monkeypatch, ["", ""])
     assert login.run() == 0
-    assert "takes precedence over the file" in capsys.readouterr().err
+    page.wait.assert_not_called()
+    page.stop.assert_called_once()
+    assert connections[0].credentials.get("india_prod").api_key == "example-key"
+
+
+def test_failed_browser_without_tty_returns_actionable_error(connections, monkeypatch):
+    browser_page(monkeypatch, ConnectionService.open())
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
+    monkeypatch.setattr(connection_cli.webbrowser, "open", Mock(return_value=False))
+    monkeypatch.setattr(connection_cli.sys.stdin, "isatty", lambda: False)
+    assert login.run() == 2
+    assert connections[0].credentials.get("india_prod") is None
+
+
+@pytest.mark.parametrize(
+    ("platform", "variables", "expected"),
+    [
+        ("darwin", {}, True),
+        ("darwin", {"SSH_CONNECTION": "remote"}, False),
+        ("win32", {}, True),
+        ("win32", {"SSH_CLIENT": "remote"}, False),
+        ("linux", {}, False),
+        ("linux", {"DISPLAY": ":0"}, True),
+        ("linux", {"WAYLAND_DISPLAY": "wayland-0"}, True),
+        ("linux", {"DISPLAY": ":10", "SSH_TTY": "/dev/pts/1"}, False),
+    ],
+)
+def test_browser_detection(monkeypatch, platform, variables, expected):
+    for name in (
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(connection_cli.sys, "platform", platform)
+    monkeypatch.setattr(connection_cli.webbrowser, "get", Mock())
+    assert connection_cli.browser_available() is expected
+
+
+def test_missing_browser_controller_selects_terminal(monkeypatch):
+    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(connection_cli.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        connection_cli.webbrowser,
+        "get",
+        Mock(side_effect=connection_cli.webbrowser.Error),
+    )
+    assert connection_cli.browser_available() is False
+
+
+@pytest.mark.parametrize("mode", ["auto", "browser"])
+def test_loopback_start_failure_falls_back_only_in_auto_mode(
+    connections, monkeypatch, mode
+):
+    connection = ConnectionService.open()
+    connection.page_factory = Mock(side_effect=OSError("cannot bind"))
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
+    monkeypatch.setattr(connection_cli, "browser_available", lambda: True)
+    enter(monkeypatch, ["", ""])
+    assert login.run(mode=mode) == (0 if mode == "auto" else 1)
+    assert (connection.credentials.get("india_prod") is not None) is (mode == "auto")
+
+
+def test_fixed_environment_conflict_fails_before_saving(
+    connections, monkeypatch, capsys
+):
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_prod")
+    assert (
+        login.run(
+            api_key="example-key",
+            api_secret="example-secret",
+            environment="india_testnet",
+        )
+        == 2
+    )
+    assert connections[0].credentials.get("india_testnet") is None
+    assert "DELTA_MCP_ENV" in capsys.readouterr().err
+
+
+def test_secure_store_write_failure_does_not_report_success(
+    connections, monkeypatch, capsys
+):
+    connection = ConnectionService.open()
+    connection.credentials._backend.set = Mock(
+        side_effect=BackendOperationError("store locked")
+    )
+    monkeypatch.setattr(ConnectionService, "open", staticmethod(lambda: connection))
+    assert login.run(api_key="example-key", api_secret="example-secret") == 1
+    assert connection.credentials.get("india_prod") is None
+    output = capsys.readouterr()
+    assert "saved" not in output.out
+    assert "could not update" in output.err
+
+
+def test_concurrent_revocation_during_approval_stays_disabled(connections, monkeypatch):
+    enter(monkeypatch, [])
+
+    def approve(prompt):
+        action(
+            connections[0],
+            "Codex",
+            "consent",
+            {
+                "environment": "india_testnet",
+                "enabled": False,
+            },
+        )
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", approve)
+    assert (
+        login.run(mode="terminal", environment="india_testnet", client_name="Codex")
+        == 1
+    )
+    assert connections[0].status(context("Codex"))["trading"]["enabled"] is False
