@@ -129,6 +129,9 @@ async function run(html, reconnect, devnet = false) {
   assert.equal(elements.get("connection-state").textContent, "Connected");
   assert.equal(elements.get("enable-trading").disabled, false);
   assert.equal(elements.get("acknowledge").checked, false);
+  // The mirror of the devnet case: for a real environment the link must be followable.
+  assert.equal(elements.get("dashboard").getAttribute("href"),
+    "https://www.delta.exchange/app/account/manageapikeys");
 
   elements.get("acknowledge").checked = true;
   elements.get("enable-trading").handlers.get("click")();
