@@ -592,6 +592,10 @@ def test_html_and_json_responses_send_security_headers(browser: Browser) -> None
     assert nonce is not None
     assert f'<script nonce="{nonce.group(1)}">' in html.text
     assert "'unsafe-inline'" not in csp
+    # The brand faces ride in the stylesheet, so the policy has to allow data:
+    # fonts and nothing wider — no font may be fetched from the network.
+    assert "font-src data:" in csp
+    assert "font-src" not in csp.replace("font-src data:", "")
 
     response = browser.post("status")
     assert_security_headers(response)
