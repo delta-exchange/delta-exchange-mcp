@@ -167,7 +167,7 @@ async def test_tool_discovery_is_stable_across_authorization_changes() -> None:
 
 
 async def test_debug_setting_does_not_change_tool_discovery(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.delenv("DELTA_MCP_DEBUG", raising=False)
     without_debug = build_server(connection_service=connection_service())
@@ -466,7 +466,7 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
 
 
 async def test_final_checker_blocks_a_mutation_when_consent_changes_during_preflight(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     consent = True
     state_checks: list[bool] = []
@@ -624,7 +624,7 @@ async def test_every_trading_dry_run_works_without_consent_or_http(
 async def test_every_real_trading_tool_is_blocked_before_any_mutation(
     name: str,
     arguments: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     credentialled()
     app = build_server(
@@ -666,7 +666,7 @@ async def test_every_real_trading_tool_is_blocked_before_any_mutation(
 
 
 async def test_every_tool_that_changes_state_has_a_write_annotation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
     app = build_server()
@@ -681,7 +681,7 @@ async def test_every_tool_that_changes_state_has_a_write_annotation(
 
 
 async def test_non_idempotent_writes_do_not_invite_automatic_retries(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
     app = build_server()

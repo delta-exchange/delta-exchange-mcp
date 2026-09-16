@@ -624,7 +624,7 @@ def test_the_http_endpoint_rejects_mcp_tool_calls(browser: Browser) -> None:
 
 
 def test_callback_failures_do_not_log_secret_arguments(
-    page: setup.Page, caplog: pytest.LogCaptureFixture
+    page: setup.Page, caplog
 ) -> None:
     page.stop()
     actions = FakeActions(fail=True)
@@ -644,7 +644,7 @@ def test_callback_failures_do_not_log_secret_arguments(
 
 
 def test_an_expired_page_closes_and_wakes_waiters(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setattr(setup, "LIFETIME_SECONDS", 0.2)
     page = setup.serve(open_browser=False, actions=FakeActions())

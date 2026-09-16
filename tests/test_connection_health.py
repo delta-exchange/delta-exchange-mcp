@@ -438,7 +438,7 @@ def test_failed_environment_revocation_survives_backend_recovery(
 
 
 def test_removed_process_identity_does_not_leave_stale_health(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "stored-key", "stored-secret")
@@ -701,7 +701,7 @@ def test_environment_generation_expires_a_failed_disconnect_scope(
 
 
 def test_inactive_credential_change_expires_its_failed_generation_scope(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "prod-key", "prod-secret")
@@ -753,7 +753,7 @@ def test_inactive_credential_change_expires_its_failed_generation_scope(
 
 
 def test_first_process_identity_is_outside_empty_memory_coverage(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     original_revoke = connection.consent.revoke_environment
@@ -799,7 +799,7 @@ def test_first_process_identity_is_outside_empty_memory_coverage(
 
 
 def test_completed_process_identity_is_outside_incomplete_memory_coverage(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_API_KEY", "completed-process-key")
     connection = service(verified)
