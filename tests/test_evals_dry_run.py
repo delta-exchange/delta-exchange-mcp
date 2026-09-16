@@ -1,6 +1,5 @@
 """Keep eval tool selection separate from live mutation authorization."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -140,8 +139,8 @@ def test_tools_without_read_only_or_dry_run_are_blocked():
 
 
 def test_child_environment_isolates_settings_and_legacy_trading_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    monkeypatch,
+    tmp_path,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_ENV", "india_testnet")
     monkeypatch.setenv("DELTA_MCP_MODE", "trade")
@@ -153,7 +152,7 @@ def test_child_environment_isolates_settings_and_legacy_trading_mode(
 
 
 async def test_modern_discovery_lists_every_trade_tool_without_consent(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     async def disconnected(ctx: Context) -> authorization.AccessState:
         del ctx
@@ -218,7 +217,7 @@ async def test_modern_discovery_lists_every_trade_tool_without_consent(
 @pytest.mark.parametrize("dry_run", [None, False])
 async def test_selected_real_trade_requires_input_without_sending_a_mutation(
     dry_run: bool | None,
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     async def credentials_without_consent(ctx: Context) -> authorization.AccessState:
         del ctx
