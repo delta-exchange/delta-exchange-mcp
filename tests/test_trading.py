@@ -926,7 +926,7 @@ async def test_a_mutation_server_failure_has_an_unknown_outcome_without_retry():
 @pytest.mark.asyncio
 @respx.mock
 async def test_a_malformed_mutation_response_has_an_unknown_outcome_without_retry(
-    caplog: pytest.LogCaptureFixture,
+    caplog,
 ) -> None:
     caplog.set_level(logging.INFO, logger="delta_exchange_mcp")
     route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(

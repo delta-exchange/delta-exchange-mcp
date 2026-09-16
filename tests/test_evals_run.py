@@ -56,7 +56,7 @@ def _result() -> CaseResult:
 
 
 async def test_blocked_tool_fails_one_case_and_allows_later_cases(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     class Session:
         async def list_tools(self, *, cache_mode: str) -> SimpleNamespace:

@@ -67,9 +67,7 @@ class MatrixClients:
         return DeltaClient(config, http=http)
 
 
-async def test_complete_matrix_calls_only_the_four_get_endpoints_and_hides_data(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_complete_matrix_calls_only_the_four_get_endpoints_and_hides_data(caplog) -> None:
     clients = MatrixClients()
     caplog.set_level(logging.INFO)
 
