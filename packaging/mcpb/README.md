@@ -1,12 +1,11 @@
 # One-click bundle (`.mcpb`)
 
-Packages the server so a user installs it by double-clicking a file instead of
-hand-editing `claude_desktop_config.json`. The bundle does not request credentials or
-authorization settings. Account setup and trading consent use Manage Connection after the
-server starts.
+Packages the server so a non-technical user installs it by double-clicking a file and
+connects the account later in the browser. The install manifest asks for no API key,
+secret, environment, or trading mode.
 
 Bundles are supported by **Claude Desktop, Claude Code, and MCP for Windows**. Cursor,
-VS Code, Codex and Windsurf do not read `.mcpb` — they keep the existing `uvx` install.
+VS Code, Codex and Windsurf do not read `.mcpb`. They keep the existing `uvx` install.
 
 ## Build
 
@@ -22,45 +21,51 @@ local build and a release build are the same build.
 
 | File | |
 |---|---|
-| `build.sh` | Orchestration: wheel, project, lock, manifest, pack, verify. |
-| `make_bundle.py` | Generates `pyproject.toml` and `manifest.json`. **Edit copy here.** |
+| `build.sh` | Builds the wheel, lock, manifest, and bundle, then verifies the result. |
+| `make_bundle.py` | Generates `pyproject.toml` and `manifest.json`. Edit user-facing copy here. |
 | `verify.py` | Checks a built bundle. Run by `build.sh` and by CI. |
-| `mcpb_cli.sh` | Builds the mcpb CLI from a pinned upstream commit (see Caveats). |
+| `mcpb_cli.sh` | Builds the MCPB CLI from a pinned upstream commit. See Caveats. |
 | `sign.py` | Signs with that CLI, then checks the archive declares the signature. |
-| `manifest.json` | Generated, **committed** — the user-facing contract. CI fails if stale. |
+| `manifest.json` | Generated and committed. CI fails if it is stale. |
 | `pyproject.toml`, `uv.lock`, `wheels/`, `*.mcpb` | Generated, not committed. |
 
-## Nothing shared is written twice
+## Sources of truth
 
 `make_bundle.py` reads the repo's `pyproject.toml` for everything the bundle must agree
-with: name, version, licence, URLs, the Python floor, and the dependency ceilings. Restating
-any of those invites the two to drift, and it has already bitten once — the bundle used to
-carry its own copy of `mcp<2`, which would have silently pinned below the SDK the moment the
-project raised that ceiling.
+with: name, version, licence, URLs, the Python floor, and dependency limits. The generator
+reads the live server registry for tool names and descriptions. Authorization state does not
+change that registry.
 
-What stays literal is the copy shown to someone installing the bundle: the display name
-and descriptions. This copy differs from the PyPI summary because it explains the installed
-behavior rather than the package implementation. The bundle has no `user_config`: credentials,
-environment selection, and trading consent belong to Manage Connection.
+What stays literal is the copy shown to someone installing the bundle: `display_name`, the
+long description, and the keywords. This copy can differ from the PyPI summary because it
+addresses the person who installs the server.
+
+The manifest contains no `user_config` object and injects no environment values. The browser
+page owns account connection, environment selection, credential rotation, disconnect, and
+trading approval.
 
 ## What `verify.py` checks
 
-Packing successfully is not evidence that the bundle works. `build.sh` reports success only
-after these checks pass:
+Packing successfully is not evidence the bundle works, so `build.sh` will not report success
+until all of this passes:
 
-- the archive is valid for the strict ZIP parser that Claude Desktop uses
-- the payload contains exactly the expected files
-- the manifest has no install-time credential, environment, or mode settings
-- fresh public and externally managed processes complete real MCP handshakes
-- both processes expose the same stable tool list
-- all 13 trading tools identify themselves with `_meta["delta.exchange/mutating"]`
-- the runtime tool list exactly matches the committed manifest
+- A strict zip parser accepts the archive.
+- The archive contains only the expected payload and one wheel.
+- A fresh public-data unpack answers MCP 2026 `server/discover`, then `tools/list`.
+- A separate fresh unpack with synthetic process credentials answers the legacy `initialize`,
+  then `tools/list`.
+- Modern and legacy discovery return the same stable tool list.
+- The committed manifest and the runtime list match exactly.
+- The runtime list matches the approved set of 43 tool names.
+- The retired `get_profile`, `save_credentials`, and `save_mode` tools stay absent.
+- All 13 trading tools carry `_meta["delta.exchange/mutating"] = true`.
+- The manifest has no install prompts and injects no launch credentials.
 
-The public handshake has no Delta settings. The second handshake deliberately supplies a
-complete synthetic `india_devnet` process credential and the ignored legacy
-`DELTA_MCP_MODE=trade`. It does not call Delta or the operating-system credential service.
-The identical tool lists prove that credentials and legacy mode do not control discovery.
-All generated files and logs use the throwaway unpack directory.
+The second child process receives a complete synthetic `india_devnet` credential and the
+ignored legacy `DELTA_MCP_MODE=trade` value. Both processes receive separate configuration
+and log paths and a null keyring. The hostile values must not change the tool list or read a
+developer's credential store. Authorization tests cover whether calls can run. The bundle
+verifier covers the package and protocol contract.
 
 ## The icon
 
@@ -74,29 +79,37 @@ rsvg-convert -w 512 -h 512 favicon.svg -o icon.png
 
 ## Install to test
 
-Double-click the `.mcpb`, or drag it onto Claude Desktop. The install has no credential or
-mode form. After the server starts, call an account tool and open its Manage Connection link.
+Double-click the `.mcpb`, or drag it onto Claude Desktop. The install dialog has no
+credential or trading fields. After the server starts, ask the assistant to connect your
+Delta account. The server opens the short-lived browser page.
 
-The first install of any `uv` bundle needs network access and can be slow. The host resolves
-`uv`, runs `uv sync`, and downloads a Python interpreter and dependencies. It shows this as
-download progress.
+The first install of any `uv` bundle needs network and can be slow: the host resolves `uv`,
+then runs `uv sync`, which fetches a Python interpreter and the dependencies. It surfaces
+that as download progress.
 
 The extension lands in `~/Library/Application Support/Claude/Claude Extensions/`, one
-directory per extension, with the `.venv` beside the shipped payload. Inspect that directory
-and the app log when a bundle installs but does not start.
+directory per extension, with the `.venv` that `uv sync` built alongside the shipped payload.
+That directory and the app's own log are where to look when a bundle installs but will not
+start.
 
 ## Decisions
 
-**No install-time secrets or authorization.** The bundle manifest has no `user_config` and
-injects no `DELTA_API_KEY`, `DELTA_API_SECRET`, `DELTA_MCP_ENV`, or `DELTA_MCP_MODE`. This
-prevents a host configuration form from becoming a second credential store or an obsolete
-authorization path. The running server exposes one stable tool list. Account calls open
-Manage Connection when credentials are missing, and real mutations require browser consent
-for the exact client, environment, and credential identity.
+**The browser is the configuration interface.** The bundle does not ask for an API key,
+secret, environment, or mode during installation. `setup_credentials` has no secret
+arguments. It opens the same browser page as an account or trading call that needs input.
 
-The server still accepts a complete key and secret pair inherited by the process for
-compatibility. It treats this pair as externally managed and permits session-only consent.
-The legacy `DELTA_MCP_MODE` setting is ignored even when it is present in the ambient process.
+**The tool list is stable.** The bundle declares every market, account, export, status, and
+trading tool. An account call without credentials returns `input_required`. A real trading
+call without current consent does the same. All 13 trading tools accept `dry_run=true`
+without consent because a dry run sends no mutation.
+
+**Legacy trade mode has no authority.** A `DELTA_MCP_MODE=trade` value inherited from the app
+does not authorize a mutation. The verifier supplies that hostile value and confirms that it
+does not alter discovery. Call-time tests confirm that it does not authorize trading.
+
+**The manifest lists the exact runtime registry.** `tools_generated: false` promises that the
+server exposes no undeclared tool. The verifier requires equality in both directions. It also
+requires the modern and legacy protocol paths to return the same names.
 
 **`server.type: "uv"`.** No prerequisite on the user's machine — not `uv`, and not Python.
 Claude Desktop resolves `uv` in three steps: it looks for a system installation, else reuses
@@ -105,7 +118,7 @@ releases and clears the macOS quarantine attribute. It then runs `uv sync` again
 `pyproject.toml` and `uv.lock` shipped inside the bundle, letting `uv` fetch an interpreter
 meeting the `>=3.12` floor rather than requiring a system Python. Where the manifest says
 `"command": "uv"` the app discards that string and launches whichever binary it resolved, by
-absolute path — so nothing resolves against the user's `PATH` at launch, which matters
+absolute path. Nothing resolves against the user's `PATH` at launch, which matters
 because an app started from Finder inherits the launchd environment rather than a shell one.
 
 That removes the reason to consider `type: "binary"` with a PyInstaller executable. That
@@ -113,7 +126,7 @@ option existed only to drop a `uv` prerequisite which turns out not to exist, an
 have cost four platform builds plus Apple notarization.
 
 **Dependencies pinned and locked.** `uv.lock` ships inside the bundle and the launch line
-passes `--frozen`, so nothing re-resolves at start-up. The `uv sync` the host runs at install
+passes `--frozen`, so nothing re-resolves at startup. The `uv sync` the host runs at install
 time is a separate step and is not `--frozen`, but it consumes that same shipped lock, which
 is generated alongside the shipped `pyproject.toml` and so agrees with it.
 
