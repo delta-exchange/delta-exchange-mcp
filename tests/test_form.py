@@ -70,6 +70,28 @@ def test_page_configuration_is_secret_free_and_uses_shared_environment_urls() ->
     assert "api_secret" not in settings
 
 
+def test_the_page_carries_the_brand_face_rather_than_naming_it() -> None:
+    """Naming Aileron is not enough: nobody has it installed, and the CSP blocks fetches."""
+    html = form.page_html("/rpc", nonce="test-nonce")
+
+    assert html.count("@font-face") == 3
+    for weight in (400, 600, 700):
+        assert f"font-weight: {weight}" in html
+    assert 'src: url("data:font/woff2;base64,' in html
+    assert "font-family: Aileron," in html
+
+
+def test_the_api_key_page_opens_in_a_new_tab_and_cannot_reach_back() -> None:
+    """The key page is a destination: a popup blocker must not be able to swallow it."""
+    html = form.page_html("/rpc", nonce="test-nonce")
+
+    link = re.search(r"<a[^>]*\bid=\"dashboard\"[^>]*>", html)
+    assert link is not None, "the API key page must be a link, not a scripted window.open"
+    assert 'target="_blank"' in link.group(0)
+    assert 'rel="noopener noreferrer"' in link.group(0)
+    assert "window.open" not in html
+
+
 def test_devnet_is_hidden_until_an_external_devnet_connection_is_active() -> None:
     html = form.page_html("/rpc", nonce="test-nonce")
 
