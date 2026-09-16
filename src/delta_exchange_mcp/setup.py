@@ -214,6 +214,8 @@ class _Handler(BaseHTTPRequestHandler):
             len(body),
             csp=(
                 "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+                # The brand faces are embedded in the stylesheet, not fetched.
+                "font-src data:; "
                 f"style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; "
                 "connect-src 'self'"
             ),
