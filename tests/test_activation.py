@@ -146,7 +146,7 @@ async def test_tool_errors_expose_only_deliberate_safe_messages() -> None:
 
 
 async def test_debug_setting_does_not_change_tool_discovery(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "debug.log"))
     without_debug = build_server(
@@ -408,7 +408,7 @@ async def test_resumed_trade_never_executes_the_pending_mutation(
 
 
 async def test_final_checker_blocks_a_mutation_when_consent_changes_during_preflight(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     consent = True
     state_checks: list[bool] = []
@@ -563,7 +563,7 @@ async def test_every_trading_dry_run_works_without_consent_or_http(
 
 
 async def test_every_tool_that_changes_state_has_a_write_annotation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
     app = build_server()
@@ -578,7 +578,7 @@ async def test_every_tool_that_changes_state_has_a_write_annotation(
 
 
 async def test_non_idempotent_writes_do_not_invite_automatic_retries(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_AUDIT", "off")
     app = build_server()
