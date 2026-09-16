@@ -3,7 +3,6 @@
 import asyncio
 from collections.abc import Callable
 
-import pytest
 
 from delta_exchange_mcp import store
 from delta_exchange_mcp.auth.connection import ConnectionService
@@ -113,7 +112,7 @@ def test_environment_revocation_expires_for_an_external_credential_successor(
 
 
 def test_first_external_credential_is_outside_bounded_environment_risk(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     connection.credentials.replace("india_testnet", "test-key", "test-secret")
@@ -166,7 +165,7 @@ def test_first_external_credential_is_outside_bounded_environment_risk(
 
 
 def test_environment_failure_denies_the_identity_present_at_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     connection = service(verified)
     connection.credentials.replace("india_prod", "old-key", "old-secret")
@@ -261,7 +260,7 @@ def test_environment_failure_denies_the_identity_present_at_failure(
 
 
 def test_process_identity_is_not_retired_by_an_environment_switch(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("DELTA_MCP_ENV", "india_prod")
     monkeypatch.setenv("DELTA_API_KEY", "process-key")
