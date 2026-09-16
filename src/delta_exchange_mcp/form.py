@@ -293,6 +293,13 @@ __FONT_FACES__
     });
   }
 
+  // The listener stops after ten minutes, on completion, or when it is closed, and the
+  // operating system is then free to hand its port to another local process. A stale tab
+  // that keeps posting reaches either nothing or a stranger, so treat both as the same
+  // thing the user can act on rather than showing them a parser or network error.
+  var UNREACHABLE = "This page is no longer connected to the local MCP service. " +
+    "Return to your MCP client and open Manage Connection again.";
+
   function request(action, args) {
     return fetch(CONFIG.endpoint, {
       method: "POST",
@@ -307,7 +314,13 @@ __FONT_FACES__
     }).then(function (response) {
       var nextToken = response.headers.get("X-CSRF-Token");
       if (nextToken) csrfToken = nextToken;
-      return response.json().then(function (body) {
+      return response.text().then(function (raw) {
+        var body;
+        try {
+          body = JSON.parse(raw);
+        } catch (parseError) {
+          throw new Error(UNREACHABLE);
+        }
         if (body.revision !== undefined) revision = body.revision;
         if (!response.ok || body.error) {
           throw new Error((body.error && body.error.message) || "The action failed.");
@@ -317,6 +330,8 @@ __FONT_FACES__
           complete: body.complete === true
         };
       });
+    }, function () {
+      throw new Error(UNREACHABLE);
     });
   }
 
