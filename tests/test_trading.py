@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -709,7 +708,7 @@ async def test_a_mutation_connect_failure_says_nothing_was_sent():
 
 @pytest.mark.asyncio
 async def test_serializer_error_keeps_credentials_out_of_the_tool_and_audit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch
 ) -> None:
     marker = "private-api-key-marker"
     monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(tmp_path / "audit.log"))
