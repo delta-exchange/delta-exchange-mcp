@@ -62,7 +62,7 @@ def _require_one(product_id: int | None, product_symbol: str | None) -> None:
 
 
 def register(mcp: FastMCP, client: DeltaClient) -> None:
-    _uid_cache: dict[str, int] = {}
+    _uid_cache: dict[tuple[str, str], int] = {}
 
     def mutation_tool(
         function: Callable[..., Awaitable[Any]],
@@ -77,10 +77,13 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         return mcp.tool()(pinned)
 
     async def _user_id() -> int:
-        # Keyed by the credential in force, not cached once per process: credentials now
+        # Keyed by the whole HTTP identity, not cached once per process: credentials now
         # rotate without a restart, and a user_id left over from the previous account signs
-        # cleanly under the new key while naming someone else's positions to close.
-        cache_key = client.config.api_key or ""
+        # cleanly under the new key while naming someone else's positions to close. The
+        # base URL is part of the key because one key string can exist on both testnet and
+        # prod, where it identifies two different accounts.
+        live = client.config
+        cache_key = (live.base_url, live.api_key or "")
         if cache_key not in _uid_cache:
             prof = await client.get("/profile", auth=True)
             inner = prof.get("result", prof) if isinstance(prof, dict) else {}

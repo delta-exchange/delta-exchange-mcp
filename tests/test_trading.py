@@ -186,6 +186,44 @@ async def test_rotating_credentials_refetches_the_user_id():
     assert b'"user_id":222' in close.calls[1].request.content
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_the_same_key_string_on_two_sites_is_two_accounts():
+    """A key string is not an identity: testnet and prod issue them independently.
+
+    Keying the cache on the key alone would carry a testnet user_id into a prod close-all.
+    """
+    from delta_exchange_mcp.config import INDIA_PROD_REST
+
+    testnet_profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 111}})
+    )
+    prod_profile = respx.get(f"{INDIA_PROD_REST}/profile").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"id": 222}})
+    )
+    testnet_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    prod_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = FastMCP("test")
+    trading.register(mcp, client)
+    await mcp.call_tool("close_all_positions", {})
+
+    client.rebind(Config(
+        env="india_prod", base_url=INDIA_PROD_REST,
+        api_key="k1", api_secret="s1",
+    ))
+    await mcp.call_tool("close_all_positions", {})
+
+    assert testnet_profile.call_count == 1
+    assert prod_profile.call_count == 1
+    assert b'"user_id":111' in testnet_close.calls[0].request.content
+    assert b'"user_id":222' in prod_close.calls[0].request.content
+
+
 # --------------------------------------------- request shape, not a guardrail
 
 
