@@ -29,15 +29,13 @@ LONG_DESCRIPTION = (
     "Ask about Delta Exchange India in plain English: live prices, option chains, "
     "order books, funding and open-interest history, plus your own positions, orders, "
     "fills and balances.\n\n"
-    "**Read-only unless you change Mode.** Left at `read`, this cannot place, change or "
-    "cancel orders, and can never move funds. Set Mode to `trade` and it can place, edit "
-    "and cancel real orders on the environment you selected — there is no size limit, and "
-    "orders are sized in contracts rather than coins. Every mutation is written to an "
-    "audit log under `~/.delta-exchange-mcp/audit/`. Leave this at `read` unless you "
-    "specifically want an assistant trading your account.\n\n"
+    "**Your key decides what this can do.** A key with Trading permission lets an "
+    "assistant place, edit and cancel real orders on the environment you selected, as "
+    "soon as it is saved — there is no separate mode, no confirmation step, no size "
+    "limit, and orders are sized in contracts rather than coins. Give it a **Read Data** "
+    "key unless you specifically want an assistant trading your account.\n\n"
     "**Both credential fields or neither.** A key without its matching secret is ignored "
-    "and you get market data only — the two are always used together. Trading additionally "
-    "needs a key with trading permission, not just Read Data.\n\n"
+    "and you get market data only — the two are always used together.\n\n"
     "**Market data needs no setup** — leave the API key and secret empty and everything "
     "except your own account still works.\n\n"
     "**To see your account**, create a key at delta.exchange under Account → API Keys with "
@@ -71,16 +69,6 @@ USER_CONFIG = {
         "title": "Environment",
         "description": "india_prod (real) or india_testnet (practice).",
         "default": "india_prod",
-        "required": True,
-    },
-    # There is no enum type in user_config — only string, number, boolean, directory and
-    # file — so this is a string the user edits, exactly like environment above. It
-    # defaults to read: arming order placement has to be a thing someone chose to type.
-    "mode": {
-        "type": "string",
-        "title": "Mode",
-        "description": "read (default), or trade to allow placing orders.",
-        "default": "read",
         "required": True,
     },
 }
@@ -140,7 +128,6 @@ async def tool_entries() -> list[dict[str, str]]:
     *superset*. `tools_generated` is false, which promises the runtime never exposes anything
     beyond this list, so anything a user can switch on has to already be in it:
 
-    * Trade mode, reached through the install form's Mode field.
     * Debug, which registers `get_debug_status`. Nothing in the manifest declares
       DELTA_MCP_DEBUG, and the manifest env is applied *over* the user's environment, so an
       exported DELTA_MCP_DEBUG=1 reaches an installed bundle untouched — measured: 28 tools
@@ -150,7 +137,7 @@ async def tool_entries() -> list[dict[str, str]]:
     away the only way a bundle user can turn debug logging on at all — and that log is how
     they capture wire-level evidence for a bug report, since a bundle has no config file to
     edit. Listing the tool costs nothing by comparison: `tools_generated: false` promises a
-    ceiling, not an exact set, which is already how the 13 mutating tools are handled.
+    ceiling, not an exact set.
     """
     for name in [name for name in os.environ if name.startswith("DELTA_")]:
         del os.environ[name]
@@ -161,17 +148,11 @@ async def tool_entries() -> list[dict[str, str]]:
     # files left in /tmp, which is not the fix it looks like.
     with tempfile.TemporaryDirectory(prefix="mcpb-manifest-") as scratch:
         os.environ.update({
-            "DELTA_MCP_MODE": "trade",
             "DELTA_MCP_ENV": "india_prod",
             "DELTA_MCP_DEBUG": "1",
             "DELTA_MCP_DEBUG_FILE": str(pathlib.Path(scratch) / "debug.log"),
             "DELTA_API_KEY": "placeholder",
             "DELTA_API_SECRET": "placeholder",
-            # Trade mode plus credentials is what opens the audit log, and listing tool
-            # names mutates nothing worth auditing. Left on, every manifest build dropped
-            # another empty file into ~/.delta-exchange-mcp/audit/, which is where 4,493
-            # of them came from.
-            "DELTA_MCP_AUDIT": "off",
             # Clearing the variables above is not enough for this one: cleared, it falls
             # back to ~/.delta-exchange-mcp/config.env and the build reads the developer's
             # own settings. Measured: a DELTA_MCP_DEBUG=1 line in that file put
@@ -230,10 +211,6 @@ def render_manifest(proj: dict, tools: list[dict[str, str]]) -> dict:
                     "server/main.py",
                 ],
                 "env": {
-                    # Declared, not omitted. The host substitutes this from the form, whose
-                    # default is read, so an ambient DELTA_MCP_MODE=trade in the environment
-                    # the app was launched with cannot arm trading behind the user's back.
-                    "DELTA_MCP_MODE": "${user_config.mode}",
                     "DELTA_MCP_ENV": "${user_config.environment}",
                     "DELTA_API_KEY": "${user_config.api_key}",
                     "DELTA_API_SECRET": "${user_config.api_secret}",

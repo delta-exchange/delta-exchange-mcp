@@ -2,9 +2,9 @@
   "manifest_version": "0.4",
   "name": "delta-exchange-mcp",
   "display_name": "Delta Exchange",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Live market data and your Delta Exchange India account.",
-  "long_description": "Ask about Delta Exchange India in plain English: live prices, option chains, order books, funding and open-interest history, plus your own positions, orders, fills and balances.\n\n**Read-only unless you change Mode.** Left at `read`, this cannot place, change or cancel orders, and can never move funds. Set Mode to `trade` and it can place, edit and cancel real orders on the environment you selected \u2014 there is no size limit, and orders are sized in contracts rather than coins. Every mutation is written to an audit log under `~/.delta-exchange-mcp/audit/`. Leave this at `read` unless you specifically want an assistant trading your account.\n\n**Both credential fields or neither.** A key without its matching secret is ignored and you get market data only \u2014 the two are always used together. Trading additionally needs a key with trading permission, not just Read Data.\n\n**Market data needs no setup** \u2014 leave the API key and secret empty and everything except your own account still works.\n\n**To see your account**, create a key at delta.exchange under Account \u2192 API Keys with the **Read Data** permission. Both halves are shown only once, at creation. Paste them into Configure. Your key is stored by this app and is sent only to Delta's API, from your own machine.\n\n**Environment** must be `india_prod` for the real exchange, or `india_testnet` for the practice site at demo.delta.exchange. A key only works against the site it was made on.",
+  "long_description": "Ask about Delta Exchange India in plain English: live prices, option chains, order books, funding and open-interest history, plus your own positions, orders, fills and balances.\n\n**Your key decides what this can do.** A key with Trading permission lets an assistant place, edit and cancel real orders on the environment you selected, as soon as it is saved \u2014 there is no separate mode, no confirmation step, no size limit, and orders are sized in contracts rather than coins. Give it a **Read Data** key unless you specifically want an assistant trading your account.\n\n**Both credential fields or neither.** A key without its matching secret is ignored and you get market data only \u2014 the two are always used together.\n\n**Market data needs no setup** \u2014 leave the API key and secret empty and everything except your own account still works.\n\n**To see your account**, create a key at delta.exchange under Account \u2192 API Keys with the **Read Data** permission. Both halves are shown only once, at creation. Paste them into Configure. Your key is stored by this app and is sent only to Delta's API, from your own machine.\n\n**Environment** must be `india_prod` for the real exchange, or `india_testnet` for the practice site at demo.delta.exchange. A key only works against the site it was made on.",
   "author": {
     "name": "Delta Exchange",
     "url": "https://www.delta.exchange"
@@ -39,7 +39,6 @@
         "server/main.py"
       ],
       "env": {
-        "DELTA_MCP_MODE": "${user_config.mode}",
         "DELTA_MCP_ENV": "${user_config.environment}",
         "DELTA_API_KEY": "${user_config.api_key}",
         "DELTA_API_SECRET": "${user_config.api_secret}"
@@ -61,7 +60,7 @@
     },
     {
       "name": "cancel_batch_orders",
-      "description": "Cancel up to 50 orders on one contract in a single request."
+      "description": "Cancel orders on one contract in a single request."
     },
     {
       "name": "cancel_order",
@@ -69,7 +68,7 @@
     },
     {
       "name": "close_all_positions",
-      "description": "Close open positions in the scopes you set to true. Both flags default to false,"
+      "description": "Close every open position on the account, both cross/portfolio and isolated."
     },
     {
       "name": "configure_auto_topup",
@@ -77,7 +76,7 @@
     },
     {
       "name": "edit_batch_orders",
-      "description": "Edit up to 50 orders on one contract in a single request."
+      "description": "Edit orders on one contract in a single request."
     },
     {
       "name": "edit_bracket_order",
@@ -93,7 +92,7 @@
     },
     {
       "name": "get_connection_status",
-      "description": "Whether an API key is configured, where it points, and if a restart is due."
+      "description": "Whether an API key is configured and where it points."
     },
     {
       "name": "get_debug_status",
@@ -184,10 +183,6 @@
       "description": "Account-level trading volume / stats."
     },
     {
-      "name": "get_trading_status",
-      "description": "Trading mode status and the audit log path (None if auditing is disabled)."
-    },
-    {
       "name": "get_wallet_balances",
       "description": "Wallet balances across all assets."
     },
@@ -205,7 +200,7 @@
     },
     {
       "name": "place_batch_orders",
-      "description": "Place up to 50 orders on one contract in a single request."
+      "description": "Place orders on one contract in a single request."
     },
     {
       "name": "place_bracket_order",
@@ -218,10 +213,6 @@
     {
       "name": "save_credentials",
       "description": "Save a key typed into the credential form. Called by the form, not by you."
-    },
-    {
-      "name": "save_mode",
-      "description": "Change this client's access mode without reading or resubmitting its key."
     },
     {
       "name": "set_product_leverage",
@@ -253,13 +244,6 @@
       "title": "Environment",
       "description": "india_prod (real) or india_testnet (practice).",
       "default": "india_prod",
-      "required": true
-    },
-    "mode": {
-      "type": "string",
-      "title": "Mode",
-      "description": "read (default), or trade to allow placing orders.",
-      "default": "read",
       "required": true
     }
   },
