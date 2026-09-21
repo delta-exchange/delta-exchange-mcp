@@ -22,7 +22,8 @@ the request. Everything the server used to do above that line has been removed.
   use `DELTA_MCP_ENV=india_testnet`.
 - **The audit log is gone**, with `DELTA_MCP_AUDIT`, `DELTA_MCP_AUDIT_FILE`,
   `~/.delta-exchange-mcp/audit/` and the `get_trading_status` tool. Delta's own order and
-  fill history remains the record of what executed.
+  fill history remains the record of what executed. Upgrading does not delete audit files an
+  earlier version already wrote — they are yours to keep or remove.
 - **`close_all_positions` takes no arguments and closes the entire account**, both margin
   scopes. It previously refused a bare call and required opting into a scope. This is the
   sharpest behaviour change in the release.
