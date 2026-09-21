@@ -9,8 +9,7 @@ every successful save as an unnamed "Connected."
 import httpx
 import respx
 
-from delta_exchange_mcp import credentials, store
-from delta_exchange_mcp import config as config_mod
+from delta_exchange_mcp import credentials
 from delta_exchange_mcp.config import INDIA_TESTNET_REST
 
 KEY = "a-key"
@@ -63,29 +62,3 @@ async def test_an_unreachable_api_is_not_a_rejection():
     assert result.code == ""
 
 
-def test_override_detection_uses_one_store_snapshot(monkeypatch):
-    """An atomic file replacement is not evidence of a process-environment override."""
-    for name in ("DELTA_MCP_ENV", "DELTA_API_KEY", "DELTA_API_SECRET"):
-        monkeypatch.delenv(name, raising=False)
-    before = {
-        "DELTA_MCP_ENV": "india_testnet",
-        "DELTA_API_KEY": "before-key",
-        "DELTA_API_SECRET": "before-secret",
-    }
-    after = {
-        "DELTA_MCP_ENV": "india_prod",
-        "DELTA_API_KEY": "after-key",
-        "DELTA_API_SECRET": "after-secret",
-    }
-    reads = 0
-
-    def changing_store():
-        nonlocal reads
-        reads += 1
-        return before if reads == 1 else after
-
-    monkeypatch.setattr(store, "read", changing_store)
-
-    assert credentials.overridden_by_client() == []
-    assert reads == 1
-    assert config_mod.load(before).api_key == "before-key"

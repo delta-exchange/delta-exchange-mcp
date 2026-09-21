@@ -64,10 +64,9 @@ async def test_the_view_is_declared_as_an_app_rather_than_a_document(server):
 
 
 async def test_the_saving_tools_are_hidden_from_the_model(server):
-    """The model must not be able to call either mutation behind the form."""
+    """The model must not be able to call the mutation behind the form."""
     tools = {tool.name: tool for tool in await server.list_tools()}
     assert tools["save_credentials"].meta["ui"]["visibility"] == ["app"]
-    assert tools["save_mode"].meta["ui"]["visibility"] == ["app"]
 
 
 async def test_the_form_is_available_without_credentials(server):
@@ -128,11 +127,10 @@ def test_the_view_reads_the_host_context_it_asked_for():
     assert "ui/notifications/host-context-changed" in form.VIEW_HTML
 
 
-def test_the_view_restores_the_live_environment_and_can_save_mode_without_a_key():
-    """Reopening must not default to prod or require resubmitting the stored secret."""
+def test_the_view_restores_the_live_environment():
+    """Reopening must not default to prod and silently move someone's key elsewhere."""
     assert "selectEnv(now.environment)" in form.VIEW_HTML
-    assert "currentEnvironment = now.environment" in form.VIEW_HTML
-    assert 'name: modeOnly ? "save_mode" : "save_credentials"' in form.VIEW_HTML
+    assert 'name: "save_credentials"' in form.VIEW_HTML
 
 
 async def test_the_resource_says_who_draws_the_box(server):
@@ -313,9 +311,7 @@ async def test_a_clean_save_reports_its_facts_as_fields_not_only_as_a_sentence(
     assert structured["path"] == str(store.path())
     # This fixture registers the form with no `activate`, which is the branch that still
     # needs a restart; `test_activation.py` covers the one that does not.
-    assert structured["next_step"] == (
-        "Restart this client to use your account. Trading stays off for this client."
-    )
+    assert structured["next_step"] == "Restart this client to use your account."
     assert "someone@delta.exchange" in structured["message"]
 
     blob = json.dumps(structured)
@@ -329,7 +325,7 @@ async def test_saving_keeps_the_template_and_its_instructions(server, monkeypatc
 
     body = store.path().read_text()
     assert "Read Data" in body
-    assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
+    assert "Trading permission" in body  # the commented-out explanation survives
 
 
 async def test_the_credentials_never_appear_in_anything_the_tool_returns(server, monkeypatch):
