@@ -153,6 +153,59 @@ async def test_close_all_fetches_and_caches_user_id():
     assert b'"user_id":999' in close.calls[0].request.content
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_rotating_credentials_refetches_the_user_id():
+    """Credentials rotate without a restart now, so a per-process cache outlives its account.
+
+    A stale user_id signs cleanly under the new key and names the previous account's
+    positions, so close_all would report success having closed nothing the caller owns.
+    """
+    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+        side_effect=[
+            httpx.Response(200, json={"success": True, "result": {"id": 111}}),
+            httpx.Response(200, json={"success": True, "result": {"id": 222}}),
+        ]
+    )
+    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = FastMCP("test")
+    trading.register(mcp, client)
+    await mcp.call_tool("close_all_positions", {})
+
+    client.rebind(Config(
+        env="india_testnet", base_url=INDIA_TESTNET_REST,
+        api_key="k2", api_secret="s2",
+    ))
+    await mcp.call_tool("close_all_positions", {})
+
+    assert profile.call_count == 2
+    assert b'"user_id":111' in close.calls[0].request.content
+    assert b'"user_id":222' in close.calls[1].request.content
+
+
+# --------------------------------------------- request shape, not a guardrail
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_requires_exactly_one_identifier():
+    """Neither leaves a product-wide DELETE; both is ambiguous. Unsendable either way."""
+    client = _client()
+    for kwargs in ({}, {"id": 5, "client_order_id": "abc"}):
+        with pytest.raises(Exception, match="exactly one of id or client_order_id"):
+            await _call(client, "cancel_order", product_id=27, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_bracket_order_requires_at_least_one_leg():
+    """A bracket with no legs is a request with nothing to do; its contract says so."""
+    client = _client()
+    with pytest.raises(Exception, match="at least one of stop_loss_order or take_profit_order"):
+        await _call(client, "place_bracket_order", product_id=27)
+
+
 # --------------------------------------------------------------- account-wide by default
 
 

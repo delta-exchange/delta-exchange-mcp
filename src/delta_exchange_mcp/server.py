@@ -187,13 +187,17 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         session: ServerSession, expected: form.ExpectedState
     ) -> form.Activation:
         """Hot-apply form changes and report whether the authenticated tools are live."""
-        _, shared = await reconcile(session, notify=True)
+        effective, _ = await reconcile(session, notify=True)
+        # Compared against the configuration this session actually resolved, not against the
+        # file that was just written. A process-level DELTA_API_KEY outranks the file, so a
+        # save can land correctly and still leave the previous account live — and reporting
+        # the submitted account as connected would name an account nothing is talking to.
         identity_current = (
             expected.environment is None
             or (
-                (shared.get("DELTA_MCP_ENV") or "").strip() == expected.environment
-                and (shared.get("DELTA_API_KEY") or "").strip() == expected.api_key
-                and (shared.get("DELTA_API_SECRET") or "").strip() == expected.api_secret
+                effective.env == expected.environment
+                and effective.api_key == expected.api_key
+                and effective.api_secret == expected.api_secret
             )
         )
         return form.Activation(

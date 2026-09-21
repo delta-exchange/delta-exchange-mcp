@@ -77,14 +77,18 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         return mcp.tool()(pinned)
 
     async def _user_id() -> int:
-        if "id" not in _uid_cache:
+        # Keyed by the credential in force, not cached once per process: credentials now
+        # rotate without a restart, and a user_id left over from the previous account signs
+        # cleanly under the new key while naming someone else's positions to close.
+        cache_key = client.config.api_key or ""
+        if cache_key not in _uid_cache:
             prof = await client.get("/profile", auth=True)
             inner = prof.get("result", prof) if isinstance(prof, dict) else {}
             uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
             if uid is None:
                 raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
+            _uid_cache[cache_key] = int(uid)
+        return _uid_cache[cache_key]
 
     async def _finish(method: str, path: str, payload: dict[str, Any]) -> Any:
         payload = _clean(payload)
@@ -187,6 +191,8 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         client_order_id: str | None = Field(default=None, description="Your client_order_id."),
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
+        if (id is None) == (client_order_id is None):
+            raise ValueError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("DELETE", "/orders", payload)
 
@@ -289,6 +295,8 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         them). Prices are sent exactly as given.
         """
         _require_one(product_id, product_symbol)
+        if stop_loss_order is None and take_profit_order is None:
+            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,

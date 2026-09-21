@@ -699,8 +699,7 @@ def _client_name(ctx: Context) -> str:
 
     The session hangs off the request context, and FastMCP raises rather than returning
     None when there is none — which is what calling the tool in-process does, as the
-    tests do. An empty name is handled by the caller, since a trading mode that cannot be
-    scoped to a client must not be written at all.
+    tests do. An empty name is handled by the caller; it is reported back, not acted on.
     """
     try:
         params = ctx.session.client_params
@@ -906,10 +905,11 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
             return common | {
                 "status": "superseded",
                 "message": (
-                    "Another client changed the shared Delta settings after this key was "
-                    "checked and saved. This session follows those newer settings, so it "
-                    "is not claiming the checked account is connected. Reopen the form if "
-                    "you want to replace them."
+                    "Saved, but this session is not using it: either another client changed "
+                    "the shared Delta settings after this key was checked, or a DELTA_API_KEY, "
+                    "DELTA_API_SECRET or DELTA_MCP_ENV set in this server's own environment "
+                    "outranks the file. This session follows whatever it actually resolved, so "
+                    "it is not claiming the checked account is connected."
                 ),
             }
         if not result.reachable:

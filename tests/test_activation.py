@@ -289,10 +289,29 @@ async def test_a_concurrent_full_save_is_reported_as_superseded(accepted, monkey
 
         assert result["status"] == "superseded"
         assert "someone@delta.exchange" not in result["message"]
-        assert "newer settings" in result["message"]
+        assert "changed the shared Delta settings" in result["message"]
         status = await session.call("get_connection_status")
         assert status["environment"] == "india_prod"
         assert session.server.live_client.config.api_key == "newer-client-key"
+
+
+async def test_a_save_under_a_shell_export_is_not_reported_as_connected(accepted, monkeypatch):
+    """The process environment outranks the file, so a correct save can still not be live.
+
+    Reporting the checked account as connected would name an account the session is not
+    talking to: every later read and every order goes to the exported key instead.
+    """
+    monkeypatch.setenv("DELTA_API_KEY", "exported-in-the-shell-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "exported-in-the-shell-secret")
+    async with connected(client_name="Claude Desktop") as session:
+        result = await save(session)
+
+        assert result["status"] == "superseded"
+        assert "someone@delta.exchange" not in result["message"]
+        assert "DELTA_API_KEY" in result["message"]
+        assert session.server.live_client.config.api_key == "exported-in-the-shell-key"
+        # The file still carries what was typed: it is what every other client reads.
+        assert store.read()["DELTA_API_KEY"] == KEY
 
 
 def rejecting(code, detail="delta api error: raw [http 401] (context={...})", ip=""):
