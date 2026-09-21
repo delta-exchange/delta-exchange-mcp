@@ -19,8 +19,8 @@
 </div>
 
 Official MCP (Model Context Protocol) server for **Delta Exchange India**: market data for
-everyone, your own account read-only with an API key, and live trading only behind an
-explicit opt-in flag.
+everyone, and your own account — reads and live trading alike — with an API key. What the
+key is allowed to do is what the assistant can do.
 
 > [!NOTE]
 > **Beta.** Functional and used internally, but the tool surface and configuration may still
@@ -35,22 +35,21 @@ first**: the app fetches both itself. Unlike the Cursor and VS Code buttons, thi
 file download rather than a link that configures your editor; bundles are read only by Claude
 Desktop, Claude Code, and MCP for Windows.
 
-The form has four fields:
+The form has three fields:
 
 - **Environment** — which exchange to talk to: `india_prod` for the real one, or
   `india_testnet` for the practice site at demo.delta.exchange.
-- **API key** and **API secret** — fill them in to let the assistant read your own account.
-  Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys)
-  with the **Read Data** permission, which is the one that allows viewing but not trading.
-  Leaving them empty gives you market data only, unless you have already put a key in the
+- **API key** and **API secret** — fill them in to let the assistant reach your own account.
+  Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys).
+  Pick the **Read Data** permission, which allows viewing but not trading. Leaving them empty
+  gives you market data only, unless you have already put a key in the
   [shared file](#add-your-api-key), in which case that one is used.
-- **Mode** — defaults to `read`, which cannot place, change or cancel orders. Setting it to
-  `trade` adds the tools that do.
 
 > [!WARNING]
-> `trade` mode places **real orders with no size cap**, sized in **contracts rather than
-> coins**. It also needs an API key with trading permission, not just Read Data. Leave Mode
-> on `read` unless placing live orders is exactly what you want.
+> A key carrying the **Trading** permission can place **real orders with no size cap**, sized
+> in **contracts rather than coins**, from the moment it is saved. There is no separate mode,
+> no restart and no confirmation step. Give the server a **Read Data** key unless letting an
+> assistant trade your account is exactly what you want.
 
 <details>
 <summary><b>Claude Desktop — JSON config by hand</b> (also how you pin a specific version)</summary>

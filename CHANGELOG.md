@@ -6,7 +6,7 @@ bump and is marked BREAKING.
 
 ## 0.7.0
 
-### BREAKING — the trading guardrails are gone (DEA-881)
+### BREAKING — the trading guardrails are gone
 
 Trading is now gated solely by the API key's own permissions. A key with Trading permission
 can place orders as soon as it is configured; a Read Data key cannot, because Delta rejects
@@ -32,7 +32,9 @@ the request. Everything the server used to do above that line has been removed.
   the `partial_failure` annotation are both gone, so a short response is the only signal that
   some legs were not accepted.
 - **Client-side order validation is gone** — size, limit-price and bracket cross-field checks
-  now surface as Delta's own errors instead.
+  now surface as Delta's own errors instead. The checks that decide whether a request is
+  well-formed at all stay: one of `product_id`/`product_symbol`, exactly one of
+  `id`/`client_order_id` on `cancel_order`, and at least one leg on `place_bracket_order`.
 - **Prices are sent exactly as given.** The tick-rounding preflight is gone, so an off-tick
   price is rejected by Delta rather than silently snapped, and a priced order no longer costs
   a `GET /products` round trip first.
