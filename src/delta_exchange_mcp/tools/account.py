@@ -23,7 +23,6 @@ TOOL_NAMES = frozenset(
         "get_product_leverage",
         "get_trading_stats",
         "get_trading_preferences",
-        "get_profile",
         "bulk_fills_export",
     }
 )
@@ -365,11 +364,6 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     async def get_trading_preferences() -> dict[str, Any]:
         """User trading preferences (margin mode, notifications, etc.)."""
         return await client.get("/users/trading_preferences", auth=True)
-
-    @mcp.tool()
-    async def get_profile() -> dict[str, Any]:
-        """User profile."""
-        return await client.get("/profile", auth=True)
 
     @mcp.tool()
     async def bulk_fills_export(

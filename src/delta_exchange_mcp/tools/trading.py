@@ -38,7 +38,6 @@ TOOL_NAMES = frozenset(
         "edit_bracket_order",
         "set_product_leverage",
         "adjust_position_margin",
-        "close_all_positions",
         "configure_auto_topup",
     }
 )
@@ -73,7 +72,6 @@ _OUTCOME_UNKNOWN_BY_TOOL = {
     "edit_bracket_order": _ORDER_OUTCOME_UNKNOWN,
     "set_product_leverage": _LEVERAGE_OUTCOME_UNKNOWN,
     "adjust_position_margin": _POSITION_OUTCOME_UNKNOWN,
-    "close_all_positions": _POSITION_OUTCOME_UNKNOWN,
     "configure_auto_topup": _POSITION_OUTCOME_UNKNOWN,
 }
 
@@ -220,7 +218,6 @@ def register(
     active_lease: ContextVar[int | None] = ContextVar(
         f"delta_trade_lease_{id(gate)}", default=None
     )
-    _uid_cache: dict[str, int] = {}
     # tick_size keyed by both product id (int) and symbol (str); filled lazily.
     _tick_cache: dict[int | str, Decimal] = {}
     _tick_list_loaded = {"done": False}
@@ -309,16 +306,6 @@ def register(
             if changed:
                 adjustments.append({"field": name, "sent": raw, "normalized": snapped})
         return adjustments
-
-    async def _user_id() -> int:
-        if "id" not in _uid_cache:
-            prof = await client.get("/profile", auth=True)
-            inner = prof.get("result", prof) if isinstance(prof, dict) else {}
-            uid = inner.get("id") or inner.get("user_id") if isinstance(inner, dict) else None
-            if uid is None:
-                raise ValueError("could not resolve user_id from /profile")
-            _uid_cache["id"] = int(uid)
-        return _uid_cache["id"]
 
     async def _finish(
         tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
@@ -711,27 +698,6 @@ def register(
         return await _finish(
             "adjust_position_margin", "POST", "/positions/change_margin", payload, dry_run=dry_run
         )
-
-    @mutation_tool
-    async def close_all_positions(
-        close_all_portfolio: bool = Field(default=False, description="Close cross/portfolio-margined positions."),
-        close_all_isolated: bool = Field(default=False, description="Close isolated-margin positions."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
-    ) -> dict[str, Any]:
-        """Close open positions in the scopes you set to true. Both flags default to false,
-        so you must explicitly opt into a scope — this never broadens beyond your request.
-
-        Your user_id is required by the API and is resolved automatically from your profile
-        (fetched once and cached) — you do not pass it.
-        """
-        if not (close_all_portfolio or close_all_isolated):
-            raise ValueError("set at least one of close_all_portfolio or close_all_isolated to true")
-        payload = {
-            "close_all_portfolio": close_all_portfolio,
-            "close_all_isolated": close_all_isolated,
-            "user_id": await _user_id(),
-        }
-        return await _finish("close_all_positions", "POST", "/positions/close_all", payload, dry_run=dry_run)
 
     @mutation_tool
     async def configure_auto_topup(

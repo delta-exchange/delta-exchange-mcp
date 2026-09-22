@@ -1,4 +1,4 @@
-"""Trading tools: body signing, dry-run, validation, user_id caching, audit, mode gating."""
+"""Trading tools: body signing, dry-run, validation, audit, mode gating."""
 
 import asyncio
 import hashlib
@@ -306,29 +306,6 @@ async def test_batch_cap_enforced():
         await _call(client, "place_batch_orders", product_id=27, orders=orders)
 
 
-# --------------------------------------------------------------- user_id auto-fetch
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
-    )
-    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    mcp = FastMCP("test")
-    trading.register(mcp, client, None)
-    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
-    await mcp.call_tool("close_all_positions", {"close_all_portfolio": True})
-
-    assert profile.call_count == 1  # cached after first fetch
-    assert close.call_count == 2
-    assert b'"user_id":999' in close.calls[0].request.content
-
-
 # --------------------------------------------------------------- audit log
 
 
@@ -405,7 +382,7 @@ def test_trade_tools_present_in_trade_mode(monkeypatch):
         "place_order", "edit_order", "cancel_order", "cancel_all_orders",
         "place_batch_orders", "edit_batch_orders", "cancel_batch_orders",
         "place_bracket_order", "edit_bracket_order", "set_product_leverage",
-        "adjust_position_margin", "close_all_positions", "configure_auto_topup",
+        "adjust_position_margin", "configure_auto_topup",
     ):
         assert tool in names
 
@@ -420,7 +397,7 @@ async def test_all_trading_tools_declare_mutating_metadata():
     finally:
         await client.aclose()
 
-    assert len(tools) == 13
+    assert len(tools) == 12
     assert all(
         tool.meta == {trading.MUTATING_TOOL_META_KEY: True}
         for tool in tools
@@ -533,32 +510,6 @@ async def test_batch_no_partial_flag_when_all_succeed():
     ]
     out = await _call(client, "place_batch_orders", product_id=84, orders=orders)
     assert "partial_failure" not in out[1]
-
-
-# --------------------------------------------------------------- BUG-4: close_all scope
-
-
-@pytest.mark.asyncio
-async def test_close_all_requires_a_scope():
-    client = _client()
-    with pytest.raises(Exception, match="at least one of close_all_portfolio or close_all_isolated"):
-        await _call(client, "close_all_positions")
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_close_all_explicit_scope_not_broadened():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
-    )
-    route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    await _call(client, "close_all_positions", close_all_isolated=True)
-    body = route.calls[0].request.content
-    assert b'"close_all_isolated":true' in body
-    assert b'"close_all_portfolio":false' in body
 
 
 # --------------------------------------------------------------- BUG-5: place_order brackets
@@ -789,12 +740,6 @@ async def test_serializer_error_keeps_credentials_out_of_the_tool_and_audit(
             {"product_id": 27, "leverage": "10"},
             ("get_product_leverage",),
         ),
-        (
-            "close_all_positions",
-            "/positions/close_all",
-            {"close_all_portfolio": True},
-            ("get_margined_positions",),
-        ),
     ],
 )
 @respx.mock
@@ -804,13 +749,6 @@ async def test_unknown_outcome_names_the_correct_state_checks(
     arguments: dict[str, Any],
     expected: tuple[str, ...],
 ) -> None:
-    if tool == "close_all_positions":
-        respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-            return_value=httpx.Response(
-                200,
-                json={"success": True, "result": {"id": 99}},
-            )
-        )
     respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(
         side_effect=httpx.ReadTimeout("private transport detail")
     )
