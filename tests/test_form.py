@@ -124,6 +124,17 @@ def test_the_view_measures_content_rather_than_the_frame_it_sits_in():
     assert "getBoundingClientRect().height" in form.VIEW_HTML
 
 
+def test_the_done_state_does_not_depend_on_the_account_name():
+    """A probe that cannot name an account must still be able to finish the form.
+
+    Gating the swap on the account name stranded every credential save: the fields stayed
+    on screen with Save disabled, because the grant was already spent.
+    """
+    gate = re.search(r'if \(status === "saved".*?\)\s*\{', form.VIEW_HTML, re.S).group(0)
+    assert "payload.account" not in gate, f"the done state is gated on an account name: {gate}"
+    assert 'classList.add("done")' in form.VIEW_HTML
+
+
 def test_the_view_reads_the_host_context_it_asked_for():
     """The theme and the palette arrive in the `ui/initialize` result and in a notification.
 
