@@ -166,7 +166,8 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         creates an *entry-order* bracket whose id (the returned order id) is what
         edit_bracket_order expects. (place_bracket_order instead attaches a bracket to an open
         position; those legs are not editable via edit_bracket_order — cancel and re-place.)
-        Prices are sent exactly as given; the API rejects a price that is off the product tick.
+        Prices are sent exactly as given. Delta moves an off-tick price onto the product tick,
+        so the limit_price in the response is the one that applies.
         """
         _require_one(product_id, product_symbol)
         payload = {
@@ -206,7 +207,8 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Edit an open order. Pass exactly one of product_id or product_symbol.
 
-        Prices are sent exactly as given; the API rejects a price that is off the product tick.
+        Prices are sent exactly as given. Delta moves an off-tick price onto the product tick,
+        so the limit_price in the response is the one that applies.
         """
         _require_one(product_id, product_symbol)
         payload = {
