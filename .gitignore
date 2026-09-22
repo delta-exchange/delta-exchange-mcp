@@ -12,3 +12,6 @@ build/
 !.env.example
 uv.lock.bak
 .claude/
+evals/reports/
+.deepeval/
+.deepeval_telemetry.txt
