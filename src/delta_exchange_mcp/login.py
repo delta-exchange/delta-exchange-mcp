@@ -5,7 +5,7 @@ One of several front-ends onto the same shared settings file — the in-chat for
 hand-editing the file fills them too. The checking and writing live in `credentials`
 so all of them behave identically.
 
-This refuses to run without a terminal. `getpass` on its own does not: piping into it
+This refuses to run without a terminal. `getpass`, for one, does not: piping into it
 prints a warning and then reads stdin anyway, so `echo $KEY | delta-exchange-mcp login`
 would quietly succeed. That is exactly the shape an agent trying to be helpful would
 reach for, and it would put the secret into shell history and into the agent's
@@ -15,11 +15,20 @@ transcript — the two places this whole design exists to keep it out of.
 from __future__ import annotations
 
 import asyncio
-import getpass
+import codecs
+import os
 import sys
+from collections.abc import Iterator
+from typing import TextIO
 
 from delta_exchange_mcp import credentials, store
 from delta_exchange_mcp.config import BASE_URLS, DASHBOARDS, DEFAULT_ENV
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import termios
+    import tty
 
 
 def _ask_env(default: str = DEFAULT_ENV) -> str | None:
@@ -29,6 +38,82 @@ def _ask_env(default: str = DEFAULT_ENV) -> str | None:
         print(f"  not an environment: {answer}", file=sys.stderr)
         return None
     return answer
+
+
+def _ask_secret(prompt: str) -> str:
+    """Read a credential, echoing one * per character.
+
+    getpass echoes nothing, so a paste that never landed looks exactly like one that did.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    if os.name == "nt":
+        return _collect(_windows_chars(), sys.stdout)
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        return _collect(_posix_chars(fd), sys.stdout)
+    finally:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, saved)
+
+
+def _posix_chars(fd: int) -> Iterator[str]:
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        byte = os.read(fd, 1)
+        if not byte:
+            raise EOFError
+        yield from decoder.decode(byte)
+
+
+def _windows_chars() -> Iterator[str]:
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):  # first half of an arrow or function key
+            msvcrt.getwch()
+            continue
+        yield ch
+
+
+def _collect(chars: Iterator[str], out: TextIO) -> str:
+    """Build the credential from keystrokes, writing * for each character kept."""
+    typed: list[str] = []
+    for ch in chars:
+        if ch in ("\r", "\n"):
+            break
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch == "\x04":
+            if not typed:
+                raise EOFError
+        elif ch in ("\x7f", "\b"):
+            if typed:
+                typed.pop()
+                out.write("\b \b")
+        elif ch == "\x15":
+            out.write("\b \b" * len(typed))
+            typed.clear()
+        elif ch == "\x1b":
+            _skip_escape(chars)
+        elif ch >= " ":
+            typed.append(ch)
+            out.write("*")
+        out.flush()
+    out.write("\n")
+    out.flush()
+    return "".join(typed)
+
+
+def _skip_escape(chars: Iterator[str]) -> None:
+    """Drop an escape sequence: arrow keys, and the markers around a bracketed paste."""
+    kind = next(chars, "")
+    if kind == "[":
+        for ch in chars:
+            if "@" <= ch <= "~":
+                return
+    elif kind == "O":
+        next(chars, "")
 
 
 def run(verify: bool = True) -> int:
@@ -72,9 +157,9 @@ def run(verify: bool = True) -> int:
             "  current Delta documentation does not establish whether Read Data alone "
             "is sufficient\n"
         )
-        keep = "; Enter keeps saved" if can_keep_saved else ""
-        entered_key = getpass.getpass(f"API key (hidden{keep}): ").strip()
-        entered_secret = getpass.getpass(f"API secret (hidden{keep}): ").strip()
+        keep = " (Enter keeps saved)" if can_keep_saved else ""
+        entered_key = _ask_secret(f"API key{keep}: ").strip()
+        entered_secret = _ask_secret(f"API secret{keep}: ").strip()
     except (KeyboardInterrupt, EOFError):
         print("\ncancelled, nothing written", file=sys.stderr)
         return 1

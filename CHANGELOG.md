@@ -55,6 +55,8 @@ is rejected before it is saved, with a message naming the missing permission.
 ### Changed
 
 - `save_mode` is removed from the credential form, which now only saves credentials.
+- `login` shows a `*` for each character of the API key and secret, so a paste visibly
+  lands. It used to echo nothing.
 - The bundle manifest declares 43 tools, down from 46.
 
 ### Fixed

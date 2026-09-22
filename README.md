@@ -195,8 +195,8 @@ so and point you at one of the other two ways.
 > message is in the assistant's context and is stored in the conversation. The form exists
 > precisely so it isn't. If an assistant offers to take the key that way, decline.
 
-**At a terminal**, which prompts with the input hidden and checks the key works before
-saving anything:
+**At a terminal**, which shows a `*` for each character you type or paste and checks the
+key works before saving anything:
 
 ```bash
 uvx delta-exchange-mcp login
