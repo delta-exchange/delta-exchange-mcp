@@ -52,3 +52,16 @@ now checks a key against `/wallet/balances`.
 
 - `save_mode` is removed from the credential form, which now only saves credentials.
 - The bundle manifest declares 42 tools, down from 46.
+
+### Fixed
+
+- **Mutations are no longer retried after a transport error.** Resending after a lost
+  response could place an order twice. A connection that fails before the request is sent
+  returns `upstream_unreachable`; a failure after it may have reached Delta returns
+  `execution_outcome_unknown` and names the reads that show whether it landed. `GET`
+  requests keep their bounded retries.
+- The debug log refuses a directory that another OS user owns or can write to, checking
+  every path component including symlink targets.
+- The bundle build caches the mcpb CLI under `~/.cache/delta-exchange-mcp/mcpb-cli` rather
+  than the shared temporary directory, and checks the cache's ownership before running
+  anything from it.
