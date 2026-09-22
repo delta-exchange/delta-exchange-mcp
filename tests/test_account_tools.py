@@ -45,22 +45,10 @@ def _ok(json_body: Any = None) -> httpx.Response:
     return httpx.Response(200, json=json_body or {"success": True, "result": []})
 
 
-def test_every_account_tool_is_registered():
+def test_all_account_tools_registered():
     names = set(_build_tools())
-    expected = {
-        "get_positions",
-        "get_margined_positions",
-        "get_wallet_balances",
-        "get_wallet_transactions",
-        "get_fills",
-        "get_open_orders",
-        "get_order_history",
-        "get_order_by_id",
-        "get_product_leverage",
-        "get_trading_stats",
-        "get_trading_preferences",
-    }
-    assert expected.issubset(names)
+    assert names == set(account.TOOL_NAMES)
+    assert "get_profile" not in names
 
 
 @pytest.mark.asyncio
@@ -250,7 +238,9 @@ async def test_get_trading_stats():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_trading_preferences():
-    route = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(return_value=_ok())
+    route = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=_ok({"success": True, "result": {"user_id": 57354187}})
+    )
     await _call_tool("get_trading_preferences")
     assert route.called
 

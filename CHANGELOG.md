@@ -24,6 +24,9 @@ the request. Everything the server used to do above that line has been removed.
   `~/.delta-exchange-mcp/audit/` and the `get_trading_status` tool. Delta's own order and
   fill history remains the record of what executed. Upgrading does not delete audit files an
   earlier version already wrote — they are yours to keep or remove.
+- **`close_all_positions` takes no arguments and closes the entire account**, both margin
+  scopes. It previously refused a bare call and required opting into a scope. This is the
+  sharpest behaviour change in the release.
 - **`cancel_all_orders` loses its order-kind flags** and always cancels every kind.
   `product_id` and `contract_types` still narrow it.
 - **Batch tools are uncapped** and return Delta's response unchanged. The 50-order limit and
@@ -42,16 +45,17 @@ the request. Everything the server used to do above that line has been removed.
   `get_connection_status` now returns `{environment, credentials_configured,
   account_tools_available, trading_tools_available, client_name, version, view_build}`.
 
-### BREAKING — `get_profile` and `close_all_positions` are gone
+### BREAKING — `get_profile` is gone
 
-Delta retired `/profile` for API-key requests, so `get_profile` failed on every call, and so
-did `close_all_positions`, which read the account's `user_id` from it. The credential form
-now checks a key against `/wallet/balances`.
+Delta retired `/profile` for API-key requests, so `get_profile` failed on every call.
+`close_all_positions` and the credential form's key check also depended on it and now read
+the account from `/users/trading_preferences`. A key without permission for that endpoint
+is rejected before it is saved, with a message naming the missing permission.
 
 ### Changed
 
 - `save_mode` is removed from the credential form, which now only saves credentials.
-- The bundle manifest declares 42 tools, down from 46.
+- The bundle manifest declares 43 tools, down from 46.
 
 ### Fixed
 

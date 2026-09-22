@@ -338,8 +338,10 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="row">
       <label class="reveal"><input id="show" type="checkbox">Show what I typed</label>
       <button id="create" class="link" type="button" aria-disabled="true">
-        Get a key &mdash; Read Data is enough</button>
+        Get a key in Delta API management</button>
     </div>
+    <p class="note">The key must have permission for trading preferences. Current Delta
+      documentation does not establish whether Read Data alone is sufficient.</p>
 
     <button id="save" type="button" aria-disabled="true">Check and save</button>
   </div>
@@ -562,7 +564,7 @@ _TEMPLATE = """<!DOCTYPE html>
       // Only a clean save swaps the form out. The other two stored cases still need the
       // fields, because what they say is "saved, and here is what to fix".
       if (status === "saved") {
-        doneWho.textContent = payload.account ? "Connected as " + payload.account : "Connected";
+        doneWho.textContent = payload.account ? "Connected to account " + payload.account : "Connected";
         doneWhere.textContent = "Saved to " + (payload.path || "this computer");
         doneNext.textContent = payload.next_step || "";
         againEl.textContent = "Use another key";
@@ -680,10 +682,7 @@ def _rejection(env: str, result: credentials.Check) -> str:
             "were pasted in full."
         )
     if result.code in _NO_PERMISSION:
-        return (
-            "This key cannot read your account. Give it the Read Data permission under "
-            "Account → API Keys on Delta, then save again."
-        )
+        return credentials.TRADING_PREFERENCES_PERMISSION_MESSAGE
     if result.code in _IP_BLOCKED:
         seen = f" It saw {result.ip}." if result.ip else ""
         return (
@@ -918,12 +917,14 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
             return common | {
                 "status": "unverified",
                 "message": (
-                    f"Saved to {store.path()}, but Delta could not be reached to check "
+                    f"Saved to {store.path()}, but Delta could not verify "
                     f"it. {result.detail} {follow_up}"
                 ),
             }
 
-        who = f" as {result.detail}" if result.detail else ""
+        # The account id is the only API-key identity Delta now exposes. Include it so the
+        # user can distinguish "saved" from "saved the wrong account's key".
+        who = f" to account {result.detail}" if result.detail else ""
         # The same facts twice: as fields, because the view renders them as its own
         # connected state rather than printing a paragraph, and as one sentence, because
         # that is what a client without a view has to show.

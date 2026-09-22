@@ -132,6 +132,100 @@ async def test_place_order_includes_bracket_params():
     assert b'"bracket_stop_loss_price":"60000"' in body
 
 
+# --------------------------------------------------------------- user_id auto-fetch
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_all_fetches_and_caches_user_id():
+    prefs = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 999}})
+    )
+    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = FastMCP("test")
+    trading.register(mcp, client)
+    await mcp.call_tool("close_all_positions", {})
+    await mcp.call_tool("close_all_positions", {})
+
+    assert prefs.call_count == 1  # cached after first fetch
+    assert close.call_count == 2
+    assert b'"user_id":999' in close.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_rotating_credentials_refetches_the_user_id():
+    """Credentials rotate without a restart now, so a per-process cache outlives its account.
+
+    A stale user_id signs cleanly under the new key and names the previous account's
+    positions, so close_all would report success having closed nothing the caller owns.
+    """
+    prefs = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        side_effect=[
+            httpx.Response(200, json={"success": True, "result": {"user_id": 111}}),
+            httpx.Response(200, json={"success": True, "result": {"user_id": 222}}),
+        ]
+    )
+    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = FastMCP("test")
+    trading.register(mcp, client)
+    await mcp.call_tool("close_all_positions", {})
+
+    client.rebind(Config(
+        env="india_testnet", base_url=INDIA_TESTNET_REST,
+        api_key="k2", api_secret="s2",
+    ))
+    await mcp.call_tool("close_all_positions", {})
+
+    assert prefs.call_count == 2
+    assert b'"user_id":111' in close.calls[0].request.content
+    assert b'"user_id":222' in close.calls[1].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_the_same_key_string_on_two_sites_is_two_accounts():
+    """A key string is not an identity: testnet and prod issue them independently.
+
+    Keying the cache on the key alone would carry a testnet user_id into a prod close-all.
+    """
+    from delta_exchange_mcp.config import INDIA_PROD_REST
+
+    testnet_prefs = respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 111}})
+    )
+    prod_prefs = respx.get(f"{INDIA_PROD_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 222}})
+    )
+    testnet_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    prod_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    mcp = FastMCP("test")
+    trading.register(mcp, client)
+    await mcp.call_tool("close_all_positions", {})
+
+    client.rebind(Config(
+        env="india_prod", base_url=INDIA_PROD_REST,
+        api_key="k1", api_secret="s1",
+    ))
+    await mcp.call_tool("close_all_positions", {})
+
+    assert testnet_prefs.call_count == 1
+    assert prod_prefs.call_count == 1
+    assert b'"user_id":111' in testnet_close.calls[0].request.content
+    assert b'"user_id":222' in prod_close.calls[0].request.content
+
+
 # --------------------------------------------- request shape, not a guardrail
 
 
@@ -167,6 +261,23 @@ async def test_cancel_all_cancels_every_order_kind():
     assert b'"cancel_limit_orders":"true"' in body
     assert b'"cancel_stop_orders":"true"' in body
     assert b'"cancel_reduce_only_orders":"true"' in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_all_positions_takes_no_scope_and_closes_everything():
+    """A bare call closes the whole account: both margin scopes, no opt-in (DEA-881)."""
+    respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {"user_id": 5}})
+    )
+    route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    client = _client()
+    await _call(client, "close_all_positions")
+    body = route.calls[0].request.content
+    assert b'"close_all_portfolio":true' in body
+    assert b'"close_all_isolated":true' in body
 
 
 # --------------------------------------------------------------- batches pass through
@@ -207,6 +318,24 @@ def test_trading_tools_absent_without_credentials():
     mcp = build_server(cfg)
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert not (trading.TOOL_NAMES & names)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_trading_permission_error_does_not_name_the_validation_endpoint() -> None:
+    respx.delete(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(
+            403,
+            json={"success": False, "error": {"code": "UnauthorizedApiAccess"}},
+        )
+    )
+
+    with pytest.raises(Exception) as exc:
+        await _call(_client(), "cancel_order", product_id=27, id=81)
+
+    message = str(exc.value)
+    assert "lacks permission for this endpoint" in message
+    assert "trading preferences" not in message
 
 
 # ------------------------------------------------------- transport-failure safety
@@ -320,6 +449,12 @@ async def test_serializer_error_keeps_credentials_out_of_the_tool_error() -> Non
             {"product_id": 27, "leverage": "10"},
             ("get_product_leverage",),
         ),
+        (
+            "close_all_positions",
+            "/positions/close_all",
+            {},
+            ("get_margined_positions",),
+        ),
     ],
 )
 @respx.mock
@@ -329,6 +464,13 @@ async def test_unknown_outcome_names_the_correct_state_checks(
     arguments: dict[str, Any],
     expected: tuple[str, ...],
 ) -> None:
+    if tool == "close_all_positions":
+        respx.get(f"{INDIA_TESTNET_REST}/users/trading_preferences").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "result": {"user_id": 99}},
+            )
+        )
     respx.request("POST", f"{INDIA_TESTNET_REST}{path}").mock(
         side_effect=httpx.ReadTimeout("private transport detail")
     )

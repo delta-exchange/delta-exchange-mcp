@@ -41,9 +41,10 @@ The form has three fields:
   `india_testnet` for the practice site at demo.delta.exchange.
 - **API key** and **API secret** — fill them in to let the assistant reach your own account.
   Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys).
-  Pick the **Read Data** permission, which allows viewing but not trading. Leaving them empty
-  gives you market data only, unless you have already put a key in the
-  [shared file](#add-your-api-key), in which case that one is used.
+  Pick the **Read Data** permission, which allows viewing but not trading. Current Delta
+  documentation does not establish whether Read Data alone is sufficient for account reads.
+  Leaving the fields empty gives you market data only, unless you have already put a key in
+  the [shared file](#add-your-api-key), in which case that one is used.
 
 > [!WARNING]
 > A key carrying the **Trading** permission can place **real orders with no size cap**, sized
@@ -122,8 +123,8 @@ superset of the one above it:
 | Tier | You set | Unlocks |
 |---|---|---|
 | Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices |
-| Account, read-only | a **Read Data** API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats |
-| Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin |
+| Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, preferences |
+| Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin, close-all |
 
 A key without its matching secret is ignored and you stay on market data — the two are
 always used together.
@@ -138,8 +139,9 @@ boundary that actually holds, because it is enforced on Delta's side rather than
 > [!WARNING]
 > What this will **not** do: cap notional or position size, ask you to confirm before
 > sending, rehearse an order without sending it, keep a local record of what it sent,
-> convert between contracts and coins, or judge whether an order makes sense. Those are your
-> responsibility. Try `DELTA_MCP_ENV=india_testnet` first.
+> convert between contracts and coins, or judge whether an order makes sense. `close_all_positions`
+> takes no arguments and closes your entire account. Those are your responsibility. Try
+> `DELTA_MCP_ENV=india_testnet` first.
 
 To keep an assistant off your orders, give it a Read Data key. To let it trade, give it one
 with Trading permission — and note that Delta requires an IP whitelist entry on such keys.
@@ -147,6 +149,9 @@ with Trading permission — and note that Delta requires an IP whitelist entry o
 The one thing that has not changed: unlike GET reads, mutations are never auto-retried on a
 timeout or a rate limit. A failure is surfaced, not silently re-sent, because re-sending an
 order can place it twice.
+
+Delta checks permission for each endpoint. An `UnauthorizedApiAccess` response means the
+key cannot reach that endpoint; it does not mean the key is invalid.
 
 ## Add your API key
 
@@ -222,14 +227,13 @@ this file.
 
 1. Create it at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
 2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
-3. **Read Data** permission is enough for the read tiers, and is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved.
-4. **IP whitelisting is only for trading.** Delta requires whitelisted IPs to create a key with Trading permission; a read-only key needs none. If a key does carry a whitelist, Delta blocks other IPs and names the one it saw in the error.
+3. **Read Data** permission is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved. Current Delta documentation does not establish whether Read Data alone covers every account read.
+4. Delta can reject a request when its source IP is not on the key's whitelist. The error names the IP that Delta received, so you can update the key in API management.
 5. **Match the environment**: a key from delta.exchange works only with `india_prod`, one from demo.delta.exchange only with `india_testnet`. Mixing them returns `InvalidApiKey`.
 
-The in-chat form and `login` both check all four for you and refuse to save a key Delta
-rejects, so you find out while you still have the key in front of you rather than the next
-time you ask a question. Both also write `DELTA_MCP_ENV` alongside the key, so point 5
-takes care of itself.
+The in-chat form and `login` check the credential pair against the account identity endpoint
+and refuse to save a key that Delta rejects. Both also write `DELTA_MCP_ENV` alongside the
+key, so the environment stays with the credential pair.
 
 ### Settings reference
 
@@ -507,6 +511,10 @@ stay absent.
 - **Your key is the boundary.** The server applies no gate of its own: a key with Trading
   permission can place orders as soon as it is saved, and a Read Data key cannot, because
   Delta rejects it. Choose the permission you actually want.
+- **API key permission.** Delta checks permission for each endpoint. An
+  `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
+  it does not prove that the key is invalid. Current Delta documentation does not establish
+  whether Read Data alone is sufficient for account reads.
 - **No rehearsal, no confirmation, no caps.** Orders go out as sent. There is no dry run, no
   local record of what was sent, and no notional or size limit.
 - **No silent retries.** Mutations are never auto-retried on a timeout or rate limit; a

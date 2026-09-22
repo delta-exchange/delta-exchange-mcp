@@ -12,9 +12,23 @@ from dataclasses import dataclass
 import httpx
 
 from delta_exchange_mcp import store
+from delta_exchange_mcp.account_identity import (
+    InvalidIdentityResponse,
+    fetch_account_identity,
+)
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import BASE_URLS, Config
-from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure
+from delta_exchange_mcp.errors import (
+    DeltaApiError,
+    is_auth_failure,
+    is_permission_failure,
+)
+
+TRADING_PREFERENCES_PERMISSION_MESSAGE = (
+    "API key lacks permission for trading preferences. Update its account-data "
+    "permissions in Delta API management. Current Delta documentation does not "
+    "establish whether Read Data alone is sufficient."
+)
 
 
 @dataclass(frozen=True)
@@ -39,29 +53,33 @@ class Check:
 async def check(env: str, key: str, secret: str) -> Check:
     """One authenticated call, so four documented failures surface here and not later.
 
-    A wrong environment for the key, an unwhitelisted IP, a key without Read Data, and
-    a truncated paste are all invisible until something signs a request. Doing it while
-    the person is still holding the key turns each into a message they can act on.
-
-    Any signed read proves all four, so the endpoint is only a probe. `detail` names the
-    account when a probe can report one, which /wallet/balances cannot.
+    A wrong environment for the key, an unwhitelisted IP, a key without permission for
+    trading preferences, and a truncated paste are all invisible until something signs a
+    request. Doing it while the person is still holding the key turns each into a message
+    they can act on.
     """
     cfg = Config(env=env, base_url=BASE_URLS[env], api_key=key, api_secret=secret)  # type: ignore[arg-type]
     client = DeltaClient(cfg)
     try:
-        await client.get("/wallet/balances", auth=True)
+        identity = await fetch_account_identity(client)
     except DeltaApiError as exc:
         return Check(
             ok=False,
-            reachable=is_auth_failure(exc),
-            detail=str(exc),
+            reachable=is_auth_failure(exc) or is_permission_failure(exc),
+            detail=(
+                TRADING_PREFERENCES_PERMISSION_MESSAGE
+                if is_permission_failure(exc)
+                else str(exc)
+            ),
             code=exc.code,
             ip=exc.ip or "",
         )
     except httpx.HTTPError as exc:
         return Check(ok=False, reachable=False, detail=f"could not reach Delta: {exc}")
+    except InvalidIdentityResponse as exc:
+        return Check(ok=False, reachable=False, detail=f"invalid account response: {exc}")
     else:
-        return Check(ok=True, reachable=True, detail="")
+        return Check(ok=True, reachable=True, detail=str(identity.user_id))
     finally:
         await client.aclose()
 

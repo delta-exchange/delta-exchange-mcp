@@ -15,6 +15,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
 
@@ -31,6 +32,7 @@ TOOL_NAMES = frozenset(
         "edit_bracket_order",
         "set_product_leverage",
         "adjust_position_margin",
+        "close_all_positions",
         "configure_auto_topup",
     }
 )
@@ -60,6 +62,7 @@ _OUTCOME_UNKNOWN_BY_TOOL = {
     "edit_bracket_order": _ORDER_OUTCOME_UNKNOWN,
     "set_product_leverage": _LEVERAGE_OUTCOME_UNKNOWN,
     "adjust_position_margin": _POSITION_OUTCOME_UNKNOWN,
+    "close_all_positions": _POSITION_OUTCOME_UNKNOWN,
     "configure_auto_topup": _POSITION_OUTCOME_UNKNOWN,
 }
 
@@ -88,6 +91,7 @@ def _require_one(product_id: int | None, product_symbol: str | None) -> None:
 
 
 def register(mcp: FastMCP, client: DeltaClient) -> None:
+    _uid_cache: dict[tuple[str, str], int] = {}
 
     def mutation_tool(
         function: Callable[..., Awaitable[Any]],
@@ -110,6 +114,18 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
                     raise DeltaApiError(e.code, context=unknown_outcome, status=e.status) from e
 
         return mcp.tool()(pinned)
+
+    async def _user_id() -> int:
+        # Keyed by the whole HTTP identity, not cached once per process: credentials now
+        # rotate without a restart, and a user_id left over from the previous account signs
+        # cleanly under the new key while naming someone else's positions to close. The
+        # base URL is part of the key because one key string can exist on both testnet and
+        # prod, where it identifies two different accounts.
+        live = client.config
+        cache_key = (live.base_url, live.api_key or "")
+        if cache_key not in _uid_cache:
+            _uid_cache[cache_key] = (await fetch_account_identity(client)).user_id
+        return _uid_cache[cache_key]
 
     async def _finish(method: str, path: str, payload: dict[str, Any]) -> Any:
         payload = _clean(payload)
@@ -379,6 +395,22 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         """Add or remove isolated margin on a position."""
         payload = {"product_id": product_id, "delta_margin": delta_margin}
         return await _finish("POST", "/positions/change_margin", payload)
+
+    @mutation_tool
+    async def close_all_positions() -> dict[str, Any]:
+        """Close every open position on the account, both cross/portfolio and isolated.
+
+        WARNING: this closes the whole account. There is no narrower scope.
+
+        Your user_id is required by the API and is resolved automatically from your trading
+        preferences (cached per account) — you do not pass it.
+        """
+        payload = {
+            "close_all_portfolio": True,
+            "close_all_isolated": True,
+            "user_id": await _user_id(),
+        }
+        return await _finish("POST", "/positions/close_all", payload)
 
     @mutation_tool
     async def configure_auto_topup(
