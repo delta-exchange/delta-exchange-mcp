@@ -266,6 +266,23 @@ class DeltaClient:
                 )
             except httpx.HTTPError as e:
                 last_error = e
+                # Transport failures retry only for GETs. A mutation may have reached
+                # Delta before the response was lost, so resending it can duplicate the
+                # mutation. The original exception remains the cause for local debugging,
+                # but its text can contain serialized headers and must not reach users.
+                if method != "GET":
+                    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        raise DeltaApiError(
+                            "upstream_unreachable",
+                            context="the connection failed before the mutation was sent; retry is safe",
+                        ) from e
+                    raise DeltaApiError(
+                        "execution_outcome_unknown",
+                        context=(
+                            "the transport failed after the mutation may have been sent; "
+                            "reconcile its state before another attempt"
+                        ),
+                    ) from e
                 if attempt == 2:
                     raise
                 continue

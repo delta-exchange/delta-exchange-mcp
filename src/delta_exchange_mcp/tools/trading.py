@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from delta_exchange_mcp.client import DeltaClient
+from delta_exchange_mcp.errors import DeltaApiError
 
 TOOL_NAMES = frozenset(
     {
@@ -35,6 +36,32 @@ TOOL_NAMES = frozenset(
 )
 
 _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
+_ORDER_OUTCOME_UNKNOWN = (
+    "The order mutation may have reached Delta. Do not resubmit it. "
+    "Use get_open_orders and get_order_history to reconcile the order state first."
+)
+_LEVERAGE_OUTCOME_UNKNOWN = (
+    "The leverage change may have reached Delta. Do not resubmit it. "
+    "Use get_product_leverage to read the current leverage first."
+)
+_POSITION_OUTCOME_UNKNOWN = (
+    "The position change may have reached Delta. Do not resubmit it. "
+    "Use get_margined_positions to read the current position state first."
+)
+_OUTCOME_UNKNOWN_BY_TOOL = {
+    "place_order": _ORDER_OUTCOME_UNKNOWN,
+    "edit_order": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_order": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_all_orders": _ORDER_OUTCOME_UNKNOWN,
+    "place_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "edit_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "cancel_batch_orders": _ORDER_OUTCOME_UNKNOWN,
+    "place_bracket_order": _ORDER_OUTCOME_UNKNOWN,
+    "edit_bracket_order": _ORDER_OUTCOME_UNKNOWN,
+    "set_product_leverage": _LEVERAGE_OUTCOME_UNKNOWN,
+    "adjust_position_margin": _POSITION_OUTCOME_UNKNOWN,
+    "configure_auto_topup": _POSITION_OUTCOME_UNKNOWN,
+}
 
 
 def _bs(value: bool | None) -> str | None:
@@ -65,12 +92,22 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     def mutation_tool(
         function: Callable[..., Awaitable[Any]],
     ) -> Callable[..., Awaitable[Any]]:
-        """Pin every request in one dispatched mutation to the same client state."""
+        """Pin every request in one dispatched mutation to the same client state.
+
+        A transport failure after the mutation was sent leaves its outcome unknown, so the
+        error names the reads that settle it before anyone resubmits.
+        """
+        unknown_outcome = _OUTCOME_UNKNOWN_BY_TOOL[function.__name__]
 
         @wraps(function)
         async def pinned(*args: Any, **kwargs: Any) -> Any:
             async with client.pin():
-                return await function(*args, **kwargs)
+                try:
+                    return await function(*args, **kwargs)
+                except DeltaApiError as e:
+                    if e.code != "execution_outcome_unknown":
+                        raise
+                    raise DeltaApiError(e.code, context=unknown_outcome, status=e.status) from e
 
         return mcp.tool()(pinned)
 
