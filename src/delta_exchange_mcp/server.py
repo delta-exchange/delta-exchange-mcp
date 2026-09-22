@@ -17,6 +17,7 @@ from delta_exchange_mcp import audit_log
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import credentials, debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import hints
 from delta_exchange_mcp import identity
 from delta_exchange_mcp import request
 from delta_exchange_mcp import store
@@ -163,7 +164,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         trading.register(mcp, client, trade_audit, trade_gate)
         live = armed
 
-        @mcp.tool()
+        @mcp.tool(annotations=hints.reads("Trading status", external=False))
         def get_trading_status() -> dict[str, object]:
             """Trading mode status and the audit log path (None if auditing is disabled).
 
@@ -309,7 +310,10 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     # first key, and someone with one still rotates it, switches environment, or changes mode.
     form.register(mcp, activate)
 
-    @mcp.tool()
+    # Read-only despite reconciling: it changes what this process believes to match the
+    # settings file, rather than changing anything outside the process. Nobody needs to
+    # hesitate before asking whether they are connected.
+    @mcp.tool(annotations=hints.reads("Connection status", external=False))
     async def get_connection_status(ctx: Context) -> dict[str, object]:
         """Whether an API key is configured, where it points, and if a restart is due.
 
@@ -362,7 +366,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
 
     if log_path is not None:
 
-        @mcp.tool()
+        @mcp.tool(annotations=hints.reads("Debug status", external=False))
         def get_debug_status() -> dict[str, object]:
             """Whether debug logging is on and the absolute path of the current log file.
 
