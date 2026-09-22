@@ -215,13 +215,13 @@ async def test_replacing_a_key_already_in_use_rebinds_without_a_restart(accepted
 async def test_a_rotated_key_signs_the_next_account_request(accepted):
     """Hot status is not enough: the shared client must actually use the new identity."""
     rotated = "rotated-in-the-form-key"
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
     )
     async with connected() as session:
         await save(session)
         await save(session, api_key=rotated)
-        await session.call("get_profile")
+        await session.call("get_wallet_balances")
 
     assert route.called
     assert route.calls.last.request.headers["api-key"] == rotated
@@ -233,15 +233,15 @@ async def test_the_first_save_rebinds_market_and_account_tools_to_one_environmen
     ticker = respx.get(f"{config_mod.INDIA_TESTNET_REST}/tickers/BTCUSD").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {"symbol": "BTCUSD"}})
     )
-    profile = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    balances = respx.get(f"{config_mod.INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {"id": 7}})
     )
     async with connected() as session:
         await save(session)
         await session.call("get_ticker", symbol="BTCUSD")
-        await session.call("get_profile")
+        await session.call("get_wallet_balances")
 
-    assert ticker.called and profile.called
+    assert ticker.called and balances.called
 
 
 async def test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one(accepted):
