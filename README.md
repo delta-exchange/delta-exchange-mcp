@@ -179,10 +179,10 @@ account* and a small form appears inline:
 Connect my Delta Exchange account
 ```
 
-It asks four things: which site the key was made on (delta.exchange or the practice site at
-demo.delta.exchange), what the assistant should be allowed to do (read only, or read and
-trade), then the key and the secret. It checks the key against Delta before saving, and once
-it saves it replaces itself with the account it connected, so you can see which one you got.
+It asks three things: which site the key was made on (delta.exchange or the practice site at
+demo.delta.exchange), then the key and the secret. What the assistant can do follows from the
+key's own permissions. It checks the key against Delta before saving, and once it saves it
+replaces itself with the account it connected, so you can see which one you got.
 
 What you type in that form goes straight to the file. It is not part of the conversation
 and the assistant cannot read it, because the form runs in its own frame rather than in
