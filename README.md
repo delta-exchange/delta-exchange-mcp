@@ -19,8 +19,8 @@
 </div>
 
 Official MCP (Model Context Protocol) server for **Delta Exchange India**: market data for
-everyone, your own account read-only with an API key, and live trading only behind an
-explicit opt-in flag.
+everyone, and your own account — reads and live trading alike — with an API key. What the
+key is allowed to do is what the assistant can do.
 
 > [!NOTE]
 > **Beta.** Functional and used internally, but the tool surface and configuration may still
@@ -35,24 +35,23 @@ first**: the app fetches both itself. Unlike the Cursor and VS Code buttons, thi
 file download rather than a link that configures your editor; bundles are read only by Claude
 Desktop, Claude Code, and MCP for Windows.
 
-The form has four fields:
+The form has three fields:
 
 - **Environment** — which exchange to talk to: `india_prod` for the real one, or
   `india_testnet` for the practice site at demo.delta.exchange.
-- **API key** and **API secret** — fill them in to let the assistant read your own account.
-  Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys)
-  with permission for the account endpoints that you plan to use. Current Delta
-  documentation does not establish whether **Read Data** alone is sufficient. Authenticated
-  testnet verification of the exact Read Data and Trading permission matrix is still
-  pending. Leaving the fields empty gives you market data only, unless you have already put
-  a key in the [shared file](#add-your-api-key), in which case that one is used.
-- **Mode** — defaults to `read`, which cannot place, change or cancel orders. Setting it to
-  `trade` adds the tools that do.
+- **API key** and **API secret** — fill them in to let the assistant reach your own account.
+  Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys).
+  Pick the **Read Data** permission, which allows viewing but not trading. Current Delta
+  documentation does not establish whether Read Data alone is sufficient for account reads;
+  authenticated testnet verification of the exact Read Data and Trading permission matrix is
+  still pending. Leaving the fields empty gives you market data only, unless you have
+  already put a key in the [shared file](#add-your-api-key), in which case that one is used.
 
 > [!WARNING]
-> `trade` mode places **real orders with no size cap**, sized in **contracts rather than
-> coins**. The key must have permission for every trading endpoint that the server calls.
-> Leave Mode on `read` unless placing live orders is exactly what you want.
+> A key carrying the **Trading** permission can place **real orders with no size cap**, sized
+> in **contracts rather than coins**, from the moment it is saved. There is no separate mode,
+> no restart and no confirmation step. Give the server a **Read Data** key unless letting an
+> assistant trade your account is exactly what you want.
 
 <details>
 <summary><b>Claude Desktop — JSON config by hand</b> (also how you pin a specific version)</summary>
@@ -119,64 +118,41 @@ exchange, verbatim from a Claude Desktop session against the live API:
 
 ## Capabilities
 
-What the server can do is decided entirely by settings — three tiers, each a strict superset
-of the one above it:
+What the server can do is decided entirely by your API key — three tiers, each a strict
+superset of the one above it:
 
-| Tier | You set | Unlocks | Audit-logged |
-|---|---|---|---|
-| Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices | — |
-| Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, preferences | — |
-| Trading | a key plus `DELTA_MCP_MODE=trade` in one client's config | Place / edit / cancel orders, brackets, leverage, margin, close-all | Yes |
+| Tier | You set | Unlocks |
+|---|---|---|
+| Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices |
+| Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, preferences |
+| Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin, close-all |
 
 A key without its matching secret is ignored and you stay on market data — the two are
 always used together.
 
-### Trading (opt-in)
+### Trading
 
-The flag is checked before the first tool list of a session, so the tools are absent from
-that list entirely rather than present and refusing — an assistant that never sees them
-cannot be talked into using them. Turning trading off removes those tools immediately;
-turning it on still requires a new session.
+**The key's permissions are the only gate.** There is no mode to set and no restart to do:
+save a key with Trading permission and the order tools are there. Save a Read Data key and
+they are still listed, but Delta rejects every order the assistant sends — which is the
+boundary that actually holds, because it is enforced on Delta's side rather than here.
 
 > [!WARNING]
-> What trade mode will **not** do: cap notional or position size, ask you to confirm before
-> sending, convert between contracts and coins, or judge whether an order makes sense. Those
-> are your responsibility. Try `DELTA_MCP_ENV=india_testnet` first.
+> What this will **not** do: cap notional or position size, ask you to confirm before
+> sending, rehearse an order without sending it, keep a local record of what it sent,
+> convert between contracts and coins, or judge whether an order makes sense. `close_all_positions`
+> takes no arguments and closes your entire account. Those are your responsibility. Try
+> `DELTA_MCP_ENV=india_testnet` first.
 
-The quickest way is the credential form: ask your assistant to connect your Delta account,
-pick **Read and trade** in "What should the assistant be able to do?", and restart that app.
-Trading turns on for that app alone — every other client on the machine stays read-only,
-because the form stores the choice under that client's own name rather than a shared one.
+To keep an assistant off your orders, give it a Read Data key. To let it trade, give it one
+with Trading permission — and note that Delta requires an IP whitelist entry on such keys.
 
-Or set it yourself, in the config of the one client you mean to trade from:
+The one thing that has not changed: unlike GET reads, mutations are never auto-retried on a
+timeout or a rate limit. A failure is surfaced, not silently re-sent, because re-sending an
+order can place it twice.
 
-```jsonc
-"delta-exchange-mcp": {
-  "command": "uvx",
-  "args": ["delta-exchange-mcp"],
-  "env": { "DELTA_MCP_MODE": "trade" }
-}
-```
-
-This is the one setting that is never read from the shared file described in
-[Add your API key](#add-your-api-key) under its own name. Everything else there is
-convenience; this one places real orders, so it is always tied to one client rather than
-arming every assistant on the machine at once. The form does not change that — it writes
-`DELTA_MCP_MODE_<READABLE>_<DIGEST>`, keyed on the exact name the client gives during its
-handshake, and that key is read only by a client reporting that exact name. The readable
-part is just a label; the digest keeps punctuation variants from collapsing onto one key.
-This is convenience scoping, not authentication — a client can claim the same name.
-`DELTA_MCP_MODE` in a client's own config still wins over it.
-
-Safety features:
-
-- **Dry run.** Every mutating tool takes a `dry_run` flag. When `true`, the tool validates and returns the exact payload it *would* send, without sending it. Ask the assistant to "place the order as a dry run first."
-- **Audit log.** Every mutation (real or dry-run) is appended as one JSON line to `~/.delta-exchange-mcp/audit/` (owner-only `0600`). On by default in trade mode; disable with `DELTA_MCP_AUDIT=off`. The log records the tool, params, and result/order id — **never** credentials. Ask the assistant "where is the audit log?".
-- **No silent retries.** Unlike GET reads, mutations are never auto-retried on timeout or rate-limit — a failure is surfaced, not re-sent.
-- **API key permission.** Delta checks permission for each endpoint. An
-  `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
-  it does not prove that the key is invalid. Current Delta documentation does not establish
-  whether Read Data alone is sufficient for account reads.
+Delta checks permission for each endpoint. An `UnauthorizedApiAccess` response means the
+key cannot reach that endpoint; it does not mean the key is invalid.
 
 ## Add your API key
 
@@ -241,8 +217,8 @@ for the connection status can also make a running server reconcile safe external
 The in-chat form usually needs neither: it atomically moves market and account calls to the
 saved environment and key, registers the account tools there, and tells the client its tool
 list changed — so first-time setup, environment changes, and key rotation become usable in
-the same conversation. Enabling trade mode still needs a new session. Turning it off takes
-effect immediately.
+the same conversation, including the trading tools — they follow the key, so saving one that
+carries Trading permission brings them up in the same session.
 
 If your client has its own place to put credentials — the Claude Desktop bundle's form, VS
 Code's prompts, the Codex desktop app's fields — those still work and take precedence over
@@ -252,7 +228,7 @@ this file.
 
 1. Create it at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
 2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
-3. Choose permissions that allow the account and trading endpoints that you plan to call. Current Delta documentation does not establish whether **Read Data** alone is sufficient. Authenticated testnet verification of the exact Read Data and Trading permission matrix is still pending.
+3. **Read Data** permission is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved. Current Delta documentation does not establish whether Read Data alone covers every account read. Authenticated testnet verification of the exact Read Data and Trading permission matrix is still pending.
 4. Delta can reject a request when its source IP is not on the key's whitelist. The error names the IP that Delta received, so you can update the key in API management.
 5. **Match the environment**: a key from delta.exchange works only with `india_prod`, one from demo.delta.exchange only with `india_testnet`. Mixing them returns `InvalidApiKey`.
 
@@ -269,13 +245,10 @@ through to the file.
 | Var | Default | Shared file? | Purpose |
 |---|---|---|---|
 | `DELTA_MCP_ENV` | `india_prod` | yes | `india_prod`, `india_testnet`, or `india_devnet`. |
-| `DELTA_API_KEY` | _(unset)_ | yes | API key. Optional; when set with `DELTA_API_SECRET`, account tools register. |
+| `DELTA_API_KEY` | _(unset)_ | yes | API key. Optional; when set with `DELTA_API_SECRET`, the account and trading tools register. What the key may actually do is decided by its own permissions on Delta's side. |
 | `DELTA_API_SECRET` | _(unset)_ | yes | API secret matching `DELTA_API_KEY`. |
-| `DELTA_MCP_MODE` | `read` | **no** | `trade` registers the trading tools (requires API key + secret). Per client on purpose — see [Trading](#trading-opt-in). The credential form writes a per-client `DELTA_MCP_MODE_<READABLE>_<DIGEST>` into the shared file instead; this name still wins over it. |
 | `DELTA_MCP_DEBUG` | _(unset)_ | yes | `1`/`true`/`yes`/`on` writes HTTP request URLs and response bodies to a log file (see [Debugging](#debugging--reporting-a-bug)). |
 | `DELTA_MCP_DEBUG_FILE` | _(auto)_ | yes | Override the debug log path. Default: `~/.delta-exchange-mcp/logs/debug-<timestamp>-<pid>.log`. |
-| `DELTA_MCP_AUDIT` | _(on in trade mode)_ | yes | Set `off`/`false`/`0`/`no` to disable the trading audit log. On by default whenever `DELTA_MCP_MODE=trade`. |
-| `DELTA_MCP_AUDIT_FILE` | _(auto)_ | yes | Override the audit log path. Default: `~/.delta-exchange-mcp/audit/audit-<timestamp>-<pid>.log`. |
 | `DELTA_MCP_CONFIG_FILE` | _(auto)_ | n/a | Move the shared file itself. Default: `~/.delta-exchange-mcp/config.env`. |
 
 The key and its secret are always taken from the same place. If either is set in your
@@ -536,8 +509,17 @@ stay absent.
 
 ## Safety
 
-- **Read-only by default.** Trading tools register only with the explicit `DELTA_MCP_MODE=trade` opt-in; otherwise every tool is a GET and the server cannot place, edit, or cancel orders.
-- **Auditable mutations.** When trading is on, every mutation is dry-runnable and written to an owner-only audit log; mutations are never auto-retried.
+- **Your key is the boundary.** The server applies no gate of its own: a key with Trading
+  permission can place orders as soon as it is saved, and a Read Data key cannot, because
+  Delta rejects it. Choose the permission you actually want.
+- **API key permission.** Delta checks permission for each endpoint. An
+  `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
+  it does not prove that the key is invalid. Current Delta documentation does not establish
+  whether Read Data alone is sufficient for account reads.
+- **No rehearsal, no confirmation, no caps.** Orders go out as sent. There is no dry run, no
+  local record of what was sent, and no notional or size limit.
+- **No silent retries.** Mutations are never auto-retried on a timeout or rate limit; a
+  failure is surfaced rather than re-sent, because re-sending an order can place it twice.
 - **Local stdio only.** Per-user keys never leave your machine; no shared hosted endpoint.
 - **Read the code.** It's a financial-tool MCP; treat it like one.
 
@@ -734,8 +716,8 @@ Maintainers: see [`RELEASING.md`](RELEASING.md) for the release procedure.
 
 ## Roadmap
 
-- **Now**: public market data, authenticated read-only account access, and opt-in trading with dry-run and an audit log.
-- **Next**: richer guardrails (notional / position-size caps, confirmation prompts).
+- **Now**: public market data, authenticated read-only account access, and trading gated only
+  by the API key's own permissions.
 
 ## Feedback & issues
 

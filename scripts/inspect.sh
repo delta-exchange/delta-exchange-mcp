@@ -39,7 +39,6 @@ export SERVER_PORT="${SERVER_PORT:-6277}"
 
 ENV_ARGS=(
   -e "DELTA_MCP_ENV=${DELTA_MCP_ENV:-india_testnet}"
-  -e "DELTA_MCP_MODE=${DELTA_MCP_MODE:-read}"
 )
 if [[ -n "${DELTA_API_KEY:-}" ]]; then
   ENV_ARGS+=(-e "DELTA_API_KEY=${DELTA_API_KEY}")

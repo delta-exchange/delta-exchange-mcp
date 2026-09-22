@@ -19,7 +19,6 @@ import time
 import zipfile
 from pathlib import Path
 
-MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
 
 
 def check_archive(mcpb: Path) -> None:
@@ -69,14 +68,12 @@ def check_archive(mcpb: Path) -> None:
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
+def launch_env(manifest: dict, workdir: Path) -> dict[str, str]:
     """The environment a host would build, over a deliberately hostile one.
 
-    The ambient half sets DELTA_MCP_MODE=trade and supplies credentials, which is what a
-    machine with those exported looks like. The manifest half is then applied on top with
-    ${user_config.x} resolved the way the host resolves it. Checking the result is what
-    makes "the form decides the mode, not the environment" an actual test rather than an
-    assertion that passes because no credentials were present.
+    The ambient half supplies credentials, which is what a machine with those exported
+    looks like. The manifest half is then applied on top with ${user_config.x} resolved the
+    way the host resolves it.
 
     DELTA_MCP_DEBUG is in the ambient half and *not* declared by the manifest, which is the
     point: the manifest env is applied over the user's environment, so an undeclared variable
@@ -85,24 +82,20 @@ def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
     variable. With it, that check is what proves the declared list is a real ceiling.
 
     Everything the server writes is pointed at `workdir`, the throwaway unpack: the debug log
-    that turning debug on creates, the audit log that trade mode with credentials opens, and
-    the shared settings file. That last one is not tidiness — the server reads
-    ~/.delta-exchange-mcp/config.env for anything the manifest does not declare, so a
-    developer with DELTA_MCP_DEBUG=1 in their own file would fail the undeclared-tool check
-    here for a reason CI could never reproduce. Left at their defaults, every build also
-    wrote three files into a home directory a build has no business touching.
+    that turning debug on creates, and the shared settings file. That last one is not
+    tidiness — the server reads ~/.delta-exchange-mcp/config.env for anything the manifest
+    does not declare, so a developer with DELTA_MCP_DEBUG=1 in their own file would fail the
+    undeclared-tool check here for a reason CI could never reproduce.
     """
     config = {k: v.get("default", "") for k, v in manifest["user_config"].items()}
-    config.update({"mode": mode, "api_key": "placeholder", "api_secret": "placeholder"})
+    config.update({"api_key": "placeholder", "api_secret": "placeholder"})
 
     env = dict(os.environ)
     env.update({
-        "DELTA_MCP_MODE": "trade",
         "DELTA_API_KEY": "ambient",
         "DELTA_API_SECRET": "ambient",
         "DELTA_MCP_DEBUG": "1",
         "DELTA_MCP_DEBUG_FILE": str(workdir / "debug.log"),
-        "DELTA_MCP_AUDIT_FILE": str(workdir / "audit.log"),
         "DELTA_MCP_CONFIG_FILE": str(workdir / "shared-config.env"),
     })
     for key, raw in manifest["server"]["mcp_config"]["env"].items():
@@ -216,15 +209,6 @@ def handshake(
     return {tool["name"]: tool for tool in seen[2]["result"]["tools"]}
 
 
-def mutation_names(tools: dict[str, dict]) -> list[str]:
-    """Return tools whose registration explicitly identifies them as mutating."""
-    return sorted(
-        name
-        for name, tool in tools.items()
-        if tool.get("_meta", {}).get(MUTATING_TOOL_META_KEY) is True
-    )
-
-
 def main() -> None:
     mcpb = Path(sys.argv[1]).resolve()
     print(f"verifying {mcpb.name}")
@@ -236,34 +220,22 @@ def main() -> None:
             z.extractall(tmp)
         manifest = json.loads((tmp / "manifest.json").read_text())
 
-        # Someone who accepted the form's defaults, on a machine whose environment is
-        # already asking for trade mode. The declared default has to win.
-        default = handshake(
-            tmp, launch_env(manifest, manifest["user_config"]["mode"]["default"], tmp)
-        )
-        leaked = mutation_names(default)
-        print(f"  default mode: {len(default)} tools, {len(leaked)} mutating")
-        if leaked:
-            raise SystemExit(
-                "the default install can mutate: an ambient DELTA_MCP_MODE=trade reached "
-                f"the server and registered {', '.join(leaked[:5])}"
-            )
-        if not default:
+        # A configured install: credentials reach the server, so every surface registers.
+        # Since DEA-881 the API key's own permissions are the only gate, and the trading
+        # tools are expected to be present rather than held back behind a mode.
+        installed = handshake(tmp, launch_env(manifest, tmp))
+        print(f"  installed: {len(installed)} tools")
+        if not installed:
             raise SystemExit("no tools registered")
-
-        # And the opt-in has to actually reach trading, or the field is decorative.
-        opted = handshake(tmp, launch_env(manifest, "trade", tmp))
-        mutating = mutation_names(opted)
-        print(f"  mode=trade:   {len(opted)} tools, {len(mutating)} mutating")
-        if not mutating:
-            raise SystemExit("opting into trade registered no mutation tools")
+        if "place_order" not in installed:
+            raise SystemExit(
+                "a credentialled install registered no trading tools; the surface is "
+                "supposed to follow the key, not a mode"
+            )
 
         # tools_generated is false, which promises the manifest lists everything reachable.
-        # Both runs, not just the trade one: an undeclared tool that a variable in the user's
-        # own environment switches on appears in the default install too, and that is the
-        # install almost everyone has.
         declared = {t["name"] for t in manifest["tools"]}
-        undeclared = (set(default) | set(opted)) - declared
+        undeclared = set(installed) - declared
         if undeclared:
             raise SystemExit(
                 "manifest declares tools_generated=false but the server registers "

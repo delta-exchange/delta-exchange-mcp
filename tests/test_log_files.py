@@ -8,40 +8,31 @@ from pathlib import Path
 
 import pytest
 
-from delta_exchange_mcp import audit_log, debug_log
+from delta_exchange_mcp import debug_log
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 
 
 @pytest.fixture(autouse=True)
-def clear_logs(monkeypatch):
-    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+def clear_logs():
     yield
     debug_log.shutdown()
 
 
-@pytest.mark.parametrize("kind", ["audit", "debug"])
-def test_fallback_ignores_preexisting_shared_directory(tmp_path, monkeypatch, kind):
+def test_fallback_ignores_preexisting_shared_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
     shared = tmp_path / "delta-exchange-mcp"
     shared.mkdir(mode=0o777)
-    planted = shared / f"{kind}.log"
+    planted = shared / "debug.log"
     planted.write_text("attacker content\n")
     planted.chmod(0o666)
-    monkeypatch.setenv(f"DELTA_MCP_{kind.upper()}_FILE", str(blocked / planted.name))
-    cfg = Config(env="india_testnet", base_url=INDIA_TESTNET_REST, mode="trade", debug=True)
+    monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(blocked / planted.name))
+    cfg = Config(env="india_testnet", base_url=INDIA_TESTNET_REST, debug=True)
 
-    if kind == "audit":
-        audit = audit_log.configure(cfg)
-        assert audit is not None
-        audit.record("place_order", {"private_order": 42})
-        path = audit.path
-        assert audit_log.configure(cfg) is audit
-    else:
-        path = debug_log.configure(cfg)
-        logging.getLogger("delta_exchange_mcp").info("private_order 42")
-        assert debug_log.configure(cfg) == path
+    path = debug_log.configure(cfg)
+    logging.getLogger("delta_exchange_mcp").info("private_order 42")
+    assert debug_log.configure(cfg) == path
 
     assert path is not None
     assert path.parent != shared
@@ -52,29 +43,11 @@ def test_fallback_ignores_preexisting_shared_directory(tmp_path, monkeypatch, ki
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_audit_rejects_path_replacement_before_next_record(tmp_path, capsys):
-    path = tmp_path / "audit.log"
-    audit = audit_log.AuditLog(path, "india_testnet")
-    audit.record("place_order", {"id": 1})
-    saved = path.rename(tmp_path / "original.log")
-    target = tmp_path / "target.log"
-    target.write_text("untouched")
-    target.chmod(0o600)
-    try:
-        path.symlink_to(target)
-    except OSError:
-        pytest.skip("symlink creation is unavailable")
-    audit.record("place_order", {"id": 2})
-    assert target.read_text() == "untouched"
-    assert '"id": 1' in saved.read_text()
-    assert "audit write failed" in capsys.readouterr().err
-
-
 def test_private_existing_log_appends_and_relative_override_works(tmp_path, monkeypatch):
     from delta_exchange_mcp.log_files import open_log
 
     monkeypatch.chdir(tmp_path)
-    path = Path("logs/audit.log")
+    path = Path("logs/debug.log")
     with open_log(path) as stream:
         stream.write("first\n")
     with open_log(path) as stream:
@@ -89,7 +62,7 @@ def test_rejects_unsafe_existing_log_without_writing(tmp_path, attack):
 
     parent = tmp_path / "logs"
     parent.mkdir()
-    path = parent / "audit.log"
+    path = parent / "debug.log"
     if attack == "fifo":
         os.mkfifo(path, 0o600)
     else:
@@ -112,7 +85,7 @@ def test_rejects_unsafe_existing_log_without_writing(tmp_path, attack):
 def test_rejects_foreign_owner_before_any_data(tmp_path, monkeypatch):
     from delta_exchange_mcp import log_files
 
-    path = tmp_path / "audit.log"
+    path = tmp_path / "debug.log"
     path.touch(mode=0o600)
     original = os.fstat
 
@@ -134,7 +107,7 @@ def test_directory_alias_checks_intermediate_symlink_owners(tmp_path, monkeypatc
     cache = tmp_path / "private"
     deep = cache / "deep"
     deep.mkdir(parents=True)
-    log = deep / "audit.log"
+    log = deep / "debug.log"
     log.write_text("untouched")
     log.chmod(0o600)
     (deep / "jump").symlink_to(cache, target_is_directory=True)
@@ -154,7 +127,7 @@ def test_directory_alias_checks_intermediate_symlink_owners(tmp_path, monkeypatc
 
     monkeypatch.setattr(Path, "lstat", foreign_intermediate)
     with pytest.raises(PermissionError, match="owned by another user"):
-        with open_log(alias / "audit.log") as stream:
+        with open_log(alias / "debug.log") as stream:
             stream.write("private data")
     assert log.read_text() == "untouched"
 

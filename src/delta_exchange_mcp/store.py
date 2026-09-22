@@ -51,20 +51,14 @@ TEMPLATE = """\
 # works only with india_prod, one from demo.delta.exchange only with
 # india_testnet. Mixing them returns InvalidApiKey.
 #
+# A key carrying Trading permission lets an assistant place and cancel real orders
+# as soon as it is saved here. Use a Read Data key for anything else.
+#
 # Your MCP client's own settings take precedence over this file.
 
 DELTA_API_KEY=
 DELTA_API_SECRET=
 DELTA_MCP_ENV=india_prod
-
-# Trading is stored per client, never under the shared name below, so switching it
-# on in one place cannot arm every assistant on this machine at once. The in-chat
-# form writes the scoped name for you; the client name comes from its handshake.
-# Ask get_connection_status for this client's exact mode_setting, or use the form.
-# DELTA_MCP_MODE_<READABLE>_<DIGEST>=trade
-#
-# This unscoped name is read only from a client's own environment, never from here:
-# DELTA_MCP_MODE=trade
 """
 
 
@@ -219,23 +213,3 @@ def write(values: dict[str, str]) -> str | None:
         if staged is not None:
             staged.unlink(missing_ok=True)
     return None
-
-
-def insecure_permissions() -> str | None:
-    """A warning when the file is readable by users other than its owner.
-
-    Reported rather than raised. Refusing to start would take away market data,
-    which needs no credentials at all, over a file the user may not even have
-    filled in.
-    """
-    target = path()
-    try:
-        mode = target.stat().st_mode
-    except OSError:
-        return None
-    if not mode & (stat.S_IRGRP | stat.S_IROTH):
-        return None
-    return (
-        f"{target} can hold API credentials but is readable by other users on this "
-        f"machine. Restrict it with: chmod 600 {target}"
-    )

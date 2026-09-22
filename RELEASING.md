@@ -2,7 +2,7 @@
 
 Runbook for cutting a new version to PyPI and GitHub. Aimed at maintainers with PyPI write access on the `delta-exchange-mcp` project and write access to this repo.
 
-This covers: bumping the version, publishing to PyPI, tagging, drafting the GitHub release. It does **not** cover CHANGELOG bookkeeping (GitHub release notes are the chronicle for now) or automatic version bumping.
+This covers: bumping the version, publishing to PyPI, tagging, drafting the GitHub release. It does **not** cover automatic version bumping. Notable changes go in `CHANGELOG.md`; the GitHub release notes repeat them.
 
 ## What gets versioned
 
