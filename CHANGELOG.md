@@ -42,7 +42,13 @@ the request. Everything the server used to do above that line has been removed.
   `get_connection_status` now returns `{environment, credentials_configured,
   account_tools_available, trading_tools_available, client_name, version, view_build}`.
 
+### BREAKING — `get_profile` and `close_all_positions` are gone
+
+Delta retired `/profile` for API-key requests, so `get_profile` failed on every call, and so
+did `close_all_positions`, which read the account's `user_id` from it. The credential form
+now checks a key against `/wallet/balances`.
+
 ### Changed
 
 - `save_mode` is removed from the credential form, which now only saves credentials.
-- The bundle manifest declares 44 tools, down from 46.
+- The bundle manifest declares 42 tools, down from 46.
