@@ -31,17 +31,19 @@ LONG_DESCRIPTION = (
     "Ask about Delta Exchange India in plain English: live prices, option chains, "
     "order books, funding and open-interest history, plus your own positions, orders, "
     "fills and balances.\n\n"
-    "**Market data needs no setup.** Account and trading tools remain visible, but each "
-    "call checks its authorization before it reaches Delta.\n\n"
-    "**Connect outside the conversation.** An account call returns a Manage Connection "
-    "link to a short-lived page on your machine. Enter the API key and secret there. The "
-    "page sends them directly to the local MCP service and stores them in the operating-"
-    "system credential service when available. The assistant does not receive them.\n\n"
-    "**Trading requires browser consent.** Manage Connection binds approval to the exact "
-    "MCP client, environment, and credential identity. Changing any of them turns trading "
-    "off. Production approval requires a warning acknowledgement. There is no order-size "
-    "cap, and orders use contracts rather than coins. Every mutation is audit-logged by "
-    "default."
+    "**Market data needs no account connection.** Account calls open a short-lived browser "
+    "page when a connection is missing. Enter the API key and secret there. They do not pass "
+    "through the conversation or an MCP tool call. When available, the server stores them "
+    "in macOS Keychain, Windows Credential Manager, or Linux Secret Service. Otherwise it "
+    "keeps the connection and trading consent in process memory for that process. The server "
+    "does not use a plaintext fallback.\n\n"
+    "**Trading needs separate browser approval.** Trading tools stay visible so clients keep "
+    "one stable tool list. A dry run sends no mutation and needs no trading approval. A real "
+    "trading call opens the approval page when approval is missing. Approval does not execute "
+    "the pending trade. Submit a new call if the trade is still wanted.\n\n"
+    "Production trading can place real orders with no size cap. Orders are sized in contracts, "
+    "not coins. The approval page requires a separate production acknowledgement. By default, "
+    "every real mutation is written to an owner-only audit log."
 )
 
 
@@ -87,27 +89,51 @@ def render_pyproject(proj: dict) -> str:
 
 
 async def tool_entries() -> list[dict[str, str]]:
-    """Introspect the server's stable tool list in an isolated environment.
+    """Introspect the server to list its stable tool registry.
 
-    Every DELTA_ variable is cleared before the ones that matter are set, so the manifest
-    depends only on the source being packaged and never on the shell the build ran in.
-    Credentials and consent change request-time authorization only; they never change this
-    list. `tools_generated` is false, so the generated manifest must match it exactly.
+    The manifest must not depend on credentials, trading consent, a developer's keyring, or
+    DELTA_ values inherited from the build shell. The in-memory stores below make the build
+    independent of all four. Runtime authorization happens when a tool is called and never
+    changes this list.
     """
     for name in [name for name in os.environ if name.startswith("DELTA_")]:
         del os.environ[name]
 
-    # One scratch directory for everything the introspection writes, removed on the way out.
-    # A bare mkdtemp is removed by nobody, so every build would leave a directory behind for
-    # the operating system to reap eventually — trading files left in the home directory for
-    # files left in /tmp, which is not the fix it looks like.
     with tempfile.TemporaryDirectory(prefix="mcpb-manifest-") as scratch:
         os.environ.update({
+            "DELTA_MCP_AUDIT": "off",
             "DELTA_MCP_CONFIG_FILE": str(pathlib.Path(scratch) / "config.env"),
         })
+        from delta_exchange_mcp import debug_log
+        from delta_exchange_mcp import store
+        from delta_exchange_mcp.auth.connection import ConnectionService
+        from delta_exchange_mcp.auth.consent import ConsentStore, MemoryConsentBackend
+        from delta_exchange_mcp.auth.store import (
+            CredentialSource,
+            CredentialStore,
+            MemoryMetadata,
+            MemorySecretBackend,
+        )
         from delta_exchange_mcp.server import build_server
 
-        tools = await build_server().list_tools()
+        service = ConnectionService.open(
+            credentials=CredentialStore(
+                MemorySecretBackend(),
+                MemoryMetadata(),
+                CredentialSource.MEMORY,
+            ),
+            consent=ConsentStore(
+                store.path().with_name("consent.json"),
+                secure_backend_available=False,
+                memory_backend=MemoryConsentBackend(),
+            ),
+        )
+        server = build_server(connection_service=service)
+        try:
+            tools = await server.list_tools()
+        finally:
+            await server.close_live_client()
+            debug_log.shutdown()
 
     return [
         {
