@@ -100,7 +100,7 @@ async def test_place_order_requires_exactly_one_product_ref():
 @pytest.mark.asyncio
 @respx.mock
 async def test_prices_are_sent_exactly_as_given():
-    """No tick preflight: an off-tick price reaches Delta unchanged, for Delta to reject."""
+    """No tick preflight: an off-tick price reaches Delta unchanged, for Delta to place on the tick."""
     route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )

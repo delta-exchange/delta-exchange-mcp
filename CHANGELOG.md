@@ -36,9 +36,9 @@ the request. Everything the server used to do above that line has been removed.
   now surface as Delta's own errors instead. The checks that decide whether a request is
   well-formed at all stay: one of `product_id`/`product_symbol`, exactly one of
   `id`/`client_order_id` on `cancel_order`, and at least one leg on `place_bracket_order`.
-- **Prices are sent exactly as given.** The tick-rounding preflight is gone, so an off-tick
-  price is rejected by Delta rather than silently snapped, and a priced order no longer costs
-  a `GET /products` round trip first.
+- **Prices are sent exactly as given.** The tick-rounding preflight is gone, so Delta, not
+  the server, moves an off-tick price onto the tick, and a priced order no longer costs a
+  `GET /products` round trip first.
 - **`_meta["delta.exchange/mutating"]` is gone**, and the bundle verifier no longer asserts
   that a default install cannot mutate.
 - **The world-readable-settings warning and the client-override warning are gone.**

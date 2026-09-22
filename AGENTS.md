@@ -117,7 +117,7 @@ DEA-881 removed every client-side guardrail that used to sit above that: the `DE
 Consequences worth knowing before you touch this file:
 
 - `close_all_positions()` takes **no arguments** and closes the entire account, both margin scopes. `cancel_all_orders()` cancels every order kind; `product_id` / `contract_types` narrow it.
-- Prices are sent exactly as given. An off-tick price is Delta's to reject, and no `GET /products` happens before an order.
+- Prices are sent exactly as given. Delta moves an off-tick price onto the tick itself, and no `GET /products` happens before an order.
 - Batch tools pass the list straight through and return Delta's response unchanged. A short response means some legs were not accepted; nothing annotates that.
 
 Conventions in `trading.py`:
