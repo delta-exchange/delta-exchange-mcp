@@ -20,6 +20,11 @@ import zipfile
 from pathlib import Path
 
 MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
+MODERN_PROTOCOL = "2026-07-28"
+LEGACY_PROTOCOL = "2025-06-18"
+PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
+CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 
 
 def check_archive(mcpb: Path) -> None:
@@ -130,9 +135,13 @@ def _pump(stream, put) -> None:
 
 
 def handshake(
-    extracted: Path, env: dict[str, str] | None = None, timeout: float = 240.0
+    extracted: Path,
+    *,
+    modern: bool,
+    env: dict[str, str] | None = None,
+    timeout: float = 240.0,
 ) -> dict[str, dict]:
-    """Start the unpacked server over stdio and return the tools it registers by name."""
+    """Discover one fresh unpack and return its tools by name."""
     proc = subprocess.Popen(
         ["uv", "run", "--directory", str(extracted), "--frozen", "python", "server/main.py"],
         stdin=subprocess.PIPE,
@@ -158,18 +167,34 @@ def handshake(
         proc.stdin.write(json.dumps(msg) + "\n")
         proc.stdin.flush()
 
-    send(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "bundle-verify", "version": "1"},
-            },
-        }
-    )
+    client_info = {"name": "bundle-verify", "version": "1"}
+    request_meta = {
+        PROTOCOL_VERSION_META_KEY: MODERN_PROTOCOL,
+        CLIENT_INFO_META_KEY: client_info,
+        CLIENT_CAPABILITIES_META_KEY: {},
+    }
+    if modern:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": request_meta},
+            }
+        )
+    else:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": LEGACY_PROTOCOL,
+                    "capabilities": {},
+                    "clientInfo": client_info,
+                },
+            }
+        )
 
     deadline = time.time() + timeout
     seen: dict[int, dict] = {}
@@ -192,8 +217,16 @@ def handshake(
             seen[msg["id"]] = msg
         if msg.get("id") == 1 and not asked:
             asked = True
-            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            if not modern:
+                send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    **({"params": {"_meta": request_meta}} if modern else {}),
+                }
+            )
 
     proc.terminate()
     try:
@@ -207,12 +240,21 @@ def handshake(
 
     tail = "".join(errors)[-2000:]
     if 1 not in seen:
-        raise SystemExit(f"no initialize response\nstderr:\n{tail}")
+        operation = "server/discover" if modern else "initialize"
+        raise SystemExit(f"no {operation} response\nstderr:\n{tail}")
     if 2 not in seen:
         raise SystemExit(f"no tools/list response\nstderr:\n{tail}")
 
-    info = seen[1]["result"].get("serverInfo", {})
-    print(f"  handshake: initialize OK, serverInfo={info}")
+    if modern:
+        supported = seen[1].get("result", {}).get("supportedVersions", [])
+        if MODERN_PROTOCOL not in supported:
+            raise SystemExit(
+                f"server/discover did not advertise {MODERN_PROTOCOL}: {supported!r}"
+            )
+        print(f"  discovery: server/discover OK, supported={supported}")
+    else:
+        info = seen[1]["result"].get("serverInfo", {})
+        print(f"  discovery: initialize OK, serverInfo={info}")
     return {tool["name"]: tool for tool in seen[2]["result"]["tools"]}
 
 
@@ -236,39 +278,39 @@ def main() -> None:
             z.extractall(tmp)
         manifest = json.loads((tmp / "manifest.json").read_text())
 
-        # Someone who accepted the form's defaults, on a machine whose environment is
-        # already asking for trade mode. The declared default has to win.
-        default = handshake(
-            tmp, launch_env(manifest, manifest["user_config"]["mode"]["default"], tmp)
+        modern = handshake(
+            tmp,
+            modern=True,
+            env=launch_env(manifest, manifest["user_config"]["mode"]["default"], tmp),
         )
-        leaked = mutation_names(default)
-        print(f"  default mode: {len(default)} tools, {len(leaked)} mutating")
-        if leaked:
+        legacy = handshake(
+            tmp,
+            modern=False,
+            env=launch_env(manifest, "trade", tmp),
+        )
+        if set(modern) != set(legacy):
             raise SystemExit(
-                "the default install can mutate: an ambient DELTA_MCP_MODE=trade reached "
-                f"the server and registered {', '.join(leaked[:5])}"
+                "modern and legacy discovery returned different tool lists: "
+                f"modern-only={sorted(set(modern) - set(legacy))}, "
+                f"legacy-only={sorted(set(legacy) - set(modern))}"
             )
-        if not default:
+        if not modern:
             raise SystemExit("no tools registered")
 
-        # And the opt-in has to actually reach trading, or the field is decorative.
-        opted = handshake(tmp, launch_env(manifest, "trade", tmp))
-        mutating = mutation_names(opted)
-        print(f"  mode=trade:   {len(opted)} tools, {len(mutating)} mutating")
-        if not mutating:
-            raise SystemExit("opting into trade registered no mutation tools")
-
-        # tools_generated is false, which promises the manifest lists everything reachable.
-        # Both runs, not just the trade one: an undeclared tool that a variable in the user's
-        # own environment switches on appears in the default install too, and that is the
-        # install almost everyone has.
         declared = {t["name"] for t in manifest["tools"]}
-        undeclared = (set(default) | set(opted)) - declared
-        if undeclared:
+        runtime = set(modern)
+        if declared != runtime:
             raise SystemExit(
-                "manifest declares tools_generated=false but the server registers "
-                f"undeclared tools: {', '.join(sorted(undeclared)[:5])}"
+                "manifest and runtime tool lists differ: "
+                f"runtime-only={sorted(runtime - declared)}, "
+                f"manifest-only={sorted(declared - runtime)}"
             )
+        mutations = mutation_names(modern)
+        if len(mutations) != 13:
+            raise SystemExit(
+                f"expected 13 annotated trading tools, found {len(mutations)}: {mutations}"
+            )
+        print(f"  stable tools: {len(runtime)} total, {len(mutations)} trading")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

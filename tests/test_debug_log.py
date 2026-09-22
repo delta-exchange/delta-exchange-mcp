@@ -103,6 +103,26 @@ def test_shutdown_detaches_and_closes_shared_handler(tmp_path, monkeypatch):
     debug_log.shutdown()  # idempotent
 
 
+def test_shutdown_restores_each_logger_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_DEBUG_FILE", str(tmp_path / "d.log"))
+    expected = {
+        "delta_exchange_mcp": (logging.WARNING, True),
+        "httpx": (logging.ERROR, False),
+    }
+    for name, (level, propagate) in expected.items():
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        logger.propagate = propagate
+
+    debug_log.configure(_cfg(tmp_path, debug=True))
+    debug_log.shutdown()
+
+    assert {
+        name: (logging.getLogger(name).level, logging.getLogger(name).propagate)
+        for name in expected
+    } == expected
+
+
 def test_log_file_is_owner_only(tmp_path, monkeypatch):
     import os
     import stat
