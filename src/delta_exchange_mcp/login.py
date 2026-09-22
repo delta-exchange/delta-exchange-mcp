@@ -126,14 +126,4 @@ def run(verify: bool = True) -> int:
         return 1
 
     print(f"\nSaved to {path}. Restart your MCP client.")
-
-    overridden = credentials.overridden_by_client()
-    if overridden:
-        # Set in this shell, so any client launched from here inherits it — and a client's
-        # own value always wins over the file, so the key just saved would do nothing.
-        print(
-            f"\nNote: {', '.join(overridden)} is set in this shell and takes precedence "
-            "over the file for any client launched from here.",
-            file=sys.stderr,
-        )
     return 0

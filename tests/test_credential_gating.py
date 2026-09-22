@@ -87,7 +87,6 @@ def test_trading_removal_manifest_matches_the_registered_surface():
             base_url=INDIA_TESTNET_REST,
             api_key="k",
             api_secret="s",
-            mode="trade",
         )
     )
     trading.register(mcp, client)
