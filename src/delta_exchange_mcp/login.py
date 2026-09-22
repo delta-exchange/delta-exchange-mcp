@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import select
 import sys
 from collections.abc import Iterator
 from typing import TextIO
@@ -30,6 +31,11 @@ else:
     import termios
     import tty
 
+_TTY = "/dev/tty"
+# A terminal sends a key's whole escape sequence in one write, so an escape with nothing
+# behind it after this long is the Escape key itself. Vim's ttimeoutlen default.
+_ESC_WAIT = 0.1
+
 
 def _ask_env(default: str = DEFAULT_ENV) -> str | None:
     prompt = f"Environment {'/'.join(sorted(BASE_URLS))}\n  [{default}]: "
@@ -41,19 +47,35 @@ def _ask_env(default: str = DEFAULT_ENV) -> str | None:
 
 
 def _ask_secret(prompt: str) -> str:
-    """Read a credential, echoing one * per character.
+    """Read a credential from the terminal, echoing one * per character.
 
     getpass echoes nothing, so a paste that never landed looks exactly like one that did.
+    Like getpass, it talks to the terminal itself, so a redirected stdout cannot hide the
+    prompt.
     """
-    sys.stdout.write(prompt)
-    sys.stdout.flush()
     if os.name == "nt":
-        return _collect(_windows_chars(), sys.stdout)
-    fd = sys.stdin.fileno()
+        with open("CONOUT$", "w") as console:
+            console.write(prompt)
+            console.flush()
+            return _collect(_windows_chars(), console)
+    try:
+        fd = os.open(_TTY, os.O_RDWR | os.O_NOCTTY)
+    except OSError:  # no controlling terminal; getpass falls back the same way
+        return _ask_posix(sys.stdin.fileno(), sys.stderr, prompt)
+    try:
+        with open(fd, "w", closefd=False) as terminal:
+            return _ask_posix(fd, terminal, prompt)
+    finally:
+        os.close(fd)
+
+
+def _ask_posix(fd: int, out: TextIO, prompt: str) -> str:
+    out.write(prompt)
+    out.flush()
     saved = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        return _collect(_posix_chars(fd), sys.stdout)
+        return _collect(_posix_chars(fd), out)
     finally:
         termios.tcsetattr(fd, termios.TCSAFLUSH, saved)
 
@@ -64,6 +86,8 @@ def _posix_chars(fd: int) -> Iterator[str]:
         byte = os.read(fd, 1)
         if not byte:
             raise EOFError
+        if byte == b"\x1b" and not select.select([fd], [], [], _ESC_WAIT)[0]:
+            continue
         yield from decoder.decode(byte)
 
 
@@ -73,11 +97,16 @@ def _windows_chars() -> Iterator[str]:
         if ch in ("\x00", "\xe0"):  # first half of an arrow or function key
             msvcrt.getwch()
             continue
+        if ch == "\x1b":  # the console never sends sequences, so this is Escape itself
+            continue
         yield ch
 
 
 def _collect(chars: Iterator[str], out: TextIO) -> str:
-    """Build the credential from keystrokes, writing * for each character kept."""
+    """Build the credential from keystrokes, writing * for each character kept.
+
+    The readers pass on an escape only when a sequence follows it.
+    """
     typed: list[str] = []
     for ch in chars:
         if ch in ("\r", "\n"):

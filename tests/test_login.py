@@ -1,5 +1,7 @@
 import io
 import os
+import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -353,6 +355,27 @@ def test_ctrl_c_cancels_and_ctrl_d_cancels_only_an_empty_prompt():
     assert masked("ab\x04c\r")[0] == "abc"
 
 
+def test_escape_on_its_own_is_dropped_by_the_windows_console(monkeypatch):
+    keys = iter("\x1bk\xe0H\r")
+    console = SimpleNamespace(getwch=lambda: next(keys))
+    monkeypatch.setattr(login, "msvcrt", console, raising=False)
+    assert login._collect(login._windows_chars(), io.StringIO()) == "k"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal reads")
+def test_escape_on_its_own_does_not_swallow_the_next_key():
+    read, write = os.pipe()
+    typed_later = threading.Timer(login._ESC_WAIT * 5, os.write, (write, b"k\r"))
+    typed_later.start()
+    try:
+        os.write(write, b"a\x1b[Db\x1b")
+        assert login._collect(login._posix_chars(read), io.StringIO()) == "abk"
+    finally:
+        typed_later.join()
+        os.close(read)
+        os.close(write)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX terminal modes")
 def test_a_real_terminal_is_masked_and_left_as_it_was(monkeypatch, capsys):
     import termios
@@ -365,14 +388,25 @@ def test_a_real_terminal_is_masked_and_left_as_it_was(monkeypatch, capsys):
         cbreak(fd, *args)
         os.write(leader, b"k3y\r")
 
+    shown = bytearray()
+
+    def screen():
+        # A terminal reads its output as it arrives; the mode switch waits for that drain.
+        while b"\n" not in shown:
+            shown.extend(os.read(leader, 1024))
+
     monkeypatch.setattr(login.tty, "setcbreak", cbreak_then_type)
+    monkeypatch.setattr(login, "_TTY", os.ttyname(follower))
+    reader = threading.Thread(target=screen, daemon=True)
     try:
-        with open(follower, closefd=False) as terminal:
-            before = termios.tcgetattr(follower)
-            monkeypatch.setattr(login.sys, "stdin", terminal)
-            assert login._ask_secret("API key: ") == "k3y"
-            assert termios.tcgetattr(follower) == before
+        before = termios.tcgetattr(follower)
+        reader.start()
+        assert login._ask_secret("API key: ") == "k3y"
+        reader.join(5)
+        assert termios.tcgetattr(follower) == before
     finally:
         os.close(leader)
         os.close(follower)
-    assert capsys.readouterr().out == "API key: ***\n"
+    assert bytes(shown).replace(b"\r\n", b"\n") == b"API key: ***\n"
+    # The prompt goes to the terminal, so a redirected stdout cannot hide it.
+    assert capsys.readouterr().out == ""
