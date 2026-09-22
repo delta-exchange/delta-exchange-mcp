@@ -14,7 +14,7 @@ from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 
 @pytest.fixture(autouse=True)
 def clear_logs(monkeypatch):
-    monkeypatch.setattr(audit_log, "_INSTANCE", None)
+    monkeypatch.setattr(audit_log, "_INSTANCES", {})
     yield
     debug_log.shutdown()
 
@@ -50,6 +50,26 @@ def test_fallback_ignores_preexisting_shared_directory(tmp_path, monkeypatch, ki
     if os.name == "posix":
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert len(list(tmp_path.glob("delta-exchange-mcp-*"))) == 1
+
+
+def test_changing_override_replaces_cached_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(blocked / "audit.log"))
+    cfg = Config(env="india_testnet", base_url=INDIA_TESTNET_REST, mode="trade")
+    fallback = audit_log.configure(cfg)
+    assert fallback is not None
+    assert audit_log.configure(cfg) is fallback
+
+    selected = tmp_path / "selected.log"
+    monkeypatch.setenv("DELTA_MCP_AUDIT_FILE", str(selected))
+    changed = audit_log.configure(cfg)
+    assert changed is not None and changed is not fallback
+    assert changed.path == selected
+    changed.record("place_order", {"id": 42})
+    assert '"id": 42' in selected.read_text()
 
 
 def test_audit_rejects_path_replacement_before_next_record(tmp_path, capsys):

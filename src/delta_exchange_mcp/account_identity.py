@@ -22,11 +22,15 @@ async def fetch_account_identity(client: DeltaClient) -> AccountIdentity:
     """Fetch and validate the API-key account identity."""
     response = await client.get("/users/trading_preferences", auth=True)
     if not isinstance(response, dict):
-        raise InvalidIdentityResponse("Delta returned a non-object trading-preferences response")
+        raise InvalidIdentityResponse(
+            "Delta returned a non-object trading-preferences response"
+        )
 
     result = response.get("result")
     if not isinstance(result, dict):
-        raise InvalidIdentityResponse("Delta returned no trading-preferences result object")
+        raise InvalidIdentityResponse(
+            "Delta returned no trading-preferences result object"
+        )
 
     user_id = result.get("user_id")
     if isinstance(user_id, bool) or not isinstance(user_id, int):

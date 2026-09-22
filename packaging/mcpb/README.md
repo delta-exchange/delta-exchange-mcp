@@ -1,7 +1,9 @@
 # One-click bundle (`.mcpb`)
 
-Packages the server so a non-technical user installs it by double-clicking a file and
-typing their API key into a form, instead of hand-editing `claude_desktop_config.json`.
+Packages the server so a user installs it by double-clicking a file instead of
+hand-editing `claude_desktop_config.json`. The bundle does not request credentials or
+authorization settings. Account setup and trading consent use Manage Connection after the
+server starts.
 
 Bundles are supported by **Claude Desktop, Claude Code, and MCP for Windows**. Cursor,
 VS Code, Codex and Windsurf do not read `.mcpb` — they keep the existing `uvx` install.
@@ -36,37 +38,29 @@ any of those invites the two to drift, and it has already bitten once — the bu
 carry its own copy of `mcp<2`, which would have silently pinned below the SDK the moment the
 project raised that ceiling.
 
-What stays literal is the copy shown to someone installing the bundle: `display_name`, the
-descriptions, and the three `user_config` field labels. That is deliberately different text
-from the PyPI summary, which is written for developers. The rule: if two values must move
-together, derive one from the other; if they would sensibly diverge, write both.
+What stays literal is the copy shown to someone installing the bundle: the display name
+and descriptions. This copy differs from the PyPI summary because it explains the installed
+behavior rather than the package implementation. The bundle has no `user_config`: credentials,
+environment selection, and trading consent belong to Manage Connection.
 
 ## What `verify.py` checks
 
-Packing successfully is not evidence the bundle works, so `build.sh` will not report success
-until all of this passes:
+Packing successfully is not evidence that the bundle works. `build.sh` reports success only
+after these checks pass:
 
-- the archive is valid to a **strict** zip parser, which is what Claude Desktop uses
-- the packed payload is **exactly** the expected file set, so build tooling sitting beside
-  it in this directory cannot leak in through a missed `.mcpbignore` rule
-- two real MCP **handshakes** against a fresh unpack — `initialize`, then `tools/list`
-- **the form decides the mode, not the environment**: accepting the declared default
-  registers no mutation tool even when the ambient environment says `DELTA_MCP_MODE=trade`
-- **mutations identify themselves**: every trading tool carries the namespaced
-  `_meta["delta.exchange/mutating"]` marker, so the verifier does not infer safety from names
-- **the opt-in works**: `trade` reaches all 13 mutation tools, so the field is not decorative
-- **nothing undeclared**: every tool the server registers appears in the manifest, which is
-  what `tools_generated: false` promises
+- the archive is valid for the strict ZIP parser that Claude Desktop uses
+- the payload contains exactly the expected files
+- the manifest has no install-time credential, environment, or mode settings
+- fresh public and externally managed processes complete real MCP handshakes
+- both processes expose the same stable tool list
+- all 13 trading tools identify themselves with `_meta["delta.exchange/mutating"]`
+- the runtime tool list exactly matches the committed manifest
 
-Both handshakes start from a deliberately hostile environment — `DELTA_MCP_MODE=trade`,
-credentials and `DELTA_MCP_DEBUG=1` exported — and then apply the manifest's `env` over it with
-`${user_config.x}` resolved the way a host resolves it. Debug and audit output are redirected
-into the throwaway unpack so a build never writes to `~/.delta-exchange-mcp`. That is what makes
-the mode and undeclared-tool checks meaningful. An earlier version simply launched the server
-with no credentials and asserted zero mutations, which passed because mutation tools are gated
-on credentials *and* trade mode: it could not have failed. Confirm any change here still fails
-when `DELTA_MCP_MODE` is removed from the manifest's `env`, which is the bug the check exists to
-catch.
+The public handshake has no Delta settings. The second handshake deliberately supplies a
+complete synthetic `india_devnet` process credential and the ignored legacy
+`DELTA_MCP_MODE=trade`. It does not call Delta or the operating-system credential service.
+The identical tool lists prove that credentials and legacy mode do not control discovery.
+All generated files and logs use the throwaway unpack directory.
 
 ## The icon
 
@@ -80,49 +74,29 @@ rsvg-convert -w 512 -h 512 favicon.svg -o icon.png
 
 ## Install to test
 
-Double-click the `.mcpb`, or drag it onto Claude Desktop. Leave the API fields empty for
-market data only.
+Double-click the `.mcpb`, or drag it onto Claude Desktop. The install has no credential or
+mode form. After the server starts, call an account tool and open its Manage Connection link.
 
-The first install of any `uv` bundle needs network and can be slow: the host resolves `uv`,
-then runs `uv sync`, which fetches a Python interpreter and the dependencies. It surfaces
-that as download progress.
+The first install of any `uv` bundle needs network access and can be slow. The host resolves
+`uv`, runs `uv sync`, and downloads a Python interpreter and dependencies. It shows this as
+download progress.
 
 The extension lands in `~/Library/Application Support/Claude/Claude Extensions/`, one
-directory per extension, with the `.venv` that `uv sync` built alongside the shipped payload.
-That directory and the app's own log are where to look when a bundle installs but will not
-start.
+directory per extension, with the `.venv` beside the shipped payload. Inspect that directory
+and the app log when a bundle installs but does not start.
 
 ## Decisions
 
-**An empty form field falls through to the shared settings file.** The server reads
-`~/.delta-exchange-mcp/config.env` for anything its environment does not answer, and a
-bundle substitutes every variable it declares whether or not the user filled that field —
-so a blank API-key box arrives as `""`. Empty therefore has to mean "unanswered" rather
-than "answered with nothing", or the shared file could never reach a bundle user at all.
-Someone who has already run `delta-exchange-mcp login` can accept the whole form and still
-get their account.
+**No install-time secrets or authorization.** The bundle manifest has no `user_config` and
+injects no `DELTA_API_KEY`, `DELTA_API_SECRET`, `DELTA_MCP_ENV`, or `DELTA_MCP_MODE`. This
+prevents a host configuration form from becoming a second credential store or an obsolete
+authorization path. The running server exposes one stable tool list. Account calls open
+Manage Connection when credentials are missing, and real mutations require browser consent
+for the exact client, environment, and credential identity.
 
-`verify.py` redirects that file into its throwaway unpack directory. Without it the
-verifier would read the developer's own copy, and a `DELTA_MCP_DEBUG=1` there would
-register a debug tool the manifest does not declare — failing the undeclared-tool check
-locally while passing in CI. It also keeps a build from writing into `$HOME`.
-
-**Trading is present but opt-in.** `DELTA_MCP_MODE` is a `user_config` field defaulting to
-`read`, substituted into the launch environment as `${user_config.mode}`. With credentials and
-debug off, `read` gets 27 tools and no mutations; `trade` gets 41 and can place real orders.
-The verifier intentionally enables debug and therefore sees 28 and 42 respectively, with
-`get_debug_status` as the extra declared tool. `user_config` has no enum type — only string,
-number, boolean, directory and file — so this is a free-text string, the same shape as the
-`environment` field beside it.
-
-Declaring the variable matters as much as its default. Leaving it out of the manifest entirely
-would let an ambient `DELTA_MCP_MODE=trade` in the environment the app was launched with reach
-the server and arm trading without the user choosing it. `verify.py` reproduces exactly that
-and fails on it.
-
-The default is `read` rather than `trade` because a bundle is a double-click and a form, so
-whatever the default is becomes what most people run — and these tools have no notional cap,
-size orders in contracts rather than coins, and act on the live exchange.
+The server still accepts a complete key and secret pair inherited by the process for
+compatibility. It treats this pair as externally managed and permits session-only consent.
+The legacy `DELTA_MCP_MODE` setting is ignored even when it is present in the ambient process.
 
 **`server.type: "uv"`.** No prerequisite on the user's machine — not `uv`, and not Python.
 Claude Desktop resolves `uv` in three steps: it looks for a system installation, else reuses
