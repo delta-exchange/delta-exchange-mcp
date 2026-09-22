@@ -619,13 +619,13 @@ _TEMPLATE = """<!DOCTYPE html>
       refreshSaveState();
       // Only a clean save swaps the form out. The other two stored cases still need the
       // fields, because what they say is "saved, and here is what to fix".
-      if (status === "saved" && (payload.account || payload.mode_updated)) {
-        doneWho.textContent = payload.account
-          ? "Connected to account " + payload.account
-          : "Access mode updated";
+      if (status === "saved") {
+        doneWho.textContent = payload.mode_updated
+          ? "Access mode updated"
+          : payload.account ? "Connected to account " + payload.account : "Connected";
         doneWhere.textContent = "Saved to " + (payload.path || "this computer");
         doneNext.textContent = payload.next_step || "";
-        againEl.textContent = payload.account ? "Use another key" : "Change again";
+        againEl.textContent = payload.mode_updated ? "Change again" : "Use another key";
         document.body.classList.add("done");
         say("");
         return;
