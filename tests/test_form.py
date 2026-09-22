@@ -119,6 +119,17 @@ def test_the_view_measures_content_rather_than_the_frame_it_sits_in():
     assert "getBoundingClientRect().height" in form.VIEW_HTML
 
 
+def test_the_done_state_does_not_depend_on_the_account_name():
+    """A probe that cannot name an account must still be able to finish the form.
+
+    Gating the swap on the account name stranded every credential save: the fields stayed
+    on screen with Save disabled, because the grant was already spent.
+    """
+    gate = re.search(r'if \(status === "saved".*?\)\s*\{', form.VIEW_HTML, re.S).group(0)
+    assert "payload.account" not in gate, f"the done state is gated on an account name: {gate}"
+    assert 'classList.add("done")' in form.VIEW_HTML
+
+
 def test_the_view_reads_the_host_context_it_asked_for():
     """The theme and the palette arrive in the `ui/initialize` result and in a notification.
 
@@ -189,6 +200,12 @@ def test_the_view_carries_the_dashboards_the_rest_of_the_package_uses():
     assert injected["default_environment"] == config_mod.DEFAULT_ENV
     # Every choice offered must be one the "Open the API keys page" button can act on.
     assert {e["value"] for e in injected["environments"]} <= set(config_mod.DASHBOARDS)
+
+
+def test_the_view_does_not_claim_read_data_is_sufficient():
+    assert "permission for trading preferences" in form.VIEW_HTML
+    assert "does not establish whether Read Data alone is sufficient" in form.VIEW_HTML
+    assert "Read Data is enough" not in form.VIEW_HTML
 
 
 # --- saving --------------------------------------------------------------------------
@@ -287,7 +304,7 @@ async def test_an_unknown_environment_is_refused(server, monkeypatch):
 async def test_a_verified_key_is_saved_with_its_environment(server, monkeypatch):
     """The environment is part of what makes the key work, so it is written with it."""
     monkeypatch.setattr(
-        credentials, "check", checking(ok=True, reachable=True, detail="someone@delta.exchange")
+        credentials, "check", checking(ok=True, reachable=True, detail="57354187")
     )
     structured, _ = await save(await opened(server))
     assert structured["status"] == "saved"
@@ -306,18 +323,18 @@ async def test_a_clean_save_reports_its_facts_as_fields_not_only_as_a_sentence(
     to show, and neither may ever carry the key or the secret.
     """
     monkeypatch.setattr(
-        credentials, "check", checking(ok=True, reachable=True, detail="someone@delta.exchange")
+        credentials, "check", checking(ok=True, reachable=True, detail="57354187")
     )
     structured, _ = await save(await opened(server))
 
-    assert structured["account"] == "someone@delta.exchange"
+    assert structured["account"] == "57354187"
     assert structured["path"] == str(store.path())
     # This fixture registers the form with no `activate`, which is the branch that still
     # needs a restart; `test_activation.py` covers the one that does not.
     assert structured["next_step"] == (
         "Restart this client to use your account. Trading stays off for this client."
     )
-    assert "someone@delta.exchange" in structured["message"]
+    assert "57354187" in structured["message"]
 
     blob = json.dumps(structured)
     assert KEY not in blob and SECRET not in blob
@@ -329,7 +346,8 @@ async def test_saving_keeps_the_template_and_its_instructions(server, monkeypatc
     await save(await opened(server))
 
     body = store.path().read_text()
-    assert "Read Data" in body
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
     assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
 
 
@@ -340,7 +358,7 @@ async def test_the_credentials_never_appear_in_anything_the_tool_returns(server,
     a frame rather than into the chat.
     """
     for check in (
-        checking(ok=True, reachable=True, detail="someone@delta.exchange"),
+        checking(ok=True, reachable=True, detail="57354187"),
         checking(ok=False, reachable=True, detail="delta api error: InvalidApiKey"),
         checking(ok=False, reachable=False, detail="timeout"),
     ):
