@@ -42,11 +42,14 @@ async def check(env: str, key: str, secret: str) -> Check:
     A wrong environment for the key, an unwhitelisted IP, a key without Read Data, and
     a truncated paste are all invisible until something signs a request. Doing it while
     the person is still holding the key turns each into a message they can act on.
+
+    Any signed read proves all four, so the endpoint is only a probe. `detail` names the
+    account when a probe can report one, which /wallet/balances cannot.
     """
     cfg = Config(env=env, base_url=BASE_URLS[env], api_key=key, api_secret=secret)  # type: ignore[arg-type]
     client = DeltaClient(cfg)
     try:
-        profile = await client.get("/profile", auth=True)
+        await client.get("/wallet/balances", auth=True)
     except DeltaApiError as exc:
         return Check(
             ok=False,
@@ -58,13 +61,7 @@ async def check(env: str, key: str, secret: str) -> Check:
     except httpx.HTTPError as exc:
         return Check(ok=False, reachable=False, detail=f"could not reach Delta: {exc}")
     else:
-        # The client hands back Delta's envelope rather than unwrapping it, so the account
-        # lives under "result". Reading the top level instead silently yields no name at
-        # all, which is the one thing that distinguishes this from saving the wrong
-        # account's key.
-        body = profile.get("result") if isinstance(profile, dict) else None
-        who = str(body.get("email") or body.get("id") or "") if isinstance(body, dict) else ""
-        return Check(ok=True, reachable=True, detail=who)
+        return Check(ok=True, reachable=True, detail="")
     finally:
         await client.aclose()
 

@@ -122,8 +122,8 @@ superset of the one above it:
 | Tier | You set | Unlocks |
 |---|---|---|
 | Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices |
-| Account, read-only | a **Read Data** API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, profile |
-| Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin, close-all |
+| Account, read-only | a **Read Data** API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats |
+| Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin |
 
 A key without its matching secret is ignored and you stay on market data — the two are
 always used together.
@@ -138,9 +138,8 @@ boundary that actually holds, because it is enforced on Delta's side rather than
 > [!WARNING]
 > What this will **not** do: cap notional or position size, ask you to confirm before
 > sending, rehearse an order without sending it, keep a local record of what it sent,
-> convert between contracts and coins, or judge whether an order makes sense. `close_all_positions`
-> takes no arguments and closes your entire account. Those are your responsibility. Try
-> `DELTA_MCP_ENV=india_testnet` first.
+> convert between contracts and coins, or judge whether an order makes sense. Those are your
+> responsibility. Try `DELTA_MCP_ENV=india_testnet` first.
 
 To keep an assistant off your orders, give it a Read Data key. To let it trade, give it one
 with Trading permission — and note that Delta requires an IP whitelist entry on such keys.

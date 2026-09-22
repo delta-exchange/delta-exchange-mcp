@@ -17,31 +17,32 @@ SECRET = "a-secret"
 
 
 @respx.mock
-async def test_a_working_key_reports_the_account_it_belongs_to():
-    """The name is the only signal separating "saved" from "saved the wrong key"."""
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        # Delta's envelope, which the client deliberately keeps rather than unwrapping.
-        return_value=httpx.Response(
-            200, json={"success": True, "result": {"email": "someone@delta.exchange"}}
-        )
+async def test_a_working_key_is_accepted():
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
     )
     result = await credentials.check("india_testnet", KEY, SECRET)
     assert (result.ok, result.reachable) == (True, True)
-    assert result.detail == "someone@delta.exchange"
+    assert result.detail == ""
 
 
 @respx.mock
-async def test_an_account_without_an_email_falls_back_to_its_id():
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 82373749}})
+async def test_a_key_is_never_checked_against_profile():
+    """Delta no longer serves /profile to API keys, so a probe there rejects every key."""
+    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+        return_value=httpx.Response(403, json={"success": False, "error": {"code": "forbidden"}})
     )
-    assert (await credentials.check("india_testnet", KEY, SECRET)).detail == "82373749"
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": []})
+    )
+    assert (await credentials.check("india_testnet", KEY, SECRET)).ok is True
+    assert not profile.called
 
 
 @respx.mock
 async def test_a_key_delta_has_never_seen_is_rejected_with_its_code():
     """The code is what the form branches on to decide whether to mention the other site."""
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(
             401, json={"success": False, "error": {"code": "invalid_api_key"}}
         )
@@ -54,7 +55,7 @@ async def test_a_key_delta_has_never_seen_is_rejected_with_its_code():
 @respx.mock
 async def test_an_unreachable_api_is_not_a_rejection():
     """These call for opposite responses, so they must not collapse into one another."""
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
+    respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
         side_effect=httpx.ConnectError("no route to host")
     )
     result = await credentials.check("india_testnet", KEY, SECRET)

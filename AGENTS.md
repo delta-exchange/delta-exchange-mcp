@@ -72,7 +72,7 @@ Three things here are load-bearing:
 
 ### Auth surface registration
 
-`tools/account.py` exposes the authenticated read-only tools (positions / margined-positions / wallet-balances / wallet-transactions / fills / bulk-fills-export / open-orders / order-history / order-by-id / product-leverage / trading-stats / trading-preferences / profile). All call `client.get(..., auth=True)`.
+`tools/account.py` exposes the authenticated read-only tools (positions / margined-positions / wallet-balances / wallet-transactions / fills / bulk-fills-export / open-orders / order-history / order-by-id / product-leverage / trading-stats / trading-preferences). All call `client.get(..., auth=True)`.
 
 `server.build_server()` registers them only when both creds are present. Without creds, the server runs in pure-public mode — same behaviour as before this surface existed.
 
@@ -81,7 +81,7 @@ Three things here are load-bearing:
 Three front-ends fill one file, `~/.delta-exchange-mcp/config.env`:
 
 - `store.py` owns the file — `path/read/ensure/write`. `ensure` creates it `0600` from a commented `TEMPLATE` on first run; `write` goes through dotenv's `set_key` so comments and unrelated settings survive. `config.setting(name)` resolves the process environment first and this file second, with empty meaning unanswered (a bundle substitutes every declared variable whether or not the field was filled).
-- `credentials.py` is the shared domain: `check(env, key, secret)` makes one `/profile` call, and `save(env, key, secret)` writes the key, secret and environment together. Neither front-end owns these. `Check.code` carries Delta's own error code beside the rendered message so a caller can branch on which failure it was without matching on that message's text.
+- `credentials.py` is the shared domain: `check(env, key, secret)` makes one authenticated call against `/wallet/balances`, purely as a probe that the key signs and carries Read Data, and `save(env, key, secret)` writes the key, secret and environment together. Neither front-end owns these. `Check.code` carries Delta's own error code beside the rendered message so a caller can branch on which failure it was without matching on that message's text.
 - `store.write()` holds an OS-backed advisory lock around its complete copy-modify-replace transaction. Without serialization a stale staging copy can undo another writer's change. The hidden lock file is persistent by design and contains no settings; the kernel releases its lock after a crash.
 - `login.py` is the terminal front-end. It refuses a non-TTY stdin on purpose — `getpass` reads a pipe rather than rejecting it, so `echo $KEY | ... login` would put the secret in shell history.
 - `form.py` is the in-chat front-end, an **MCP App** (SEP-1865): a `ui://` HTML resource with mime `text/html;profile=mcp-app`, opened by `setup_credentials` via `_meta.ui.resourceUri`, submitting to the app-only `save_credentials`. Opening issues a random ten-minute, one-use grant in tool-result `_meta`; it is bound to the exact protocol session and never appears in model-visible content or structured content. Invalid input releases it for correction, a durable write consumes it before notification, and a new session cannot inherit it. This is defence in depth for a host that mistakenly exposes an app-only schema, not authenticated user presence. Its `register(mcp)` takes no `DeltaClient` — `credentials.check` builds its own from the candidate key. Three constraints were established empirically against Claude Desktop and Codex desktop and must not regress: **inline every asset** (both hosts' CSP blocks external fetches, and one CDN reference blanks the frame); **complete the `ui/initialize` → `ui/notifications/initialized` handshake** or the frame stays collapsed; and **never feature-test on the `io.modelcontextprotocol/ui` capability** — Claude Desktop renders these views without advertising it. The view must never call `ui/message` or `ui/update-model-context`, which would hand the typed credential to the model. Regression tests: `tests/test_form.py`, `test_a_grant_from_a_closed_session_cannot_be_used_by_a_new_one`.
@@ -109,21 +109,20 @@ Those `_meta` arguments are why `pyproject.toml` floors `mcp` at 1.26 — `meta=
 
 ### Trading surface (mutations)
 
-`tools/trading.py` exposes the authenticated write tools (place/edit/cancel order, cancel-all, place/edit/cancel batch, place/edit bracket, set-leverage, change-margin, close-all, auto-topup). Its `register(mcp, client)` is gated on `cfg.has_credentials` alone — the same condition as the account reads.
+`tools/trading.py` exposes the authenticated write tools (place/edit/cancel order, cancel-all, place/edit/cancel batch, place/edit bracket, set-leverage, change-margin, auto-topup). Its `register(mcp, client)` is gated on `cfg.has_credentials` alone — the same condition as the account reads.
 
 DEA-881 removed every client-side guardrail that used to sit above that: the `DELTA_MCP_MODE` gate and its restart, the `TradeGate` session lease, `dry_run`, the audit log, the 50-item batch cap, the partial-batch annotation, client-side order validation, the tick-rounding preflight, the scope flags on the "all" tools, and the `_meta["delta.exchange/mutating"]` marker. **Do not reintroduce one without the product decision that asked for it** — the position is that the API key's own permissions are the boundary, and a Read Data key is how you stop an assistant trading.
 
 Consequences worth knowing before you touch this file:
 
-- `close_all_positions()` takes **no arguments** and closes the entire account, both margin scopes. `cancel_all_orders()` cancels every order kind; `product_id` / `contract_types` narrow it.
+- `cancel_all_orders()` cancels every order kind; `product_id` / `contract_types` narrow it.
 - Prices are sent exactly as given. An off-tick price is Delta's to reject, and no `GET /products` happens before an order.
 - Batch tools pass the list straight through and return Delta's response unchanged. A short response means some legs were not accepted; nothing annotates that.
 
 Conventions in `trading.py`:
 - Register every mutation through the shared `@mutation_tool` decorator. It wraps the call in `client.pin()` so a credential rebind landing mid-call cannot sign part of it with a different key.
 - The shared `_finish(method, path, payload)` helper strips `None` keys and sends via `client.post/put/delete`.
-- Order-level boolean flags (`post_only`, `reduce_only`, `cancel_*`) are Delta **string enums** — convert with `_bs()` to `"true"`/`"false"`. Position-level flags (`auto_topup`, `close_all_*`) are real JSON booleans.
-- `close_all_positions` needs `user_id`; it is auto-resolved from `/profile` once and cached per-process in the `register` closure — never a tool param.
+- Order-level boolean flags (`post_only`, `reduce_only`, `cancel_*`) are Delta **string enums** — convert with `_bs()` to `"true"`/`"false"`. Position-level flags such as `auto_topup` are real JSON booleans.
 - `_require_one` stays: it enforces exactly one of `product_id`/`product_symbol`, which is a request-shape requirement, not a trading constraint.
 
 ### Debug logging

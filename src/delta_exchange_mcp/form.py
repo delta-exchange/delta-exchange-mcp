@@ -561,8 +561,8 @@ _TEMPLATE = """<!DOCTYPE html>
       refreshSaveState();
       // Only a clean save swaps the form out. The other two stored cases still need the
       // fields, because what they say is "saved, and here is what to fix".
-      if (status === "saved" && payload.account) {
-        doneWho.textContent = "Connected as " + payload.account;
+      if (status === "saved") {
+        doneWho.textContent = payload.account ? "Connected as " + payload.account : "Connected";
         doneWhere.textContent = "Saved to " + (payload.path || "this computer");
         doneNext.textContent = payload.next_step || "";
         againEl.textContent = "Use another key";
@@ -923,9 +923,6 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
                 ),
             }
 
-        # The account email is included because it is the only signal that distinguishes
-        # "saved" from "saved the wrong account's key", and it is not a new disclosure:
-        # any assistant with these credentials can read it from the profile endpoint.
         who = f" as {result.detail}" if result.detail else ""
         # The same facts twice: as fields, because the view renders them as its own
         # connected state rather than printing a paragraph, and as one sentence, because

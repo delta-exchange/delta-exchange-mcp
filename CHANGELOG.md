@@ -18,15 +18,12 @@ the request. Everything the server used to do above that line has been removed.
   scheme and the restart it required. The trading tools register whenever credentials are
   present. Settings files that still carry the old keys keep loading — the keys are ignored,
   not rejected — and the bundle's Mode field is gone from its install form.
-- **`dry_run` is gone** from all 13 mutating tools. There is no way to rehearse an order;
+- **`dry_run` is gone** from every mutating tool. There is no way to rehearse an order;
   use `DELTA_MCP_ENV=india_testnet`.
 - **The audit log is gone**, with `DELTA_MCP_AUDIT`, `DELTA_MCP_AUDIT_FILE`,
   `~/.delta-exchange-mcp/audit/` and the `get_trading_status` tool. Delta's own order and
   fill history remains the record of what executed. Upgrading does not delete audit files an
   earlier version already wrote — they are yours to keep or remove.
-- **`close_all_positions` takes no arguments and closes the entire account**, both margin
-  scopes. It previously refused a bare call and required opting into a scope. This is the
-  sharpest behaviour change in the release.
 - **`cancel_all_orders` loses its order-kind flags** and always cancels every kind.
   `product_id` and `contract_types` still narrow it.
 - **Batch tools are uncapped** and return Delta's response unchanged. The 50-order limit and

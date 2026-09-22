@@ -1,4 +1,4 @@
-"""Trading tools: body signing, flag encoding, user_id caching, unconditional registration."""
+"""Trading tools: body signing, flag encoding, unconditional registration."""
 
 import hashlib
 import hmac
@@ -130,100 +130,6 @@ async def test_place_order_includes_bracket_params():
     assert b'"bracket_stop_loss_price":"60000"' in body
 
 
-# --------------------------------------------------------------- user_id auto-fetch
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_close_all_fetches_and_caches_user_id():
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 999}})
-    )
-    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    mcp = FastMCP("test")
-    trading.register(mcp, client)
-    await mcp.call_tool("close_all_positions", {})
-    await mcp.call_tool("close_all_positions", {})
-
-    assert profile.call_count == 1  # cached after first fetch
-    assert close.call_count == 2
-    assert b'"user_id":999' in close.calls[0].request.content
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_rotating_credentials_refetches_the_user_id():
-    """Credentials rotate without a restart now, so a per-process cache outlives its account.
-
-    A stale user_id signs cleanly under the new key and names the previous account's
-    positions, so close_all would report success having closed nothing the caller owns.
-    """
-    profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        side_effect=[
-            httpx.Response(200, json={"success": True, "result": {"id": 111}}),
-            httpx.Response(200, json={"success": True, "result": {"id": 222}}),
-        ]
-    )
-    close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    mcp = FastMCP("test")
-    trading.register(mcp, client)
-    await mcp.call_tool("close_all_positions", {})
-
-    client.rebind(Config(
-        env="india_testnet", base_url=INDIA_TESTNET_REST,
-        api_key="k2", api_secret="s2",
-    ))
-    await mcp.call_tool("close_all_positions", {})
-
-    assert profile.call_count == 2
-    assert b'"user_id":111' in close.calls[0].request.content
-    assert b'"user_id":222' in close.calls[1].request.content
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_the_same_key_string_on_two_sites_is_two_accounts():
-    """A key string is not an identity: testnet and prod issue them independently.
-
-    Keying the cache on the key alone would carry a testnet user_id into a prod close-all.
-    """
-    from delta_exchange_mcp.config import INDIA_PROD_REST
-
-    testnet_profile = respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 111}})
-    )
-    prod_profile = respx.get(f"{INDIA_PROD_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 222}})
-    )
-    testnet_close = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    prod_close = respx.post(f"{INDIA_PROD_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    mcp = FastMCP("test")
-    trading.register(mcp, client)
-    await mcp.call_tool("close_all_positions", {})
-
-    client.rebind(Config(
-        env="india_prod", base_url=INDIA_PROD_REST,
-        api_key="k1", api_secret="s1",
-    ))
-    await mcp.call_tool("close_all_positions", {})
-
-    assert testnet_profile.call_count == 1
-    assert prod_profile.call_count == 1
-    assert b'"user_id":111' in testnet_close.calls[0].request.content
-    assert b'"user_id":222' in prod_close.calls[0].request.content
-
-
 # --------------------------------------------- request shape, not a guardrail
 
 
@@ -259,23 +165,6 @@ async def test_cancel_all_cancels_every_order_kind():
     assert b'"cancel_limit_orders":"true"' in body
     assert b'"cancel_stop_orders":"true"' in body
     assert b'"cancel_reduce_only_orders":"true"' in body
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_close_all_positions_takes_no_scope_and_closes_everything():
-    """A bare call closes the whole account: both margin scopes, no opt-in (DEA-881)."""
-    respx.get(f"{INDIA_TESTNET_REST}/profile").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {"id": 5}})
-    )
-    route = respx.post(f"{INDIA_TESTNET_REST}/positions/close_all").mock(
-        return_value=httpx.Response(200, json={"success": True, "result": {}})
-    )
-    client = _client()
-    await _call(client, "close_all_positions")
-    body = route.calls[0].request.content
-    assert b'"close_all_portfolio":true' in body
-    assert b'"close_all_isolated":true' in body
 
 
 # --------------------------------------------------------------- batches pass through

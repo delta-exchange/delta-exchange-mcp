@@ -67,10 +67,6 @@
       "description": "Cancel a single order by id or client_order_id."
     },
     {
-      "name": "close_all_positions",
-      "description": "Close every open position on the account, both cross/portfolio and isolated."
-    },
-    {
       "name": "configure_auto_topup",
       "description": "Override auto top-up for a single position (otherwise inherits the account setting)."
     },
@@ -153,10 +149,6 @@
     {
       "name": "get_product_leverage",
       "description": "Configured order leverage for a product."
-    },
-    {
-      "name": "get_profile",
-      "description": "User profile."
     },
     {
       "name": "get_recent_trades",
