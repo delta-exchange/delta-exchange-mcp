@@ -1,29 +1,22 @@
 """Authenticated trading tools (mutations).
 
-Registered only when DELTA_API_KEY/SECRET are set AND DELTA_MCP_MODE=trade. Every tool
-takes a `dry_run` flag that validates and echoes the payload without sending it, and every
-call (dry-run or real) is recorded to the audit log. Mutations never auto-retry (see
-DeltaClient retry policy) — a timeout is surfaced, not silently re-sent.
+Registered whenever DELTA_API_KEY/SECRET are set. The API key's own permissions are the
+authorization boundary: a key without Trading enabled is rejected by Delta, and that error
+is surfaced verbatim. Mutations never auto-retry (see DeltaClient retry policy) — a timeout
+is surfaced, not silently re-sent.
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from delta_exchange_mcp.audit_log import AuditLog
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
-
-logger = logging.getLogger("delta_exchange_mcp")
 
 TOOL_NAMES = frozenset(
     {
@@ -42,12 +35,7 @@ TOOL_NAMES = frozenset(
     }
 )
 
-_MAX_BATCH = 50
 _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
-MUTATING_TOOL_META_KEY = "delta.exchange/mutating"
-_MUTATING_TOOL_META = {MUTATING_TOOL_META_KEY: True}
-_REVOKED_MESSAGE = "trading was disabled while this request was being prepared; no mutation was sent"
-_SESSION_MESSAGE = "trading is not enabled for this MCP session; no mutation was sent"
 _ORDER_OUTCOME_UNKNOWN = (
     "The order mutation may have reached Delta. Do not resubmit it. "
     "Use get_open_orders and get_order_history to reconcile the order state first."
@@ -76,34 +64,6 @@ _OUTCOME_UNKNOWN_BY_TOOL = {
 }
 
 
-@dataclass
-class TradeGate:
-    """An invalidatable lease for already-dispatched trading tool calls."""
-
-    generation: int = 0
-    armed: bool = True
-    session: object | None = None
-
-    def bind(self, session: object) -> None:
-        if self.session is not None and self.session is not session:
-            self.generation += 1
-        self.session = session
-
-    def lease(self, session: object | None) -> int:
-        if not self.armed:
-            raise RuntimeError(_REVOKED_MESSAGE)
-        if self.session is not None and self.session is not session:
-            raise RuntimeError(_SESSION_MESSAGE)
-        return self.generation
-
-    def revoke(self) -> None:
-        self.armed = False
-        self.generation += 1
-
-    def accepts(self, lease: int | None) -> bool:
-        return self.armed and lease == self.generation
-
-
 def _bs(value: bool | None) -> str | None:
     """Delta's order-level flags are string enums "true"/"false", not JSON booleans."""
     if value is None:
@@ -127,224 +87,34 @@ def _require_one(product_id: int | None, product_symbol: str | None) -> None:
         raise ValueError("pass exactly one of product_id or product_symbol")
 
 
-def _validate_bracket_sl(stop_loss_price: str | None, trail_amount: str | None) -> None:
-    """A bracket stop-loss is either a fixed trigger price or a trailing amount, never both.
-
-    Delta rejects the combination with a bad_schema error; guarding here fails fast (and in
-    dry-run) with a clearer message instead of spending a live round-trip.
-    """
-    if stop_loss_price is not None and trail_amount is not None:
-        raise ValueError("bracket stop-loss takes either a fixed price or a trailing amount, not both")
-
-
-def _validate_order(order_type: str | None, limit_price: str | None, size: int | None) -> None:
-    """Client-side cross-field checks the API would otherwise only catch at send time.
-
-    Runs before _finish, so dry_run surfaces the same failures as a real call. These mirror
-    documented API constraints — they are not a full server simulation.
-    """
-    if size is not None and size <= 0:
-        raise ValueError("size must be a positive integer")
-    if order_type == "limit_order" and limit_price is None:
-        raise ValueError("limit_price is required for limit_order")
-    if order_type == "market_order" and limit_price is not None:
-        raise ValueError("market_order must not carry a limit_price (it is ignored, not a cap)")
-
-
-def _flag_partial(result: Any, sent: list[dict[str, Any]]) -> Any:
-    """Detect a batch partial failure and annotate the response (BUG-2).
-
-    Delta returns only the processed orders with no per-index error, so we compare counts.
-    When fewer come back than were sent, attach a `partial_failure` block (and the dropped
-    ids / client_order_ids we can identify) without hiding the orders that succeeded. No-op
-    for dry-run echoes (nothing was sent) and when every item came back.
-    """
-    if not isinstance(result, dict) or result.get("dry_run"):
-        return result
-    returned = result.get("result")
-    if not isinstance(returned, list) or len(returned) >= len(sent):
-        return result
-    returned_ids = {o.get("id") for o in returned if isinstance(o, dict)}
-    returned_coids = {o.get("client_order_id") for o in returned if isinstance(o, dict)}
-    dropped_ids = [
-        o["id"] for o in sent
-        if isinstance(o, dict) and o.get("id") is not None and o["id"] not in returned_ids
-    ]
-    dropped_coids = [
-        o["client_order_id"] for o in sent
-        if isinstance(o, dict)
-        and o.get("client_order_id") is not None
-        and o["client_order_id"] not in returned_coids
-    ]
-    partial: dict[str, Any] = {
-        "requested": len(sent),
-        "succeeded": len(returned),
-        "dropped": len(sent) - len(returned),
-    }
-    if dropped_ids:
-        partial["dropped_ids"] = dropped_ids
-    if dropped_coids:
-        partial["dropped_client_order_ids"] = dropped_coids
-    result["partial_failure"] = partial
-    return result
-
-
-def _round_to_tick(price: str, tick: Decimal) -> tuple[str, bool]:
-    """Round a price string to the nearest multiple of tick.
-
-    Returns (normalized_string, changed). On any parse failure the input is returned
-    unchanged so a malformed price still reaches the API for its own error.
-    """
-    try:
-        value = Decimal(price)
-    except (InvalidOperation, ValueError, TypeError):
-        return price, False
-    if tick <= 0:
-        return price, False
-    steps = (value / tick).to_integral_value(rounding="ROUND_HALF_UP")
-    snapped = (steps * tick).normalize()
-    # Render without exponent/trailing-zero noise (e.g. 62000.0 not 6.2E+4).
-    normalized = f"{snapped:f}"
-    return normalized, normalized != price
-
-
-def register(
-    mcp: FastMCP,
-    client: DeltaClient,
-    audit: AuditLog | None = None,
-    gate: TradeGate | None = None,
-) -> None:
-    gate = gate or TradeGate()
-    active_lease: ContextVar[int | None] = ContextVar(
-        f"delta_trade_lease_{id(gate)}", default=None
-    )
-    # tick_size keyed by both product id (int) and symbol (str); filled lazily.
-    _tick_cache: dict[int | str, Decimal] = {}
-    _tick_list_loaded = {"done": False}
+def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     def mutation_tool(
         function: Callable[..., Awaitable[Any]],
     ) -> Callable[..., Awaitable[Any]]:
-        """Pin every request in one dispatched mutation to the same client state."""
+        """Pin every request in one dispatched mutation to the same client state.
+
+        A transport failure after the mutation was sent leaves its outcome unknown, so the
+        error names the reads that settle it before anyone resubmits.
+        """
+        unknown_outcome = _OUTCOME_UNKNOWN_BY_TOOL[function.__name__]
 
         @wraps(function)
         async def pinned(*args: Any, **kwargs: Any) -> Any:
-            try:
-                session = mcp.get_context().session
-            except ValueError:
-                session = None
-            lease = gate.lease(session)
-            token = active_lease.set(lease)
-            try:
-                async with client.pin():
+            async with client.pin():
+                try:
                     return await function(*args, **kwargs)
-            finally:
-                active_lease.reset(token)
+                except DeltaApiError as e:
+                    if e.code != "execution_outcome_unknown":
+                        raise
+                    raise DeltaApiError(e.code, context=unknown_outcome, status=e.status) from e
 
-        return mcp.tool(meta=_MUTATING_TOOL_META)(pinned)
+        return mcp.tool()(pinned)
 
-    def _store_product(prod: dict[str, Any]) -> None:
-        tick = prod.get("tick_size")
-        if tick is None:
-            return
-        try:
-            dec = Decimal(str(tick))
-        except (InvalidOperation, ValueError):
-            return
-        if prod.get("id") is not None:
-            _tick_cache[int(prod["id"])] = dec
-        if prod.get("symbol"):
-            _tick_cache[str(prod["symbol"])] = dec
-
-    async def _tick_size(product_id: int | None, product_symbol: str | None) -> Decimal | None:
-        """Resolve a product's tick_size (cached per process). Returns None if unresolvable.
-
-        Prefers GET /products/{symbol}; for an id-only call with a cache miss it falls back
-        to the full /products list once (there is no by-id single-product endpoint) and
-        indexes every product. Never raises — price rounding must not block an order on a
-        metadata-lookup failure.
-        """
-        key: int | str | None = product_symbol if product_symbol is not None else product_id
-        if key is not None and key in _tick_cache:
-            return _tick_cache[key]
-        try:
-            if product_symbol is not None:
-                resp = await client.get(f"/products/{product_symbol}")
-                inner = resp.get("result", resp) if isinstance(resp, dict) else None
-                if isinstance(inner, dict):
-                    _store_product(inner)
-            elif not _tick_list_loaded["done"]:
-                resp = await client.get("/products")
-                products = resp.get("result", []) if isinstance(resp, dict) else []
-                for prod in products if isinstance(products, list) else []:
-                    if isinstance(prod, dict):
-                        _store_product(prod)
-                _tick_list_loaded["done"] = True
-        except Exception as e:  # noqa: BLE001 — never block an order on a lookup failure
-            logger.info("tick_size lookup failed for %s/%s: %s", product_id, product_symbol, e)
-            return None
-        return _tick_cache.get(key) if key is not None else None
-
-    async def _normalize_prices(
-        product_id: int | None, product_symbol: str | None, fields: dict[str, str | None]
-    ) -> list[dict[str, str]]:
-        """Round each non-None price in `fields` (mutated in place) to the nearest tick.
-
-        Returns a list of {field, sent, normalized} for the values that changed.
-        """
-        if not any(v is not None for v in fields.values()):
-            return []
-        tick = await _tick_size(product_id, product_symbol)
-        if tick is None:
-            return []
-        adjustments: list[dict[str, str]] = []
-        for name, raw in fields.items():
-            if raw is None:
-                continue
-            snapped, changed = _round_to_tick(raw, tick)
-            fields[name] = snapped
-            if changed:
-                adjustments.append({"field": name, "sent": raw, "normalized": snapped})
-        return adjustments
-
-    async def _finish(
-        tool: str, method: str, path: str, payload: dict[str, Any], *, dry_run: bool
-    ) -> Any:
+    async def _finish(method: str, path: str, payload: dict[str, Any]) -> Any:
         payload = _clean(payload)
-        if dry_run:
-            if audit:
-                audit.record(tool, payload, dry_run=True)
-            return {"dry_run": True, "method": method, "path": path, "payload": payload}
-        if not gate.accepts(active_lease.get()):
-            if audit:
-                audit.record(tool, payload, error=_REVOKED_MESSAGE)
-            raise RuntimeError(_REVOKED_MESSAGE)
         sender = {"POST": client.post, "PUT": client.put, "DELETE": client.delete}[method]
-        try:
-            result = await sender(path, payload, auth=True)
-        except DeltaApiError as e:
-            reported = e
-            if e.code == "execution_outcome_unknown":
-                reported = DeltaApiError(
-                    e.code,
-                    context=_OUTCOME_UNKNOWN_BY_TOOL[tool],
-                    status=e.status,
-                )
-            if audit:
-                audit.record(tool, payload, error=str(reported))
-            if reported is not e:
-                raise reported from e
-            raise
-        if audit:
-            audit.record(tool, payload, result=result)
-        return result
-
-    def _attach(result: Any, adjustments: list[dict[str, str]]) -> Any:
-        """Surface tick-rounding adjustments on the response without hiding the result."""
-        if adjustments and isinstance(result, dict):
-            key = "adjustments" if result.get("dry_run") else "price_adjustments"
-            result[key] = adjustments
-        return result
+        return await sender(path, payload, auth=True)
 
     # ---------------------------------------------------------------- single order
 
@@ -370,55 +140,42 @@ def register(
         bracket_take_profit_limit_price: str | None = Field(default=None, description="Bracket TP limit price."),
         bracket_trail_amount: str | None = Field(default=None, description="Bracket trailing-stop amount."),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Place a single order. Pass exactly one of product_id or product_symbol.
 
-        limit_price is required for limit_order (and rejected on market_order). For stop
+        The API requires limit_price for limit_order and ignores it on market_order. For stop
         orders set stop_order_type plus stop_price (or trail_amount).
 
         To attach a bracket (TP/SL) you can later edit, pass the bracket_* params here — this
         creates an *entry-order* bracket whose id (the returned order id) is what
         edit_bracket_order expects. (place_bracket_order instead attaches a bracket to an open
         position; those legs are not editable via edit_bracket_order — cancel and re-place.)
-        Prices are rounded to the product's tick; see price_adjustments in the response.
+        Prices are sent exactly as given; the API rejects a price that is off the product tick.
         """
         _require_one(product_id, product_symbol)
-        _validate_order(order_type, limit_price, size)
-        _validate_bracket_sl(bracket_stop_loss_price, bracket_trail_amount)
-        price_fields = {
-            "limit_price": limit_price,
-            "stop_price": stop_price,
-            "bracket_stop_loss_price": bracket_stop_loss_price,
-            "bracket_stop_loss_limit_price": bracket_stop_loss_limit_price,
-            "bracket_take_profit_price": bracket_take_profit_price,
-            "bracket_take_profit_limit_price": bracket_take_profit_limit_price,
-        }
-        adjustments = await _normalize_prices(product_id, product_symbol, price_fields)
         payload = {
             "size": size,
             "side": side,
             "order_type": order_type,
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "limit_price": price_fields["limit_price"],
+            "limit_price": limit_price,
             "stop_order_type": stop_order_type,
-            "stop_price": price_fields["stop_price"],
+            "stop_price": stop_price,
             "trail_amount": trail_amount,
             "stop_trigger_method": stop_trigger_method,
             "time_in_force": time_in_force,
             "post_only": _bs(post_only),
             "reduce_only": _bs(reduce_only),
             "client_order_id": client_order_id,
-            "bracket_stop_loss_price": price_fields["bracket_stop_loss_price"],
-            "bracket_stop_loss_limit_price": price_fields["bracket_stop_loss_limit_price"],
-            "bracket_take_profit_price": price_fields["bracket_take_profit_price"],
-            "bracket_take_profit_limit_price": price_fields["bracket_take_profit_limit_price"],
+            "bracket_stop_loss_price": bracket_stop_loss_price,
+            "bracket_stop_loss_limit_price": bracket_stop_loss_limit_price,
+            "bracket_take_profit_price": bracket_take_profit_price,
+            "bracket_take_profit_limit_price": bracket_take_profit_limit_price,
             "bracket_trail_amount": bracket_trail_amount,
             "bracket_stop_trigger_method": bracket_stop_trigger_method,
         }
-        result = await _finish("place_order", "POST", "/orders", payload, dry_run=dry_run)
-        return _attach(result, adjustments)
+        return await _finish("POST", "/orders", payload)
 
     @mutation_tool
     async def edit_order(
@@ -430,41 +187,35 @@ def register(
         stop_price: str | None = Field(default=None, description="New stop trigger price."),
         trail_amount: str | None = Field(default=None, description="New trailing-stop amount."),
         post_only: bool | None = Field(default=None, description="Reject if it would take liquidity."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Edit an open order. Pass exactly one of product_id or product_symbol.
 
-        Prices are rounded to the product's tick; see price_adjustments in the response.
+        Prices are sent exactly as given; the API rejects a price that is off the product tick.
         """
         _require_one(product_id, product_symbol)
-        _validate_order(None, None, size)  # order_type can't change on edit; just guard size
-        price_fields = {"limit_price": limit_price, "stop_price": stop_price}
-        adjustments = await _normalize_prices(product_id, product_symbol, price_fields)
         payload = {
             "id": id,
             "size": size,
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "limit_price": price_fields["limit_price"],
-            "stop_price": price_fields["stop_price"],
+            "limit_price": limit_price,
+            "stop_price": stop_price,
             "trail_amount": trail_amount,
             "post_only": _bs(post_only),
         }
-        result = await _finish("edit_order", "PUT", "/orders", payload, dry_run=dry_run)
-        return _attach(result, adjustments)
+        return await _finish("PUT", "/orders", payload)
 
     @mutation_tool
     async def cancel_order(
         product_id: int = Field(description="Product id the order belongs to."),
         id: int | None = Field(default=None, description="Order id to cancel."),
         client_order_id: str | None = Field(default=None, description="Your client_order_id."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
             raise ValueError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
-        return await _finish("cancel_order", "DELETE", "/orders", payload, dry_run=dry_run)
+        return await _finish("DELETE", "/orders", payload)
 
     @mutation_tool
     async def cancel_all_orders(
@@ -472,117 +223,78 @@ def register(
         contract_types: list[str] | None = Field(
             default=None, description="Limit to contract types (ignored if product_id is set)."
         ),
-        cancel_limit_orders: bool | None = Field(default=None, description="Include limit orders."),
-        cancel_stop_orders: bool | None = Field(default=None, description="Include stop orders."),
-        cancel_reduce_only_orders: bool | None = Field(default=None, description="Include reduce-only orders."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Cancel open orders. WARNING: with no filters this cancels ALL of your open orders.
 
-        The API's cancel_limit_orders/cancel_stop_orders/cancel_reduce_only_orders flags
-        default to false server-side, so a bare call would otherwise be a no-op. When none of
-        them is set we default all three to true so "cancel all" actually cancels everything;
-        set any flag explicitly to narrow the scope.
+        Limit orders, stop orders and reduce-only orders are all cancelled. Narrow the scope
+        with product_id or contract_types.
         """
-        if cancel_limit_orders is None and cancel_stop_orders is None and cancel_reduce_only_orders is None:
-            cancel_limit_orders = cancel_stop_orders = cancel_reduce_only_orders = True
         payload = {
             "product_id": product_id,
             "contract_types": _csv(contract_types),
-            "cancel_limit_orders": _bs(cancel_limit_orders),
-            "cancel_stop_orders": _bs(cancel_stop_orders),
-            "cancel_reduce_only_orders": _bs(cancel_reduce_only_orders),
+            "cancel_limit_orders": "true",
+            "cancel_stop_orders": "true",
+            "cancel_reduce_only_orders": "true",
         }
-        return await _finish("cancel_all_orders", "DELETE", "/orders/all", payload, dry_run=dry_run)
+        return await _finish("DELETE", "/orders/all", payload)
 
     # ---------------------------------------------------------------- batch orders
-    # BUG-2: Delta's batch endpoints return only the processed orders with no per-index
-    # error info, so itemized per-index status is impossible. _flag_partial detects a
-    # count mismatch (sent N, returned M<N) and attaches a `partial_failure` block while
-    # still returning the orders that went through — the caller is told some items were
-    # dropped without losing sight of what is now live.
-
-    def _check_batch(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not orders:
-            raise ValueError("orders must be a non-empty list")
-        if len(orders) > _MAX_BATCH:
-            raise ValueError(f"batch size {len(orders)} exceeds max {_MAX_BATCH}")
-        return [_clean(o) for o in orders]
 
     @mutation_tool
     async def place_batch_orders(
         orders: list[dict[str, Any]] = Field(
-            description="Up to 50 orders, each {size, side, order_type, limit_price?, "
+            description="Orders, each {size, side, order_type, limit_price?, "
             "time_in_force?, post_only?, client_order_id?}. All same contract. No IOC/stop."
         ),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
-        """Place up to 50 orders on one contract in a single request.
+        """Place orders on one contract in a single request.
 
-        client_order_id must be unique within the batch (mirrors the single-order rejection);
-        cross-checking against already-open orders is not done here.
+        The API's response is returned as-is. When it comes back with fewer orders than were
+        sent, the ones missing from the response were not accepted.
         """
         _require_one(product_id, product_symbol)
-        cleaned = _check_batch(orders)
-        seen_coids: set[str] = set()
-        for order in cleaned:
-            _validate_order(order.get("order_type"), order.get("limit_price"), order.get("size"))
-            coid = order.get("client_order_id")
-            if coid is not None:
-                if coid in seen_coids:
-                    raise ValueError(f"duplicate client_order_id in batch: {coid}")
-                seen_coids.add(coid)
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "orders": cleaned,
+            "orders": [_clean(o) for o in orders],
         }
-        result = await _finish("place_batch_orders", "POST", "/orders/batch", payload, dry_run=dry_run)
-        return _flag_partial(result, cleaned)
+        return await _finish("POST", "/orders/batch", payload)
 
     @mutation_tool
     async def edit_batch_orders(
         orders: list[dict[str, Any]] = Field(
-            description="Up to 50 edits, each {id, size, order_type, limit_price?, post_only?}."
+            description="Edits, each {id, size, order_type, limit_price?, post_only?}."
         ),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
-        """Edit up to 50 orders on one contract in a single request."""
+        """Edit orders on one contract in a single request."""
         _require_one(product_id, product_symbol)
-        cleaned = _check_batch(orders)
-        for order in cleaned:
-            _validate_order(None, None, order.get("size"))  # order_type can't change on edit
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "orders": cleaned,
+            "orders": [_clean(o) for o in orders],
         }
-        result = await _finish("edit_batch_orders", "PUT", "/orders/batch", payload, dry_run=dry_run)
-        return _flag_partial(result, cleaned)
+        return await _finish("PUT", "/orders/batch", payload)
 
     @mutation_tool
     async def cancel_batch_orders(
         orders: list[dict[str, Any]] = Field(
-            description="Up to 50 orders to cancel, each {id} or {client_order_id}."
+            description="Orders to cancel, each {id} or {client_order_id}."
         ),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
-        """Cancel up to 50 orders on one contract in a single request."""
+        """Cancel orders on one contract in a single request."""
         _require_one(product_id, product_symbol)
-        cleaned = _check_batch(orders)
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "orders": cleaned,
+            "orders": [_clean(o) for o in orders],
         }
-        result = await _finish("cancel_batch_orders", "DELETE", "/orders/batch", payload, dry_run=dry_run)
-        return _flag_partial(result, cleaned)
+        return await _finish("DELETE", "/orders/batch", payload)
 
     # ---------------------------------------------------------------- bracket orders
 
@@ -597,38 +309,23 @@ def register(
             default=None, description="{order_type, stop_price, limit_price?}."
         ),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Attach a take-profit / stop-loss bracket to a position. Provide at least one leg.
 
         Note: these legs are not editable via edit_bracket_order (cancel + re-place to change
-        them). Prices are rounded to the product's tick; see price_adjustments in the response.
+        them). Prices are sent exactly as given.
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
             raise ValueError("provide at least one of stop_loss_order or take_profit_order")
-        sl = _clean(stop_loss_order) if stop_loss_order else None
-        tp = _clean(take_profit_order) if take_profit_order else None
-        if sl:
-            _validate_bracket_sl(sl.get("stop_price"), sl.get("trail_amount"))
-        adjustments: list[dict[str, str]] = []
-        for leg_name, leg in (("stop_loss_order", sl), ("take_profit_order", tp)):
-            if not leg:
-                continue
-            leg_fields = {k: leg.get(k) for k in ("stop_price", "limit_price")}
-            for adj in await _normalize_prices(product_id, product_symbol, leg_fields):
-                adj["field"] = f"{leg_name}.{adj['field']}"
-                adjustments.append(adj)
-            leg.update({k: v for k, v in leg_fields.items() if v is not None})
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "stop_loss_order": sl,
-            "take_profit_order": tp,
+            "stop_loss_order": _clean(stop_loss_order) if stop_loss_order else None,
+            "take_profit_order": _clean(take_profit_order) if take_profit_order else None,
             "bracket_stop_trigger_method": bracket_stop_trigger_method,
         }
-        result = await _finish("place_bracket_order", "POST", "/orders/bracket", payload, dry_run=dry_run)
-        return _attach(result, adjustments)
+        return await _finish("POST", "/orders/bracket", payload)
 
     @mutation_tool
     async def edit_bracket_order(
@@ -641,37 +338,26 @@ def register(
         bracket_take_profit_limit_price: str | None = Field(default=None, description="Take-profit limit price."),
         bracket_trail_amount: str | None = Field(default=None, description="Trailing-stop amount."),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Edit the bracket (TP/SL) params on an existing order.
 
         `id` is the *entry order* id (an order created with bracket_* params, e.g. via
         place_order(..., bracket_take_profit_price=...)). It does NOT accept the leg ids of a
-        position bracket created by place_bracket_order. Prices are rounded to the product's
-        tick; see price_adjustments in the response.
+        position bracket created by place_bracket_order. Prices are sent exactly as given.
         """
         _require_one(product_id, product_symbol)
-        _validate_bracket_sl(bracket_stop_loss_price, bracket_trail_amount)
-        price_fields = {
-            "bracket_stop_loss_price": bracket_stop_loss_price,
-            "bracket_stop_loss_limit_price": bracket_stop_loss_limit_price,
-            "bracket_take_profit_price": bracket_take_profit_price,
-            "bracket_take_profit_limit_price": bracket_take_profit_limit_price,
-        }
-        adjustments = await _normalize_prices(product_id, product_symbol, price_fields)
         payload = {
             "id": id,
             "product_id": product_id,
             "product_symbol": product_symbol,
-            "bracket_stop_loss_price": price_fields["bracket_stop_loss_price"],
-            "bracket_stop_loss_limit_price": price_fields["bracket_stop_loss_limit_price"],
-            "bracket_take_profit_price": price_fields["bracket_take_profit_price"],
-            "bracket_take_profit_limit_price": price_fields["bracket_take_profit_limit_price"],
+            "bracket_stop_loss_price": bracket_stop_loss_price,
+            "bracket_stop_loss_limit_price": bracket_stop_loss_limit_price,
+            "bracket_take_profit_price": bracket_take_profit_price,
+            "bracket_take_profit_limit_price": bracket_take_profit_limit_price,
             "bracket_trail_amount": bracket_trail_amount,
             "bracket_stop_trigger_method": bracket_stop_trigger_method,
         }
-        result = await _finish("edit_bracket_order", "PUT", "/orders/bracket", payload, dry_run=dry_run)
-        return _attach(result, adjustments)
+        return await _finish("PUT", "/orders/bracket", payload)
 
     # ---------------------------------------------------------------- positions & leverage
 
@@ -679,32 +365,26 @@ def register(
     async def set_product_leverage(
         product_id: int = Field(description="Product id to set order leverage for."),
         leverage: str = Field(description="Leverage multiplier, e.g. '10'."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Set order leverage for a product."""
         return await _finish(
-            "set_product_leverage", "POST",
-            f"/products/{product_id}/orders/leverage", {"leverage": leverage}, dry_run=dry_run,
+            "POST", f"/products/{product_id}/orders/leverage", {"leverage": leverage}
         )
 
     @mutation_tool
     async def adjust_position_margin(
         product_id: int = Field(description="Product id of the position."),
         delta_margin: str = Field(description="Margin to add (positive) or remove (negative), e.g. '5.0'."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Add or remove isolated margin on a position."""
         payload = {"product_id": product_id, "delta_margin": delta_margin}
-        return await _finish(
-            "adjust_position_margin", "POST", "/positions/change_margin", payload, dry_run=dry_run
-        )
+        return await _finish("POST", "/positions/change_margin", payload)
 
     @mutation_tool
     async def configure_auto_topup(
         product_id: int = Field(description="Product id of the position."),
         auto_topup: bool = Field(description="Enable or disable auto top-up for this position."),
-        dry_run: bool = Field(default=False, description="Validate + echo payload without sending."),
     ) -> dict[str, Any]:
         """Override auto top-up for a single position (otherwise inherits the account setting)."""
         payload = {"product_id": product_id, "auto_topup": auto_topup}
-        return await _finish("configure_auto_topup", "PUT", "/positions/auto_topup", payload, dry_run=dry_run)
+        return await _finish("PUT", "/positions/auto_topup", payload)

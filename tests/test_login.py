@@ -105,7 +105,7 @@ def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
 
     body = store.path().read_text()
     assert "Read Data" in body
-    assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
+    assert "Trading permission" in body  # the commented-out explanation survives
 
 
 def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):
@@ -309,12 +309,3 @@ def test_an_unknown_environment_is_refused(monkeypatch, capsys):
     assert "not an environment" in capsys.readouterr().err
 
 
-def test_a_shell_export_that_would_shadow_the_file_is_reported(terminal, monkeypatch, capsys):
-    """A client launched from this shell inherits the export, and the client always wins.
-
-    Without this the key just saved would appear to do nothing at all.
-    """
-    monkeypatch.setenv("DELTA_API_KEY", "exported-in-the-shell")
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
-    assert login.run() == 0
-    assert "takes precedence over the file" in capsys.readouterr().err

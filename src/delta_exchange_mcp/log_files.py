@@ -1,4 +1,4 @@
-"""Private log files shared by audit and debug logging."""
+"""Private log files for the debug log."""
 
 from __future__ import annotations
 
