@@ -42,10 +42,9 @@ The form has three fields:
 - **API key** and **API secret** — fill them in to let the assistant reach your own account.
   Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys).
   Pick the **Read Data** permission, which allows viewing but not trading. Current Delta
-  documentation does not establish whether Read Data alone is sufficient for account reads;
-  authenticated testnet verification of the exact Read Data and Trading permission matrix is
-  still pending. Leaving the fields empty gives you market data only, unless you have
-  already put a key in the [shared file](#add-your-api-key), in which case that one is used.
+  documentation does not establish whether Read Data alone is sufficient for account reads.
+  Leaving the fields empty gives you market data only, unless you have already put a key in
+  the [shared file](#add-your-api-key), in which case that one is used.
 
 > [!WARNING]
 > A key carrying the **Trading** permission can place **real orders with no size cap**, sized
@@ -228,7 +227,7 @@ this file.
 
 1. Create it at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
 2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
-3. **Read Data** permission is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved. Current Delta documentation does not establish whether Read Data alone covers every account read. Authenticated testnet verification of the exact Read Data and Trading permission matrix is still pending.
+3. **Read Data** permission is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved. Current Delta documentation does not establish whether Read Data alone covers every account read.
 4. Delta can reject a request when its source IP is not on the key's whitelist. The error names the IP that Delta received, so you can update the key in API management.
 5. **Match the environment**: a key from delta.exchange works only with `india_prod`, one from demo.delta.exchange only with `india_testnet`. Mixing them returns `InvalidApiKey`.
 
