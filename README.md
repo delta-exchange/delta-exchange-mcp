@@ -163,6 +163,7 @@ sequence, the calculations, and the output shape. The server ships three:
 | `pnl-analytics` | Review P&L and trading performance | yes |
 | `position-risk` | Report open positions and risk | yes |
 | `funding-carry` | Compare perpetual funding rates | no |
+| `daily-market-brief` | What moved today: gainers, losers, activity, funding | no |
 
 `list_skills` and `get_skill` read every procedure through plain tool calls, for a client
 that only calls tools. Clients that browse resources can read the same text under

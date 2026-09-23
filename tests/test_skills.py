@@ -301,7 +301,7 @@ async def test_a_saved_key_arms_the_gated_skills_without_a_restart(accepted):
         assert "position_risk" in after_prompts
 
         listed = await session.call("list_skills")
-        assert {"pnl-analytics", "position-risk", "funding-carry"} <= {
+        assert {"pnl-analytics", "position-risk", "funding-carry", "daily-market-brief"} <= {
             entry["name"] for entry in listed["skills"]
         }
 
