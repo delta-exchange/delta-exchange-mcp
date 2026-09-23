@@ -129,6 +129,17 @@ superset of the one above it:
 A key without its matching secret is ignored and you stay on market data — the two are
 always used together.
 
+### Prompts
+
+A client that supports MCP prompts lists these as slash commands, so you can start one
+without typing a full question:
+
+| Prompt | Argument | What it asks for |
+|---|---|---|
+| `get_started` | — | A first-run tour: what works with no key, how to connect one safely, a few things to try. |
+| `market_brief` | `underlying` (optional, e.g. `BTC`) | Today's movers, funding extremes, and BTC/ETH context — market data, not advice. |
+| `portfolio_check` | — | Your positions, unrealized P&L, margin/liquidation proximity and open orders. Needs an API key; if none is connected yet, the assistant offers `setup_credentials` first. |
+
 ### Trading
 
 **The key's permissions are the only gate.** There is no mode to set and no restart to do:
