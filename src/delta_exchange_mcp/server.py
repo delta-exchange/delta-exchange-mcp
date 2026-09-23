@@ -14,6 +14,7 @@ from mcp.server.stdio import stdio_server
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import prompts
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
@@ -61,6 +62,10 @@ at.
 Order placement is real and immediate. There is no rehearsal mode and no confirmation
 step, so confirm intent with the user before calling a tool that places, edits, cancels or
 closes anything.
+
+If the user is new here or asks what this can do, offer to run the get_started prompt for
+a tour. For "what's moving today" or a general market check-in, suggest the market_brief
+prompt.
 """
 
 
@@ -112,6 +117,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     mcp.live_client = client
     log_path = debug_log.configure(cfg)
     market.register(mcp, client)
+    prompts.register(mcp)
 
     authenticated_registered = False
 
@@ -218,6 +224,15 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         """
         session = ctx.session
         next_config, _ = await reconcile(session, notify=True)
+        suggested_next = (
+            ["Ask for a portfolio check", "Ask for today's market brief"]
+            if authenticated_registered
+            else [
+                "Run the get_started prompt for a tour",
+                "Call setup_credentials to connect an API key",
+                "Ask for today's market brief",
+            ]
+        )
         return {
             "environment": live.env,
             "credentials_configured": next_config.has_credentials,
@@ -226,6 +241,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             "client_name": _session_client_name(session),
             "version": PACKAGE_VERSION,
             "view_build": form.build_id(),
+            "suggested_next": suggested_next,
         }
 
     # A settings file edited outside this process should be picked up before the client
