@@ -169,11 +169,30 @@ def test_bad_values_are_skipped():
     assert result["losers"] == []
 
 
-def test_zero_signed_delta_is_also_skipped():
-    """oi_change_usd_6h / funding_rate == 0 is treated like missing (rare in live data)."""
-    tickers = [{**LIVE_TICKERS[0], "symbol": "ZERO_FUNDING", "funding_rate": "0"}]
+def test_zero_or_missing_oi_and_funding_keep_the_row():
+    """A flat-OI or zero-funding mover is still a mover; it only leaves that one ranking."""
+    tickers = [
+        {**LIVE_TICKERS[0], "symbol": "ZERO_FUNDING", "funding_rate": "0", "oi_change_usd_6h": "0"},
+        {**LIVE_TICKERS[0], "symbol": "NO_OI_FIGURE", "oi_change_usd_6h": None, "funding_rate": None},
+    ]
     result = _movers(tickers, top_n=10, min_turnover_usd=0)
-    assert result["universe"] == 0
+    assert result["universe"] == 2
+    moved = result["gainers"] + result["losers"]
+    assert {r["symbol"] for r in moved} == {"ZERO_FUNDING", "NO_OI_FIGURE"}
+    assert [r["symbol"] for r in result["oi_buildup"]] == ["ZERO_FUNDING"]
+    assert [r["symbol"] for r in result["funding_extremes"]["highest"]] == ["ZERO_FUNDING"]
+
+
+def test_gainers_and_losers_never_overlap():
+    base = LIVE_TICKERS[0]
+    tickers = [
+        {**base, "symbol": "UP_A", "open": "100", "close": "110"},
+        {**base, "symbol": "UP_B", "open": "100", "close": "101"},
+        {**base, "symbol": "FLAT", "open": "100", "close": "100"},
+    ]
+    result = _movers(tickers, top_n=10, min_turnover_usd=0)
+    assert [r["symbol"] for r in result["gainers"]] == ["UP_A", "UP_B"]
+    assert result["losers"] == []
 
 
 def test_negative_oi_change_and_funding_are_not_skipped():

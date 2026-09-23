@@ -43,20 +43,17 @@ def _positive_float(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
-def _signed_nonzero_float(value: Any) -> float | None:
-    """Parse a ticker delta field (oi_change_usd_6h, funding_rate) to a nonzero float.
+def _optional_float(value: Any) -> float | None:
+    """Parse a signed ticker field (oi_change_usd_6h, funding_rate), or None if absent.
 
-    Unlike `_positive_float`, negative values are real data here (OI can shrink,
-    funding can go negative — the README's own worked example shows -0.284% funding).
-    Only missing/unparseable/exactly-zero is treated as a skip. Checked against a live
-    220-symbol snapshot: this only drops 3 rows (all exactly-zero oi_change_usd_6h);
-    funding_rate never printed exactly 0.
+    Negative and zero are real data here — OI can shrink or sit flat, funding can be
+    negative or zero — so neither drops the row. A missing value only keeps the row out
+    of the one ranking that sorts on it; a +30% mover with no OI figure is still a gainer.
     """
     try:
-        parsed = float(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed != 0 else None
 
 
 def _ticker_row(ticker: dict[str, Any]) -> dict[str, Any] | None:
@@ -96,12 +93,8 @@ def _ticker_row(ticker: dict[str, Any]) -> dict[str, Any] | None:
     oi_value_usd = _positive_float(ticker.get("oi_value_usd"))
     if oi_value_usd is None:
         return None
-    oi_change_usd_6h = _signed_nonzero_float(ticker.get("oi_change_usd_6h"))
-    if oi_change_usd_6h is None:
-        return None
-    funding_rate = _signed_nonzero_float(ticker.get("funding_rate"))
-    if funding_rate is None:
-        return None
+    oi_change_usd_6h = _optional_float(ticker.get("oi_change_usd_6h"))
+    funding_rate = _optional_float(ticker.get("funding_rate"))
 
     change_pct_24h = (close_price - open_price) / open_price * 100
     return {
@@ -116,8 +109,8 @@ def _ticker_row(ticker: dict[str, Any]) -> dict[str, Any] | None:
         # dollar figure is noise, and dropping it keeps rows materially smaller.
         "turnover_usd": round(turnover_usd),
         "oi_value_usd": round(oi_value_usd),
-        "oi_change_usd_6h": round(oi_change_usd_6h),
-        "funding_rate": round(funding_rate, 6),
+        "oi_change_usd_6h": None if oi_change_usd_6h is None else round(oi_change_usd_6h),
+        "funding_rate": None if funding_rate is None else round(funding_rate, 6),
     }
 
 
@@ -145,13 +138,17 @@ def _movers(
     funding_n = max(1, min(top_n // 2, 5))
 
     def top(rows_: list[dict[str, Any]], key: str, reverse: bool, n: int) -> list[dict[str, Any]]:
-        return sorted(rows_, key=lambda r: r[key], reverse=reverse)[:n]
+        ranked = [r for r in rows_ if r[key] is not None]
+        return sorted(ranked, key=lambda r: r[key], reverse=reverse)[:n]
 
+    # Split by sign so an all-green day never lists the smallest gainers as "losers".
+    up = [r for r in universe if r["change_pct_24h"] > 0]
+    down = [r for r in universe if r["change_pct_24h"] < 0]
     return {
         "as_of": _as_of(tickers),
         "universe": len(universe),
-        "gainers": top(universe, "change_pct_24h", True, top_n),
-        "losers": top(universe, "change_pct_24h", False, top_n),
+        "gainers": top(up, "change_pct_24h", True, top_n),
+        "losers": top(down, "change_pct_24h", False, top_n),
         "most_active": top(universe, "turnover_usd", True, top_n),
         "oi_buildup": top(universe, "oi_change_usd_6h", True, top_n),
         "funding_extremes": {
