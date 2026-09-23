@@ -76,6 +76,12 @@ Three things here are load-bearing:
 
 `server.build_server()` registers them only when both creds are present. Without creds, the server runs in pure-public mode — same behaviour as before this surface existed.
 
+### Packaged skills
+
+`skills.py::Catalog` holds the written procedures under `skills_data/<name>/SKILL.md` (flat `name` / `description` / `requires` frontmatter, plus `references/` and `assets/` files read once at discovery) and publishes them as `skill://delta/<name>` resources, the `list_skills` / `get_skill` tools, and one prompt per skill. `requires: public` skills register at startup in `skills.register(mcp)`, right after `market.register`. `requires: credentials` skills stay out of the catalog's resources and prompt until `arm_gated_skills(mcp, catalog)` runs — called from the same `arm_authenticated()` that brings up `account`/`trading`, so a credential saved through the form arms them hot, with no restart, and `disarm_gated_skills` mirrors it on `disarm_authenticated()`. `list_skills`/`get_skill` filter by `Catalog.visible()`/`.get()` on every call, so a client that only calls tools sees the same gating without needing a fresh list. FastMCP 1.27's resource and prompt managers expose no public removal call (only `ToolManager.remove_tool` does); `_remove_resource`/`_remove_prompt` pop the private `_resources`/`_prompts` dicts directly, the same way `server.py` already reaches into SDK internals for the version string and the notification flags.
+
+`report/` contains the local P&L calculator and the `delta-exchange-pnl` command. Preserve its `delta.pnl.input.v1` contract, and check the wheel still contains `skills_data/` and `report/` after any packaging change (`uv build --wheel`, then inspect the zip).
+
 ### Credential entry
 
 Three front-ends fill one file, `~/.delta-exchange-mcp/config.env`:

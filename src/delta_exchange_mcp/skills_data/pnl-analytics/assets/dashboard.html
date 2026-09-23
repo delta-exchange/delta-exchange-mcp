@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P&amp;L Analytics — Delta Exchange</title>
+<!--
+  SELF-CONTAINED DASHBOARD TEMPLATE — delta-exchange-mcp `pnl-analytics` skill.
+
+  HOW TO USE
+  Replace the contents of <script id="pnl-data"> with your computed JSON, then
+  write this file to ~/.delta-exchange-mcp/reports/pnl-<YYYY-MM-DD>.html.
+  Change nothing else. No network requests: it opens offline, forever.
+
+  Every key is optional. A view whose data is missing or empty renders an honest
+  "no data" line instead of an empty frame. Omit what you did not compute.
+
+  {
+    "meta":     {"generated":"2026-08-01","window":"2026-01-01 to 2026-08-01",
+                 "fills":1234,"trades":312,"tier":"A","notes":"optional caveat"},
+    "headline": {"net_pnl":0,"unrealized":0,"win_rate":0,"total_fees":0,
+                 "funding":null,"net_including_funding":null,
+                 "grade":"B+","score":71.4,"persona":"BTC Perps Warrior",
+                 "leak":"one sentence naming the biggest single leak",
+                 "fix":"one sentence naming the change and what it was worth"},
+    "grade_dimensions": [{"label":"Win Rate","score":18.5,"max":25}, ...],
+    "equity":   [{"date":"2026-01-04","cumulative":120.5}, ...],
+    "drawdown": [{"date":"2026-01-04","drawdown":-4.2}, ...],
+    "overview": [{"label":"Avg winner","value":"$210.40"}, ...],
+    "daily":    [{"date":"2026-01-04","pnl":120.5,"trades":3}, ...],
+    "monthly":  [{"month":"2026-01","trades":40,"gross_pnl":0,"fees":0,
+                  "net_pnl":0,"win_rate":0,"best":0,"worst":0}, ...],
+    "hourly":   [{"hour":0,"avg_pnl":0,"trades":0,"win_rate":0}, ...],
+    "day_of_week":[{"day":"Mon","avg_pnl":0,"trades":0,"win_rate":0}, ...],
+    "pnl_distribution":[{"range":"-100 - -50","count":4}, ...],
+    "by_underlying":[{"underlying":"BTC","num_trades":0,"pnl":0,"win_rate":0,
+                      "avg_return":0,"capital":0}, ...],
+    "instruments":{"perps_pnl":0,"perps_count":0,"calls_pnl":0,"calls_count":0,
+                   "puts_pnl":0,"puts_count":0},
+    "correlation":{"tokens":["BTC","ETH"],"matrix":[[1,0.3],[0.3,1]]},
+    "funding":  {"total":0,"paid":0,"received":0,
+                 "by_token":[{"token":"BTC","pnl":0,"count":0}, ...],
+                 "cumulative":[{"date":"2026-01-04","cumulative":0}, ...]},
+    "pareto":   {"index":2,"total":9,"leaders":["BTC","ETH"]},
+    "risk":     [{"label":"Sharpe","value":"1.42","note":"312 daily obs"}, ...],
+    "charges":  {"total_fees":0,"maker_fees":0,"taker_fees":0,
+                 "maker_fill_rate":0,"fees_pct_pnl":0,"fees_pct_volume":0,
+                 "gst_estimate":0,"trades_to_cover":"14",
+                 "by_token":[{"token":"BTC","fees":0}, ...]},
+    "positions":[{"symbol":"BTCUSD","direction":"long","size":10,
+                  "notional":540.2,"entry_price":0,"mark_price":0,
+                  "unrealized_pnl":0,"margin":0,"to_liquidation":"12.4%"}, ...]
+  }
+-->
+<style>
+:root{
+  --db-50:#0C0C0F; --db-100:#111114; --db-150:#18191E; --db-200:#22242C;
+  --db-300:#2D303A; --db-400:#353845;
+  --grey-150:#E1E1E2; --grey-400:#8E9298; --grey-500:#71747A; --grey-600:#44464A;
+  --orange-300:#FE9D55; --orange-400:#FE8935; --orange-500:#FE6C02; --orange-800:#8C3B01;
+  --green-400:#33B991; --green-500:#00A876;
+  --red-400:#FF5C5C; --red-500:#EB5454;
+  --yellow-400:#FFD64D;
+
+  --bg-sub:var(--db-100); --bg-surface:var(--db-150); --bg-primary:var(--db-200);
+  --bg-secondary:var(--db-300); --bg-tertiary:var(--db-400);
+  --text-primary:var(--grey-150); --text-secondary:var(--grey-400);
+  --text-tertiary:var(--grey-500);
+  --brand:var(--orange-500); --brand-text:var(--orange-400);
+  --positive:var(--green-400); --negative:var(--red-400); --warning:var(--yellow-400);
+  --divider:rgba(255,255,255,.08);
+
+  --sp-sm:8px; --sp-md:12px; --sp-lg:16px; --sp-xl:20px; --sp-2xl:24px;
+  --sp-3xl:32px; --sp-hg:48px;
+  --r-md:4px; --r-xl:8px; --r-2xl:12px;
+
+  --ui:"Aileron","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --num:"Space Mono","Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg-sub); color:var(--text-primary);
+  font:400 14px/1.5 var(--ui);
+  font-variant-numeric:tabular-nums;
+  padding-bottom:var(--sp-hg);
+}
+.num{font-family:var(--num); font-variant-numeric:tabular-nums}
+.pos{color:var(--positive)} .neg{color:var(--negative)} .warn{color:var(--warning)}
+.wrap{max-width:1180px; margin:0 auto; padding:0 var(--sp-2xl)}
+
+/* ── Masthead ─────────────────────────────────────────────────────
+   The signature: the account's own equity curve, drawn full-bleed as the
+   substrate with the headline sitting on top of it. One composed block, three
+   z-layers, no seam — the curve fades into the page at both ends. */
+.mast{position:relative; min-height:330px; display:flex; flex-direction:column;
+  justify-content:flex-start; border-bottom:1px solid var(--divider); overflow:hidden}
+.mast-curve{
+  position:absolute; left:0; right:0; bottom:0; width:100%; height:74%;
+  z-index:0; pointer-events:none;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0%,#000 34%,#000 100%);
+          mask-image:linear-gradient(to bottom,transparent 0%,#000 34%,#000 100%);
+}
+.mast-inner{position:relative; z-index:1; padding:var(--sp-2xl) 0 var(--sp-3xl);
+  display:flex; align-items:flex-start; gap:var(--sp-xl)}
+.mast-lead{min-width:0; flex:1 1 auto}
+/* Not a tracked-caps kicker: uppercase is reserved for table headers, so the
+   masthead label and the callouts each get their own treatment. */
+.eyebrow{color:var(--text-tertiary); font-size:12px; margin:0}
+.mast-figure{display:flex; align-items:baseline; gap:var(--sp-lg); flex-wrap:wrap; margin-top:var(--sp-sm)}
+.mast-net{font-family:var(--num); font-size:clamp(34px,6vw,62px); line-height:1.05; letter-spacing:-.02em}
+.mast-meta{color:var(--text-secondary); font-size:13px}
+/* The grade: oversized mono glyph anchored in the flow, never clipped. */
+.mast-grade{flex:0 0 auto; text-align:right; line-height:1}
+.grade{font-family:var(--num); font-size:clamp(56px,10vw,116px); line-height:.92;
+  letter-spacing:.01em; color:var(--brand); display:block}
+.grade-sub{font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--text-tertiary); margin-top:var(--sp-sm)}
+@media (max-width:640px){
+  .mast-inner{flex-direction:column; gap:var(--sp-md)}
+  .mast-grade{text-align:left}
+}
+.persona{margin-top:var(--sp-lg); font-size:15px; color:var(--text-primary)}
+.persona span{color:var(--text-secondary)}
+.callouts{display:grid; gap:var(--sp-sm); margin:var(--sp-xl) 0 var(--sp-2xl); max-width:70ch}
+.callout{display:flex; gap:var(--sp-md); font-size:14px; line-height:1.55}
+.callout b{color:var(--brand-text); font-weight:600; font-size:13px;
+  flex:0 0 62px; padding-top:1px}
+
+/* ── Tabs ─────────────────────────────────────────────────────────── */
+.tabs{display:flex; gap:var(--sp-2xl); overflow-x:auto; border-bottom:1px solid var(--divider);
+  position:sticky; top:0; background:var(--bg-sub); z-index:5; scrollbar-width:thin}
+.tab{appearance:none; background:none; border:0; color:var(--text-secondary);
+  font:inherit; font-size:13px; padding:var(--sp-lg) 0; cursor:pointer; white-space:nowrap;
+  border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s ease}
+.tab:hover{color:var(--text-primary)}
+.tab[aria-selected="true"]{color:var(--brand-text); border-bottom-color:var(--brand)}
+.tab:focus-visible{outline:2px solid var(--brand); outline-offset:3px; border-radius:2px}
+
+/* Panels are visible by default. JS hides the inactive ones, so a page with no
+   JS is one long readable report rather than a blank frame. */
+.panel{padding-top:var(--sp-3xl)}
+.panel[hidden]{display:none}
+h2{font-size:20px; font-weight:600; margin:0 0 var(--sp-lg)}
+h3{font-size:13px; font-weight:600; margin:var(--sp-2xl) 0 var(--sp-md); color:var(--text-secondary)}
+h3:first-child{margin-top:0}
+
+.grid{display:grid; gap:var(--sp-lg); grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.card{background:var(--bg-primary); border:1px solid var(--divider);
+  border-radius:var(--r-xl); padding:var(--sp-lg)}
+.stat-l{color:var(--text-secondary); font-size:12px}
+.stat-v{font-family:var(--num); font-size:20px; margin-top:6px; letter-spacing:-.01em;
+  overflow-wrap:anywhere}
+.stat-n{color:var(--text-tertiary); font-size:11px; margin-top:4px}
+
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{text-align:right; font-weight:500; color:var(--text-tertiary); font-size:11px;
+  letter-spacing:.06em; text-transform:uppercase; padding:0 var(--sp-md) var(--sp-sm) 0;
+  border-bottom:1px solid var(--divider); white-space:nowrap}
+td{text-align:right; padding:var(--sp-sm) var(--sp-md) var(--sp-sm) 0;
+  border-bottom:1px solid var(--divider); font-family:var(--num); white-space:nowrap}
+th:first-child,td:first-child{text-align:left; font-family:var(--ui)}
+.scroll{overflow-x:auto}
+.empty{color:var(--text-tertiary); font-size:13px; padding:var(--sp-lg) 0}
+figure{margin:0 0 var(--sp-lg)}
+figcaption{color:var(--text-tertiary); font-size:11px; margin-top:var(--sp-sm)}
+svg{display:block; max-width:100%}
+.legend{display:flex; gap:var(--sp-lg); flex-wrap:wrap; color:var(--text-secondary);
+  font-size:12px; margin-top:var(--sp-sm)}
+.legend i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px}
+footer{border-top:1px solid var(--divider); margin-top:var(--sp-hg);
+  padding-top:var(--sp-lg); color:var(--text-tertiary); font-size:12px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+@media print{.tabs{display:none} .panel[hidden]{display:block}}
+</style>
+</head>
+<body>
+
+<header class="mast">
+  <svg class="mast-curve" id="mast-curve" viewBox="0 0 1200 210" preserveAspectRatio="none" aria-label="Cumulative P&L"></svg>
+  <div class="wrap mast-inner">
+    <div class="mast-lead">
+      <p class="eyebrow">Delta Exchange India &middot; P&amp;L analytics</p>
+      <div class="mast-figure">
+        <div class="mast-net num" id="m-net">&mdash;</div>
+        <div class="mast-meta" id="m-meta"></div>
+      </div>
+      <p class="persona" id="m-persona"></p>
+    </div>
+    <div class="mast-grade">
+      <span class="grade num" id="m-grade"></span>
+      <div class="grade-sub" id="m-score"></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="callouts" id="m-callouts"></div>
+
+  <div class="tabs" role="tablist" id="tabs"></div>
+
+  <section class="panel" id="p-overview"    role="tabpanel" aria-label="Overview"><h2>Overview</h2><div id="c-overview"></div></section>
+  <section class="panel" id="p-pnl"         role="tabpanel" aria-label="P&L"><h2>P&amp;L</h2><div id="c-pnl"></div></section>
+  <section class="panel" id="p-instruments" role="tabpanel" aria-label="Instruments"><h2>Instruments</h2><div id="c-instruments"></div></section>
+  <section class="panel" id="p-funding"     role="tabpanel" aria-label="Funding"><h2>Funding</h2><div id="c-funding"></div></section>
+  <section class="panel" id="p-risk"        role="tabpanel" aria-label="Risk"><h2>Risk</h2><div id="c-risk"></div></section>
+  <section class="panel" id="p-charges"     role="tabpanel" aria-label="Charges"><h2>Charges</h2><div id="c-charges"></div></section>
+  <section class="panel" id="p-portfolio"   role="tabpanel" aria-label="Portfolio"><h2>Portfolio</h2><div id="c-portfolio"></div></section>
+
+  <footer id="foot"></footer>
+</div>
+
+<script id="pnl-data" type="application/json">
+{"meta":{"generated":"","window":"","fills":0,"trades":0,"tier":""}}
+</script>
+
+<script>
+"use strict";
+(function () {
+  var D = {};
+  try { D = JSON.parse(document.getElementById("pnl-data").textContent) || {}; }
+  catch (e) { D = {}; }
+
+  var CSS = getComputedStyle(document.documentElement);
+  var C = {
+    pos:   CSS.getPropertyValue("--positive").trim() || "#33B991",
+    neg:   CSS.getPropertyValue("--negative").trim() || "#FF5C5C",
+    brand: CSS.getPropertyValue("--brand").trim()    || "#FE6C02",
+    grid:  "rgba(255,255,255,.08)",
+    dim:   CSS.getPropertyValue("--text-tertiary").trim() || "#71747A"
+  };
+
+  // ── formatting ────────────────────────────────────────────────────
+  function num(v, dp) {
+    if (v === null || v === undefined || v === "" || isNaN(v)) return "—";
+    return Number(v).toLocaleString("en-US",
+      { minimumFractionDigits: dp === undefined ? 2 : dp,
+        maximumFractionDigits: dp === undefined ? 2 : dp });
+  }
+  function money(v) {
+    if (v === null || v === undefined || v === "" || isNaN(v)) return "—";
+    return (v < 0 ? "−$" : "$") + Number(Math.abs(v)).toLocaleString("en-US",
+      { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+  }
+  function pct(v, dp) { return (v === null || v === undefined || isNaN(v)) ? "—" : num(v, dp === undefined ? 1 : dp) + "%"; }
+  function sign(v) { return v > 0 ? "pos" : v < 0 ? "neg" : ""; }
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function arr(x) { return Array.isArray(x) && x.length ? x : null; }
+  function set(id, html) { var el = document.getElementById(id); if (el) el.innerHTML = html; }
+  function empty(msg) { return '<p class="empty">' + esc(msg) + "</p>"; }
+
+  // ── SVG primitives ────────────────────────────────────────────────
+  // One shared axis model. Charts are drawn edge to edge inside a padded
+  // box so nothing is ever clipped by the viewBox.
+  function box(w, h, pad) {
+    return { w: w, h: h, l: pad.l, r: w - pad.r, t: pad.t, b: h - pad.b };
+  }
+  function scale(vals, b, floorZero) {
+    var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+    if (floorZero) { mn = Math.min(mn, 0); mx = Math.max(mx, 0); }
+    if (mn === mx) { mn -= 1; mx += 1; }
+    var pad = (mx - mn) * 0.08;
+    mn -= pad; mx += pad;
+    return function (v) { return b.b - (v - mn) / (mx - mn) * (b.b - b.t); };
+  }
+  // Intrinsic width/height plus max-width:100%;height:auto. Forcing width="100%"
+  // against a fixed height letterboxes any chart narrower than its container —
+  // the calendar and the matrix end up centred in a wide empty box.
+  function svg(w, h, inner, label) {
+    return '<svg viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h +
+      '" style="max-width:100%;height:auto" role="img" aria-label="' +
+      esc(label || "chart") + '">' + inner + "</svg>";
+  }
+  function axisLabel(x, y, text, anchor) {
+    return '<text x="' + x + '" y="' + y + '" fill="' + C.dim + '" font-size="10" ' +
+      'font-family="ui-monospace,monospace" text-anchor="' + (anchor || "middle") +
+      '" dominant-baseline="middle">' + esc(text) + "</text>";
+  }
+
+  // Area + line. Shades below zero in the loss colour.
+  function areaChart(pts, key, h, label) {
+    if (!pts) return empty("No data for this period.");
+    var w = 1200, b = box(w, h, { l: 8, r: 8, t: 14, b: 22 });
+    var vals = pts.map(function (p) { return +p[key] || 0; });
+    var y = scale(vals, b, true), zero = y(0);
+    var step = pts.length > 1 ? (b.r - b.l) / (pts.length - 1) : 0;
+    var line = "", up = "", dn = "";
+    pts.forEach(function (p, i) {
+      var X = b.l + i * step, Y = y(+p[key] || 0);
+      line += (i ? "L" : "M") + X.toFixed(1) + " " + Y.toFixed(1);
+    });
+    up = line + "L" + b.r + " " + zero + "L" + b.l + " " + zero + "Z";
+    var last = vals[vals.length - 1];
+    var stroke = last >= 0 ? C.pos : C.neg;
+    var inner =
+      '<path d="' + up + '" fill="' + stroke + '" fill-opacity=".10"/>' +
+      '<line x1="' + b.l + '" y1="' + zero + '" x2="' + b.r + '" y2="' + zero +
+        '" stroke="' + C.grid + '" stroke-width="1"/>' +
+      '<path d="' + line + '" fill="none" stroke="' + stroke +
+        '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+    if (pts.length > 1) {
+      inner += axisLabel(b.l + 2, b.b + 12, pts[0].date || "", "start") +
+               axisLabel(b.r - 2, b.b + 12, pts[pts.length - 1].date || "", "end");
+    }
+    return svg(w, h, inner, label) + (dn || "");
+  }
+
+  // Vertical bars, signed. Labels only when they fit.
+  function barChart(rows, xk, vk, h, label, fmt) {
+    if (!rows) return empty("No data for this period.");
+    var w = 1200, b = box(w, h, { l: 8, r: 8, t: 16, b: 30 });
+    var vals = rows.map(function (r) { return +r[vk] || 0; });
+    var y = scale(vals, b, true), zero = y(0);
+    var slot = (b.r - b.l) / rows.length, bw = Math.max(2, Math.min(46, slot * 0.62));
+    var inner = '<line x1="' + b.l + '" y1="' + zero + '" x2="' + b.r + '" y2="' + zero +
+      '" stroke="' + C.grid + '" stroke-width="1"/>';
+    rows.forEach(function (r, i) {
+      var v = +r[vk] || 0, Y = y(v), cx = b.l + slot * (i + 0.5);
+      var top = Math.min(Y, zero), hh = Math.max(1, Math.abs(Y - zero));
+      inner += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + top.toFixed(1) +
+        '" width="' + bw.toFixed(1) + '" height="' + hh.toFixed(1) +
+        '" rx="1.5" fill="' + (v >= 0 ? C.pos : C.neg) + '" fill-opacity=".85"><title>' +
+        esc(r[xk] + ": " + (fmt ? fmt(v) : num(v))) + "</title></rect>";
+      if (slot > 26) inner += axisLabel(cx, b.b + 14, r[xk]);
+    });
+    return svg(w, h, inner, label);
+  }
+
+  // Horizontal ranked bars — better than vertical when labels are words.
+  // `capMax` forces the scale to a known ceiling (e.g. 25 for a graded
+  // dimension). Without it a 14/25 bar would be drawn against the largest
+  // value present and read far fuller than it is.
+  function rankChart(rows, xk, vk, label, fmt, capMax) {
+    if (!rows) return empty("No data for this period.");
+    rows = rows.slice(0, 12);
+    var rowH = 26, w = 1200, h = rows.length * rowH + 12, lw = 150;
+    var mx = capMax ||
+      Math.max.apply(null, rows.map(function (r) { return Math.abs(+r[vk] || 0); })) || 1;
+    var mid = lw + 8, span = w - mid - 120;
+    var inner = "";
+    rows.forEach(function (r, i) {
+      var v = +r[vk] || 0, cy = i * rowH + rowH / 2 + 6;
+      var bw = Math.abs(v) / mx * span;
+      inner +=
+        '<text x="' + lw + '" y="' + cy + '" fill="#E1E1E2" font-size="12" ' +
+          'text-anchor="end" dominant-baseline="central">' + esc(r[xk]) + "</text>" +
+        '<rect x="' + mid + '" y="' + (cy - 7) + '" width="' + bw.toFixed(1) +
+          '" height="14" rx="2" fill="' + (v >= 0 ? C.pos : C.neg) + '" fill-opacity=".8"/>' +
+        '<text x="' + (mid + bw + 8) + '" y="' + cy + '" fill="' + C.dim +
+          '" font-size="11" font-family="ui-monospace,monospace" ' +
+          'dominant-baseline="central">' + esc(fmt ? fmt(v) : num(v)) + "</text>";
+    });
+    return svg(w, h, inner, label);
+  }
+
+  // Calendar heatmap: weeks as columns, weekdays as rows.
+  function calendar(days, label) {
+    if (!days) return empty("No daily activity in this window.");
+    var cell = 13, gap = 3, pitch = cell + gap;
+    var first = new Date(days[0].date + "T00:00:00Z");
+    var startDow = (first.getUTCDay() + 6) % 7;          // Monday = 0
+    var monday = new Date(first.getTime());
+    monday.setUTCDate(first.getUTCDate() - startDow);
+    var mx = Math.max.apply(null, days.map(function (d) { return Math.abs(+d.pnl || 0); })) || 1;
+    var indexes = days.map(function (d) {
+      return Math.floor((new Date(d.date + "T00:00:00Z") - monday) / 86400000);
+    });
+    var weeks = Math.floor(Math.max.apply(null, indexes) / 7) + 1;
+    var w = Math.max(320, weeks * pitch + 40), h = 7 * pitch + 22;
+    var inner = "";
+    ["M", "T", "W", "T", "F", "S", "S"].forEach(function (d, i) {
+      inner += '<text x="0" y="' + (i * pitch + cell / 2 + 14) + '" fill="' + C.dim +
+        '" font-size="9" dominant-baseline="central">' + d + "</text>";
+    });
+    days.forEach(function (d, i) {
+      var idx = indexes[i], col = Math.floor(idx / 7), row = idx % 7;
+      var v = +d.pnl || 0;
+      var op = (0.18 + Math.abs(v) / mx * 0.82).toFixed(2);
+      inner += '<rect x="' + (col * pitch + 16) + '" y="' + (row * pitch + 8) +
+        '" width="' + cell + '" height="' + cell + '" rx="2" fill="' +
+        (v > 0 ? C.pos : v < 0 ? C.neg : "#2D303A") + '" fill-opacity="' +
+        (v === 0 ? ".35" : op) + '"><title>' + esc(d.date + "  " + money(v) +
+        "  (" + (d.trades || 0) + " trades)") + "</title></rect>";
+    });
+    return svg(w, h, inner, label);
+  }
+
+  // Correlation matrix of daily P&L.
+  function matrix(m, label) {
+    if (!m || !arr(m.tokens) || !arr(m.matrix)) return empty("Not enough overlapping daily data to correlate.");
+    var t = m.tokens, n = t.length, cell = 42, lab = 56;
+    var w = lab + n * cell + 8, h = lab + n * cell + 8, inner = "";
+    t.forEach(function (tok, i) {
+      inner += '<text x="' + (lab - 8) + '" y="' + (lab + i * cell + cell / 2) +
+        '" fill="#E1E1E2" font-size="11" text-anchor="end" dominant-baseline="central">' +
+        esc(tok) + "</text>";
+      inner += '<text x="' + (lab + i * cell + cell / 2) + '" y="' + (lab - 12) +
+        '" fill="#E1E1E2" font-size="11" text-anchor="middle" dominant-baseline="central">' +
+        esc(tok) + "</text>";
+    });
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n; c++) {
+        var v = +(m.matrix[r] || [])[c] || 0;
+        inner += '<rect x="' + (lab + c * cell) + '" y="' + (lab + r * cell) +
+          '" width="' + (cell - 2) + '" height="' + (cell - 2) + '" rx="2" fill="' +
+          (v >= 0 ? C.pos : C.neg) + '" fill-opacity="' + (0.10 + Math.abs(v) * 0.75).toFixed(2) + '"/>' +
+          '<text x="' + (lab + c * cell + (cell - 2) / 2) + '" y="' + (lab + r * cell + (cell - 2) / 2) +
+          '" fill="#E1E1E2" font-size="10" font-family="ui-monospace,monospace" ' +
+          'text-anchor="middle" dominant-baseline="central">' + v.toFixed(2) + "</text>";
+      }
+    }
+    return svg(w, h, inner, label);
+  }
+
+  // ── table ─────────────────────────────────────────────────────────
+  // cols: [[header, key|fn, formatter?]]
+  function table(rows, cols, emptyMsg) {
+    if (!arr(rows)) return empty(emptyMsg || "Nothing to show.");
+    var head = cols.map(function (c) { return "<th>" + esc(c[0]) + "</th>"; }).join("");
+    var body = rows.map(function (r) {
+      return "<tr>" + cols.map(function (c) {
+        var raw = typeof c[1] === "function" ? c[1](r) : r[c[1]];
+        var out = c[2] ? c[2](raw, r) : esc(raw === undefined || raw === null ? "—" : raw);
+        var cls = c[3] ? ' class="' + c[3](raw, r) + '"' : "";
+        return "<td" + cls + ">" + out + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+    return '<div class="scroll"><table><thead><tr>' + head + "</tr></thead><tbody>" +
+      body + "</tbody></table></div>";
+  }
+  var m$ = function (v) { return money(v); };
+  var s$ = function (v) { return sign(v); };
+
+  function stats(items) {
+    if (!arr(items)) return empty("Nothing to show.");
+    return '<div class="grid">' + items.map(function (s) {
+      return '<div class="card"><div class="stat-l">' + esc(s.label) +
+        '</div><div class="stat-v ' + (s.tone || "") + '">' + esc(s.value) + "</div>" +
+        (s.note ? '<div class="stat-n">' + esc(s.note) + "</div>" : "") + "</div>";
+    }).join("") + "</div>";
+  }
+  function fig(title, chart, caption) {
+    return "<h3>" + esc(title) + "</h3><figure>" + chart +
+      (caption ? "<figcaption>" + esc(caption) + "</figcaption>" : "") + "</figure>";
+  }
+
+  // ── masthead ──────────────────────────────────────────────────────
+  var head = D.headline || {}, meta = D.meta || {};
+  var netEl = document.getElementById("m-net");
+  netEl.textContent = money(head.net_pnl);
+  netEl.className = "mast-net num " + sign(head.net_pnl);
+
+  var bits = [];
+  if (meta.window) bits.push(meta.window);
+  if (meta.trades) bits.push(meta.trades + " round trips");
+  if (meta.fills) bits.push(meta.fills + " fills");
+  if (head.win_rate !== undefined) bits.push(pct(head.win_rate) + " win rate");
+  document.getElementById("m-meta").textContent = bits.join("  ·  ");
+
+  if (head.persona) {
+    document.getElementById("m-persona").innerHTML =
+      "<span>Trading as</span> " + esc(head.persona);
+  }
+  if (head.grade) {
+    document.getElementById("m-grade").textContent = head.grade;
+    document.getElementById("m-score").textContent =
+      head.score !== undefined ? num(head.score, 1) + " / 100" : "grade";
+  }
+
+  var co = [];
+  if (head.leak) co.push(["Leak", head.leak]);
+  if (head.fix) co.push(["Fix", head.fix]);
+  if (meta.notes) co.push(["Note", meta.notes]);
+  set("m-callouts", co.map(function (c) {
+    return '<div class="callout"><b>' + esc(c[0]) + "</b><span>" + esc(c[1]) + "</span></div>";
+  }).join(""));
+
+  var eq = arr(D.equity);
+  if (eq) {
+    var b = box(1200, 210, { l: 0, r: 0, t: 30, b: 0 });
+    var vals = eq.map(function (p) { return +p.cumulative || 0; });
+    // No axis padding here: the zero line must land exactly on the bottom edge
+    // so the shaded area meets the section boundary instead of stopping short
+    // of it and leaving a flat band across the masthead.
+    var lo = Math.min(0, Math.min.apply(null, vals));
+    var hi = Math.max(0, Math.max.apply(null, vals));
+    if (lo === hi) { hi = lo + 1; }
+    var y = function (v) { return b.b - (v - lo) / (hi - lo) * (b.b - b.t); };
+    var zero = y(0);
+    var step = eq.length > 1 ? 1200 / (eq.length - 1) : 0, path = "";
+    eq.forEach(function (p, i) {
+      path += (i ? "L" : "M") + (i * step).toFixed(1) + " " + y(+p.cumulative || 0).toFixed(1);
+    });
+    var last = vals[vals.length - 1], col = last >= 0 ? C.pos : C.neg;
+    document.getElementById("mast-curve").innerHTML =
+      '<path d="' + path + "L1200 " + zero + "L0 " + zero + 'Z" fill="' + col + '" fill-opacity=".13"/>' +
+      '<line x1="0" y1="' + zero + '" x2="1200" y2="' + zero + '" stroke="' + C.grid + '"/>' +
+      '<path d="' + path + '" fill="none" stroke="' + col +
+        '" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>';
+  }
+
+  // ── panels ────────────────────────────────────────────────────────
+  var fundingKnown = head.funding !== null && head.funding !== undefined;
+  var netWithFunding = fundingKnown
+    ? (head.net_including_funding !== null && head.net_including_funding !== undefined
+        ? head.net_including_funding : (+head.net_pnl || 0) + (+head.funding || 0))
+    : null;
+  var ov = [
+    { label: "Net realised P&L", value: money(head.net_pnl), tone: sign(head.net_pnl) },
+    { label: "Unrealised P&L", value: money(head.unrealized), tone: sign(head.unrealized) },
+    { label: "Win rate", value: pct(head.win_rate) },
+    { label: "Total fees", value: money(head.total_fees) },
+    { label: "Funding", value: money(head.funding), tone: sign(head.funding),
+      note: fundingKnown ? "" : "not fetched" },
+    { label: "Net incl. funding", value: money(netWithFunding), tone: sign(netWithFunding),
+      note: "realised P&L plus funding — what the account actually saw" }
+  ].concat((D.overview || []).map(function (s) {
+    return { label: s.label, value: s.value, note: s.note, tone: s.tone };
+  }));
+  set("c-overview",
+    stats(ov) +
+    (arr(D.grade_dimensions)
+      ? fig("Grade breakdown",
+            rankChart(D.grade_dimensions, "label", "score", "Grade dimensions",
+                      function (v) { return num(v, 1) + " / 25"; },
+                      Math.max.apply(null, D.grade_dimensions.map(function (d) {
+                        return +d.max || 25;
+                      }))),
+            "Four dimensions, 25 points each. Bars are drawn against the full 25.")
+      : "") +
+    (arr(D.pnl_distribution)
+      ? fig("P&L distribution",
+            barChart(D.pnl_distribution, "range", "count", 190, "P&L distribution",
+                     function (v) { return num(v, 0) + " trades"; }),
+            "Round trips per net-P&L bucket.")
+      : ""));
+
+  set("c-pnl",
+    fig("Daily P&L", calendar(arr(D.daily), "Daily P&L calendar"),
+        "One square per trading day. Hover for the value.") +
+    (arr(D.monthly)
+      ? "<h3>Monthly</h3>" + table(D.monthly, [
+          ["Month", "month"], ["Trades", "trades", function (v) { return num(v, 0); }],
+          ["Gross", "gross_pnl", m$, s$], ["Fees", "fees", m$],
+          ["Net", "net_pnl", m$, s$], ["Win rate", "win_rate", function (v) { return pct(v); }],
+          ["Best", "best", m$, s$], ["Worst", "worst", m$, s$]
+        ])
+      : "") +
+    (arr(D.hourly)
+      ? fig("By hour of day (avg P&L per trade)",
+            barChart(D.hourly, "hour", "avg_pnl", 190, "Average P&L by hour", m$),
+            "Exit hour, UTC.")
+      : "") +
+    (arr(D.day_of_week)
+      ? fig("By day of week (avg P&L per trade)",
+            barChart(D.day_of_week, "day", "avg_pnl", 170, "Average P&L by weekday", m$))
+      : ""));
+
+  var ins = D.instruments || {};
+  set("c-instruments",
+    stats([
+      { label: "Perpetuals", value: money(ins.perps_pnl), tone: sign(ins.perps_pnl),
+        note: (ins.perps_count || 0) + " round trips" },
+      { label: "Calls", value: money(ins.calls_pnl), tone: sign(ins.calls_pnl),
+        note: (ins.calls_count || 0) + " round trips" },
+      { label: "Puts", value: money(ins.puts_pnl), tone: sign(ins.puts_pnl),
+        note: (ins.puts_count || 0) + " round trips" }
+    ]) +
+    (arr(D.by_underlying)
+      ? fig("P&L by underlying", rankChart(D.by_underlying, "underlying", "pnl", "P&L by underlying", m$)) +
+        table(D.by_underlying, [
+          ["Underlying", "underlying"], ["Trades", "num_trades", function (v) { return num(v, 0); }],
+          ["Net P&L", "pnl", m$, s$], ["Win rate", "win_rate", function (v) { return pct(v); }],
+          ["Capital", "capital", m$], ["Avg return", "avg_return", function (v) { return pct(v, 2); }, s$]
+        ])
+      : empty("No per-underlying data.")) +
+    (D.pareto && D.pareto.index
+      ? '<p class="empty">80% of the profit came from ' + num(D.pareto.index, 0) +
+        " of " + num(D.pareto.total, 0) + " underlyings" +
+        (arr(D.pareto.leaders) ? ": " + D.pareto.leaders.map(esc).join(", ") : "") + ".</p>"
+      : "") +
+    "<h3>Daily P&L correlation</h3>" + matrix(D.correlation, "Correlation matrix") +
+    '<p class="empty">Correlation of daily P&amp;L, not of price: it shows whether positions won and lost together.</p>');
+
+  var fu = D.funding;
+  set("c-funding", fu === null || fu === undefined
+    ? empty("Funding was not fetched for this report.")
+    :
+    stats([
+      { label: "Net funding", value: money(fu.total), tone: sign(fu.total) },
+      { label: "Paid", value: money(fu.paid), tone: "neg" },
+      { label: "Received", value: money(fu.received), tone: "pos" }
+    ]) +
+    (arr(fu.cumulative)
+      ? fig("Cumulative funding", areaChart(fu.cumulative, "cumulative", 200, "Cumulative funding"),
+            "Funding is settled every 8 hours against the position, not the fill.")
+      : "") +
+    (arr(fu.by_token)
+      ? fig("Funding by underlying", rankChart(fu.by_token, "token", "pnl", "Funding by token", m$))
+      : empty("No funding transactions in this window.")));
+
+  set("c-risk",
+    stats(D.risk) +
+    (arr(D.drawdown)
+      ? fig("Drawdown", areaChart(D.drawdown, "drawdown", 200, "Drawdown"),
+            "Percentage below peak cumulative P&L, not below account equity.")
+      : ""));
+
+  var ch = D.charges || {};
+  set("c-charges",
+    stats([
+      { label: "Total fees", value: money(ch.total_fees) },
+      { label: "Maker fill rate", value: pct(ch.maker_fill_rate) },
+      { label: "Maker fees", value: money(ch.maker_fees) },
+      { label: "Taker fees", value: money(ch.taker_fees) },
+      { label: "Fees as % of gross P&L", value: pct(ch.fees_pct_pnl) },
+      { label: "Fees as % of volume", value: pct(ch.fees_pct_volume, 4) },
+      { label: "GST estimate", value: money(ch.gst_estimate), note: "18% of fees — an estimate, not a tax statement" },
+      { label: "Trades to cover fees", value: ch.trades_to_cover !== null && ch.trades_to_cover !== undefined ? String(ch.trades_to_cover) : "—",
+        note: "average trades at your current edge that pay for this window's fees" }
+    ]) +
+    (arr(ch.by_token)
+      ? fig("Fees by underlying", rankChart(ch.by_token, "token", "fees", "Fees by token", m$))
+      : ""));
+
+  set("c-portfolio", D.positions === null || D.positions === undefined
+    ? empty("Open positions were not fetched for this report.")
+    : table(D.positions, [
+      ["Symbol", "symbol"], ["Side", "direction"],
+      ["Size", "size", function (v) { return num(v, 0); }],
+      ["Notional", "notional", m$], ["Entry", "entry_price", function (v) { return num(v); }],
+      ["Mark", "mark_price", function (v) { return num(v); }],
+      ["Unrealised", "unrealized_pnl", m$, s$], ["Margin", "margin", m$],
+      ["To liquidation", "to_liquidation"]
+    ], "No open positions."));
+
+  // ── tabs (real controls: click, keyboard, deep link) ──────────────
+  var PANELS = [
+    ["overview", "Overview"], ["pnl", "P&L"], ["instruments", "Instruments"],
+    ["funding", "Funding"], ["risk", "Risk"],
+    ["charges", "Charges"], ["portfolio", "Portfolio"]
+  ];
+  var bar = document.getElementById("tabs");
+  bar.innerHTML = PANELS.map(function (p, i) {
+    return '<button class="tab" role="tab" type="button" id="t-' + p[0] +
+      '" aria-controls="p-' + p[0] + '" aria-selected="' + (i === 0) +
+      '" tabindex="' + (i === 0 ? 0 : -1) + '">' + esc(p[1]) + "</button>";
+  }).join("");
+
+  function show(name) {
+    PANELS.forEach(function (p) {
+      var on = p[0] === name;
+      document.getElementById("p-" + p[0]).hidden = !on;
+      var t = document.getElementById("t-" + p[0]);
+      t.setAttribute("aria-selected", on);
+      t.tabIndex = on ? 0 : -1;
+    });
+    if (history.replaceState) history.replaceState(null, "", "#" + name);
+  }
+  bar.addEventListener("click", function (e) {
+    var t = e.target.closest(".tab");
+    if (t) show(t.id.slice(2));
+  });
+  bar.addEventListener("keydown", function (e) {
+    var i = PANELS.findIndex(function (p) {
+      return document.getElementById("t-" + p[0]).getAttribute("aria-selected") === "true";
+    });
+    var n = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : -1;
+    if (n < 0) return;
+    n = (n + PANELS.length) % PANELS.length;
+    e.preventDefault();
+    show(PANELS[n][0]);
+    document.getElementById("t-" + PANELS[n][0]).focus();
+  });
+
+  var initial = (location.hash || "").slice(1);
+  show(PANELS.some(function (p) { return p[0] === initial; }) ? initial : "overview");
+
+  var f = ["Generated " + (meta.generated || "—") + " by delta-exchange-mcp"];
+  if (meta.tier) f.push("compute tier " + meta.tier);
+  f.push("figures are computed from your own fills and are a record, not a forecast");
+  document.getElementById("foot").textContent = f.join(" · ");
+})();
+</script>
+</body>
+</html>

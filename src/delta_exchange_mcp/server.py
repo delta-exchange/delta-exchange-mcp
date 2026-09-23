@@ -14,6 +14,7 @@ from mcp.server.stdio import stdio_server
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import skills
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
@@ -61,6 +62,10 @@ at.
 Order placement is real and immediate. There is no rehearsal mode and no confirmation
 step, so confirm intent with the user before calling a tool that places, edits, cancels or
 closes anything.
+
+This server ships skills: written procedures for the multi-step jobs people actually
+ask for, such as a full P&L review, a position risk check, or a funding carry scan. Call
+list_skills, then get_skill on the match, before answering those questions.
 """
 
 
@@ -112,6 +117,8 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     mcp.live_client = client
     log_path = debug_log.configure(cfg)
     market.register(mcp, client)
+    # After the tools, so a skill only ever points at a surface that exists.
+    skills_catalog = skills.register(mcp)
 
     authenticated_registered = False
 
@@ -128,18 +135,24 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             file=sys.stderr,
         )
 
-    def arm_authenticated() -> None:
-        """Register the account reads and the trading mutations together."""
+    def arm_authenticated() -> bool:
+        """Register the account reads, the trading mutations, and any gated skill.
+
+        Returns whether the skill catalog changed, so a caller sends the matching
+        resource/prompt notification only when one is warranted.
+        """
         nonlocal authenticated_registered
         account.register(mcp, client)
         trading.register(mcp, client)
         authenticated_registered = True
+        return skills.arm_gated_skills(mcp, skills_catalog)
 
-    def disarm_authenticated() -> None:
+    def disarm_authenticated() -> bool:
         nonlocal authenticated_registered
         for name in (*account.TOOL_NAMES, *trading.TOOL_NAMES):
             mcp.remove_tool(name)
         authenticated_registered = False
+        return skills.disarm_gated_skills(mcp, skills_catalog)
 
     def http_identity(config: config_mod.Config) -> tuple[str, str | None, str | None]:
         """The secret-bearing comparison stays internal and is never returned by a tool."""
@@ -158,6 +171,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         next_config = config_mod.load(shared)
         identity_changed = http_identity(live) != http_identity(next_config)
         tools_changed = False
+        skills_changed = False
         transitions: list[str] = []
 
         live = next_config
@@ -166,11 +180,11 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             transitions.append("identity-rebound")
 
         if authenticated_registered and not next_config.has_credentials:
-            disarm_authenticated()
+            skills_changed = disarm_authenticated()
             tools_changed = True
             transitions.append("authenticated-disarmed")
         elif not authenticated_registered and next_config.has_credentials:
-            arm_authenticated()
+            skills_changed = arm_authenticated()
             tools_changed = True
             transitions.append("authenticated-armed")
 
@@ -178,6 +192,9 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             announce_transition("+".join(transitions))
         if notify and tools_changed:
             await session.send_tool_list_changed()
+            if skills_changed:
+                await session.send_resource_list_changed()
+                await session.send_prompt_list_changed()
         return next_config, shared
 
     if cfg.has_credentials:
@@ -249,16 +266,19 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
 
 
 def initialization_options(mcp: FastMCP) -> InitializationOptions:
-    """What this server tells a client about itself, declaring a changeable tool list.
+    """What this server tells a client about itself, declaring changeable lists.
 
     FastMCP's own `run_stdio_async` builds these with every notification flag off, so the
     server would advertise `tools.listChanged: false`. A client told that has no reason to
     re-read the tool list, which makes the notification sent when a saved credential
     brings the account tools up a no-op — leaving the restart it exists to avoid as the
-    only way through.
+    only way through. Resources and prompts need the same declaration: a saved credential
+    also arms the gated skills' resources and prompt, not just their tools.
     """
     return mcp._mcp_server.create_initialization_options(
-        NotificationOptions(tools_changed=True)
+        NotificationOptions(
+            tools_changed=True, resources_changed=True, prompts_changed=True
+        )
     )
 
 
