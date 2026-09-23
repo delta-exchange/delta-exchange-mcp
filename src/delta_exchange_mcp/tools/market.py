@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -11,11 +12,154 @@ from delta_exchange_mcp.client import DeltaClient
 
 Resolution = Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "1d", "1w"]
 
+# Movers considers a market only above this 24h notional floor. Live 24h turnover_usd
+# across the 220 perpetual_futures tickers (2026-09-23) is heavily right-skewed: median
+# ~$126k, but the bottom quartile trades under $26k. At that thin an end, a handful of
+# resting orders can print a large 24h % swing on no real flow — e.g. STXUSD printed
+# -4.0% on just $37.8k of turnover in that same snapshot, while BCHUSD's genuine +30.0%
+# move carried $38.2M. $250k sits just above the 60th percentile (79/220 symbols clear
+# it that day) — enough breadth to serve top_n up to 50 while cutting the noisy tail;
+# raising/lowering it only trades universe size against how thin a mover it will surface.
+DEFAULT_MIN_TURNOVER_USD = 250_000.0
+
 
 def _csv(values: list[str] | None) -> str | None:
     if not values:
         return None
     return ",".join(values)
+
+
+def _positive_float(value: Any) -> float | None:
+    """Parse a ticker numeric field (arrives as a string) to a float > 0, else None.
+
+    For price/volume fields (mark_price, open, high, turnover_usd, ...) a missing,
+    empty, non-numeric, or placeholder-zero value signals a freshly listed or stale
+    product rather than real data, so zero is treated the same as missing.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _signed_nonzero_float(value: Any) -> float | None:
+    """Parse a ticker delta field (oi_change_usd_6h, funding_rate) to a nonzero float.
+
+    Unlike `_positive_float`, negative values are real data here (OI can shrink,
+    funding can go negative — the README's own worked example shows -0.284% funding).
+    Only missing/unparseable/exactly-zero is treated as a skip. Checked against a live
+    220-symbol snapshot: this only drops 3 rows (all exactly-zero oi_change_usd_6h);
+    funding_rate never printed exactly 0.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed != 0 else None
+
+
+def _ticker_row(ticker: dict[str, Any]) -> dict[str, Any] | None:
+    """Build one compact movers row from a raw `/tickers` entry, or None to skip it.
+
+    change_pct_24h is (close - open) / open — the last-traded-price move, not
+    mark_change_24h. Verified against a live snapshot (2026-09-23) for BTCUSD, ETHUSD,
+    SOLUSD and all 220 perpetual_futures tickers: (close-open)/open*100 matches the
+    API's own `ltp_change_24h` field to within float noise (mean abs diff 2.6e-5 across
+    220 symbols) — Delta's docs describe ltp_change_24h as "last traded price change
+    over 24 hours", confirming this is the standard 24h % figure. mark_change_24h tracks
+    the same move loosely (corr 0.99) but is a distinct, noisier quantity (mean abs diff
+    0.43pp, one outlier at 7.5pp) because it's driven off the mark/index price rather
+    than trades, so it is deliberately not used here.
+    """
+    symbol = ticker.get("symbol")
+    if not symbol:
+        return None
+    mark_price = _positive_float(ticker.get("mark_price"))
+    if mark_price is None:
+        return None
+    open_price = _positive_float(ticker.get("open"))
+    if open_price is None:
+        return None
+    close_price = _positive_float(ticker.get("close"))
+    if close_price is None:
+        return None
+    high = _positive_float(ticker.get("high"))
+    if high is None:
+        return None
+    low = _positive_float(ticker.get("low"))
+    if low is None:
+        return None
+    turnover_usd = _positive_float(ticker.get("turnover_usd"))
+    if turnover_usd is None:
+        return None
+    oi_value_usd = _positive_float(ticker.get("oi_value_usd"))
+    if oi_value_usd is None:
+        return None
+    oi_change_usd_6h = _signed_nonzero_float(ticker.get("oi_change_usd_6h"))
+    if oi_change_usd_6h is None:
+        return None
+    funding_rate = _signed_nonzero_float(ticker.get("funding_rate"))
+    if funding_rate is None:
+        return None
+
+    change_pct_24h = (close_price - open_price) / open_price * 100
+    return {
+        "symbol": symbol,
+        # 4dp keeps this a compact summary (full mark-price precision is one
+        # get_ticker/list_tickers call away) while still showing sub-cent altcoins.
+        "mark_price": round(mark_price, 4),
+        "change_pct_24h": round(change_pct_24h, 2),
+        "high_24h": round(high, 4),
+        "low_24h": round(low, 4),
+        # Whole-dollar notional: cent-level precision on a multi-thousand/million-
+        # dollar figure is noise, and dropping it keeps rows materially smaller.
+        "turnover_usd": round(turnover_usd),
+        "oi_value_usd": round(oi_value_usd),
+        "oi_change_usd_6h": round(oi_change_usd_6h),
+        "funding_rate": round(funding_rate, 6),
+    }
+
+
+def _as_of(tickers: list[dict[str, Any]]) -> str:
+    """ISO timestamp for the response: the latest ticker `timestamp` (microseconds
+    since epoch), falling back to the fetch time if none parse."""
+    stamps = [_positive_float(t.get("timestamp")) for t in tickers]
+    latest = max((s for s in stamps if s is not None), default=None)
+    if latest is None:
+        return datetime.now(timezone.utc).isoformat()
+    return datetime.fromtimestamp(latest / 1_000_000, tz=timezone.utc).isoformat()
+
+
+def _movers(
+    tickers: list[dict[str, Any]],
+    top_n: int,
+    min_turnover_usd: float,
+) -> dict[str, Any]:
+    """Pure ranking helper: raw `/tickers` result -> compact movers payload.
+
+    Kept separate from the tool so it's unit-testable without an HTTP mock.
+    """
+    rows = [row for row in (_ticker_row(t) for t in tickers) if row is not None]
+    universe = [row for row in rows if row["turnover_usd"] >= min_turnover_usd]
+    funding_n = max(1, min(top_n // 2, 5))
+
+    def top(rows_: list[dict[str, Any]], key: str, reverse: bool, n: int) -> list[dict[str, Any]]:
+        return sorted(rows_, key=lambda r: r[key], reverse=reverse)[:n]
+
+    return {
+        "as_of": _as_of(tickers),
+        "universe": len(universe),
+        "gainers": top(universe, "change_pct_24h", True, top_n),
+        "losers": top(universe, "change_pct_24h", False, top_n),
+        "most_active": top(universe, "turnover_usd", True, top_n),
+        "oi_buildup": top(universe, "oi_change_usd_6h", True, top_n),
+        "funding_extremes": {
+            "highest": top(universe, "funding_rate", True, funding_n),
+            "lowest": top(universe, "funding_rate", False, funding_n),
+        },
+        "note": "Market data only, not investment advice.",
+    }
 
 
 def register(mcp: FastMCP, client: DeltaClient) -> None:
@@ -75,6 +219,35 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
                 "underlying_asset_symbols": _csv(underlying_asset_symbols),
             },
         )
+
+    @mcp.tool()
+    async def get_market_movers(
+        contract_types: list[str] | None = Field(
+            default=None,
+            description="Filter: perpetual_futures, futures, call_options, put_options. Defaults to perpetual_futures.",
+        ),
+        top_n: int = Field(
+            default=10, ge=1, le=50, description="Rows per list (gainers, losers, most_active, ...)."
+        ),
+        min_turnover_usd: float = Field(
+            default=DEFAULT_MIN_TURNOVER_USD,
+            ge=0,
+            description="Exclude symbols below this 24h turnover_usd floor before ranking, so thin/illiquid "
+            "contracts don't dominate the lists on noise.",
+        ),
+    ) -> dict[str, Any]:
+        """Factual snapshot of which contracts are up/down over the last 24h — market data only, not investment advice.
+
+        One `/tickers` fetch, ranked several ways: gainers/losers by 24h % change (last
+        traded price basis), most_active by 24h turnover_usd, oi_buildup by 6h open-interest
+        change, and funding_extremes (highest/lowest funding rate). Reports what the numbers
+        are, not what they mean or what to do about them — no predictions, no buy/sell language.
+        """
+        raw = await client.get(
+            "/tickers",
+            params={"contract_types": _csv(contract_types) or "perpetual_futures"},
+        )
+        return _movers(raw.get("result", []), top_n, min_turnover_usd)
 
     @mcp.tool()
     async def get_orderbook(

@@ -122,7 +122,7 @@ superset of the one above it:
 
 | Tier | You set | Unlocks |
 |---|---|---|
-| Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices |
+| Market data | nothing | Prices, order books, option chains, candles, funding / OI history, indices, market movers |
 | Account, read-only | an API key — see [Add your API key](#add-your-api-key) | Your positions, orders, fills, balances, trading stats, preferences |
 | Trading | a key with **Trading** permission | Place / edit / cancel orders, brackets, leverage, margin, close-all |
 
