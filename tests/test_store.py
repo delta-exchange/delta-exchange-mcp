@@ -390,3 +390,71 @@ def test_write_reports_a_location_it_cannot_use(tmp_path, monkeypatch):
     blocker.write_text("not a directory")
     monkeypatch.setenv("DELTA_MCP_CONFIG_FILE", str(blocker / "config.env"))
     assert store.write({"DELTA_API_KEY": "k"}) is not None
+
+
+# --- read() caching: reconcile() calls this on every tools/list -----------------
+
+
+def _counting_dotenv_values(monkeypatch):
+    calls = []
+    real = store.dotenv_values
+
+    def wrapped(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(store, "dotenv_values", wrapped)
+    return calls
+
+
+def test_read_does_not_reparse_an_unchanged_file(monkeypatch):
+    write_store("DELTA_API_KEY=one\nDELTA_API_SECRET=s\n")
+    calls = _counting_dotenv_values(monkeypatch)
+
+    first = store.read()
+    second = store.read()
+
+    assert first == second == {"DELTA_API_KEY": "one", "DELTA_API_SECRET": "s"}
+    assert len(calls) == 1
+
+
+def test_read_reparses_after_the_file_changes(monkeypatch):
+    path = write_store("DELTA_API_KEY=one\nDELTA_API_SECRET=s\n")
+    calls = _counting_dotenv_values(monkeypatch)
+
+    assert store.read()["DELTA_API_KEY"] == "one"
+
+    # A same-second edit could keep mtime_ns identical on a coarse filesystem clock,
+    # so bump the timestamp explicitly the way a genuinely later edit would.
+    path.write_text("DELTA_API_KEY=two\nDELTA_API_SECRET=s\n")
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
+
+    assert store.read()["DELTA_API_KEY"] == "two"
+    assert len(calls) == 2
+
+
+def test_write_invalidates_the_cache_even_at_the_same_size(monkeypatch):
+    """A same-size same-tick rewrite must never read back stale cached values.
+
+    `write()`'s own `os.replace` can land inside one filesystem's mtime-resolution
+    window and produce a file the same size as before (a key swapped for another key
+    of equal length is the realistic case) — the scenario a passive mtime+size cache
+    gets wrong, which is why `write()` invalidates the entry directly instead of
+    trusting the new stat to differ.
+    """
+    write_store("DELTA_API_KEY=aaaa\nDELTA_API_SECRET=s\n")
+    assert store.read()["DELTA_API_KEY"] == "aaaa"
+
+    store.write({"DELTA_API_KEY": "bbbb"})
+
+    assert store.read()["DELTA_API_KEY"] == "bbbb"
+
+
+def test_read_recovers_after_the_file_disappears(monkeypatch):
+    path = write_store("DELTA_API_KEY=one\n")
+    assert store.read() == {"DELTA_API_KEY": "one"}
+
+    path.unlink()
+
+    assert store.read() == {}
