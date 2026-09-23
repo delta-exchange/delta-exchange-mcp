@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Actions are pinned to a commit SHA with the tag in the trailing comment, matching
+# ci.yml and bundle.yml — see the note in bundle.yml for why and how to bump one.
+
+jobs:
+  guard:
+    # Fails the release before anything is built or published if the tag, pyproject.toml,
+    # and server.json ever disagree on version. Nothing downstream reruns this check, so a
+    # green guard is the only thing standing between a mistagged commit and a published
+    # server.json that describes a PyPI release that doesn't match it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify tag, pyproject.toml, and server.json agree on version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          SERVER_VERSION=$(jq -r '.version' server.json)
+          PACKAGE_VERSION=$(jq -r '.packages[0].version' server.json)
+          echo "tag=$TAG_VERSION pyproject.toml=$PYPROJECT_VERSION server.json=$SERVER_VERSION server.json.packages[0]=$PACKAGE_VERSION"
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ] || [ "$TAG_VERSION" != "$SERVER_VERSION" ] || [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::Version mismatch — tag v$TAG_VERSION, pyproject.toml $PYPROJECT_VERSION, server.json $SERVER_VERSION, server.json packages[0] $PACKAGE_VERSION"
+            exit 1
+          fi
+
+  build:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check src tests scripts packaging
+      - run: uv run pytest
+      - run: rm -rf dist && uv build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing — no stored PyPI token
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  publish-mcp-registry:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC login to the MCP registry — no stored token
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Pinned to a specific mcp-publisher release rather than /latest/download/, matching
+      # the SHA-pinning policy above. If a future registry deployment reports "invalid
+      # audience", bump this to the release that fixes it (see the CLI's own troubleshooting
+      # table) rather than switching back to a floating URL.
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+      - name: Authenticate to the MCP registry via GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json to the MCP registry
+        run: ./mcp-publisher publish
