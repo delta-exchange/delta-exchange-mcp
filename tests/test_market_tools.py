@@ -33,6 +33,16 @@ async def test_list_products_passes_csv_filters(client: DeltaClient):
     assert res["result"] == []
 
 
+def test_ticker_tools_describe_time_and_percent_fields(client: DeltaClient):
+    import asyncio
+
+    mcp = MCPServer("test")
+    market.register(mcp, client)
+    tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    for name in ("get_ticker", "list_tickers"):
+        assert market.TICKER_FIELDS in tools[name].description
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_error_body_raises_delta_api_error(client: DeltaClient):
