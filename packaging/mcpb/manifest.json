@@ -173,7 +173,7 @@
     },
     {
       "name": "get_ticker",
-      "description": "Get 24h ticker (price, volume, OI, mark/spot) for one symbol."
+      "description": "Get the ticker (price, volume, OI, mark/spot) for one symbol. `close` is the last traded price, `mark_price` the fair price, and `spot_price` the external index. `timestamp` is the fetch time in microseconds. `open`, `high`, `low`, `volume` and the `*_change_24h` fields cover a rolling 24h window that Delta refreshes every few minutes; `time` is that window's start, not the fetch time. `funding_rate`, `ltp_change_24h` and `mark_change_24h` are already percentages: 0.008 means 0.008%."
     },
     {
       "name": "get_trading_preferences",
@@ -201,7 +201,7 @@
     },
     {
       "name": "list_tickers",
-      "description": "List tickers across many products with optional contract-type / underlying filters."
+      "description": "List tickers across many products with optional contract-type / underlying filters. `close` is the last traded price, `mark_price` the fair price, and `spot_price` the external index. `timestamp` is the fetch time in microseconds. `open`, `high`, `low`, `volume` and the `*_change_24h` fields cover a rolling 24h window that Delta refreshes every few minutes; `time` is that window's start, not the fetch time. `funding_rate`, `ltp_change_24h` and `mark_change_24h` are already percentages: 0.008 means 0.008%."
     },
     {
       "name": "place_batch_orders",
