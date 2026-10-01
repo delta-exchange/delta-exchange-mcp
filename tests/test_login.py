@@ -41,7 +41,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
         pass
 
     monkeypatch.setattr("delta_exchange_mcp.client.asyncio.sleep", no_sleep)
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             status,
             json={"success": False, "error": {"code": code}},
@@ -58,7 +58,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
 @respx.mock
 async def test_api_key_rejection_is_a_credential_rejection():
     """A documented authentication failure is decisive and must prevent a save."""
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             401,
             json={"success": False, "error": {"code": "InvalidApiKey"}},
@@ -104,8 +104,19 @@ def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
     login.run()
 
     body = store.path().read_text()
-    assert "Read Data" in body
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
     assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
+
+
+def test_login_does_not_claim_read_data_is_sufficient(terminal, monkeypatch, capsys):
+    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
+    login.run()
+
+    body = capsys.readouterr().out
+    assert "permission for trading preferences" in body
+    assert "does not establish whether Read Data alone is sufficient" in body
+    assert "permission is enough" not in body
 
 
 def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):

@@ -14,11 +14,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 from delta_exchange_mcp.config import Config, setting
+from delta_exchange_mcp.log_files import fallback_path, open_log
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
 LOGGER_NAMES = ("delta_exchange_mcp", "httpx")
@@ -36,18 +36,13 @@ def _resolve_path() -> Path:
     return Path.home() / ".delta-exchange-mcp" / "logs" / name
 
 
+class _PrivateFileHandler(logging.FileHandler):
+    def _open(self):
+        return open_log(Path(self.baseFilename))
+
+
 def _make_handler(path: Path) -> logging.FileHandler:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(path, encoding="utf-8")
-    # Owner read/write only — the log may contain account data (balances, fills,
-    # transactions). FileHandler creates the file empty under the process umask
-    # (often 644), so tighten before any body is written. Best-effort: no-op on
-    # platforms without POSIX permissions (e.g. Windows).
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    return handler
+    return _PrivateFileHandler(path, encoding="utf-8")
 
 
 def _open_handler(path: Path) -> tuple[logging.FileHandler, Path]:
@@ -55,7 +50,7 @@ def _open_handler(path: Path) -> tuple[logging.FileHandler, Path]:
     try:
         return _make_handler(path), path
     except OSError:
-        fallback = Path(tempfile.gettempdir()) / "delta-exchange-mcp" / path.name
+        fallback = fallback_path(path.name)
         return _make_handler(fallback), fallback
 
 

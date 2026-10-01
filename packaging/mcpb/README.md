@@ -159,6 +159,13 @@ is generated alongside the shipped `pyproject.toml` and so agrees with it.
   fix, and `build.sh` and `sign.py` both use that. Bump the SHA deliberately; never point
   it at a moving ref.
 
+  The CLI cache defaults to `~/.cache/delta-exchange-mcp/mcpb-cli`. `MCPB_CLI_CACHE`
+  can select another location, including CI's workspace cache. Before reuse or cleanup,
+  the builder verifies ownership and rejects paths writable by other users or dependency
+  symlinks outside the cache. Building and signing require macOS, Linux, or WSL so these
+  checks can verify POSIX ownership and permissions. Windows bundle installation and
+  server operation are unaffected.
+
   The pin covers the dependencies too. Upstream vendors its own yarn release at
   `.yarn/releases/` and commits `yarn.lock`, so installing with that binary and
   `--immutable` fixes all 605 transitive packages to the same commit. Do not substitute
