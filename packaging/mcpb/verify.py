@@ -70,7 +70,7 @@ def check_archive(mcpb: Path) -> None:
 
 
 def launch_env(
-    manifest: dict, mode: str, workdir: Path, with_key: bool = True
+    manifest: dict, mode: str, workdir: Path, key: str | None = "placeholder"
 ) -> dict[str, str]:
     """The environment a host would build, over a deliberately hostile one.
 
@@ -96,8 +96,8 @@ def launch_env(
     """
     config = {k: v["default"] for k, v in manifest["user_config"].items() if "default" in v}
     config["mode"] = mode
-    if with_key:
-        config.update({"api_key": "placeholder", "api_secret": "placeholder"})
+    if key is not None:
+        config.update({"api_key": key, "api_secret": key})
 
     env = dict(os.environ)
     env.update({
@@ -256,18 +256,20 @@ def main() -> None:
         if not default:
             raise SystemExit("no tools registered")
 
-        keyless = handshake(
-            tmp,
-            launch_env(
-                manifest, manifest["user_config"]["mode"]["default"], tmp, with_key=False
-            ),
-        )
-        print(f"  no key:       {len(keyless)} tools")
-        if len(keyless) >= len(default):
+        # A field left empty reaches the server blank from some hosts and as its unexpanded
+        # placeholder from Claude Desktop. Both must register the same no-key tool list.
+        default_mode = manifest["user_config"]["mode"]["default"]
+        blank = handshake(tmp, launch_env(manifest, default_mode, tmp, key=""))
+        unexpanded = handshake(tmp, launch_env(manifest, default_mode, tmp, key=None))
+        print(f"  no key:       {len(blank)} tools blank, {len(unexpanded)} unexpanded")
+        if set(unexpanded) != set(blank):
+            extra = sorted(set(unexpanded) - set(blank))
             raise SystemExit(
-                "empty key fields registered the account tools: the unexpanded "
-                "${user_config.api_key} placeholder was read as a key"
+                "unexpanded ${user_config.api_key} was read as a key and registered "
+                f"{', '.join(extra[:5])}"
             )
+        if set(blank) >= set(default):
+            raise SystemExit("blank key fields registered every keyed tool")
 
         # And the opt-in has to actually reach trading, or the field is decorative.
         opted = handshake(tmp, launch_env(manifest, "trade", tmp))
