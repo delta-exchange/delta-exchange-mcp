@@ -49,16 +49,19 @@ until all of this passes:
 - the archive is valid to a **strict** zip parser, which is what Claude Desktop uses
 - the packed payload is **exactly** the expected file set, so build tooling sitting beside
   it in this directory cannot leak in through a missed `.mcpbignore` rule
-- two real MCP **handshakes** against a fresh unpack — `initialize`, then `tools/list`
+- three real MCP **handshakes** against a fresh unpack — `initialize`, then `tools/list`
 - **the form decides the mode, not the environment**: accepting the declared default
   registers no mutation tool even when the ambient environment says `DELTA_MCP_MODE=trade`
 - **mutations identify themselves**: every trading tool carries the namespaced
   `_meta["delta.exchange/mutating"]` marker, so the verifier does not infer safety from names
+- **empty key fields mean no key**: Claude Desktop passes an unfilled optional field as the
+  literal `${user_config.api_key}`, so a run with the key fields unfilled must register fewer
+  tools than one with a key
 - **the opt-in works**: `trade` reaches all 13 mutation tools, so the field is not decorative
 - **nothing undeclared**: every tool the server registers appears in the manifest, which is
   what `tools_generated: false` promises
 
-Both handshakes start from a deliberately hostile environment — `DELTA_MCP_MODE=trade`,
+Every handshake starts from a deliberately hostile environment — `DELTA_MCP_MODE=trade`,
 credentials and `DELTA_MCP_DEBUG=1` exported — and then apply the manifest's `env` over it with
 `${user_config.x}` resolved the way a host resolves it. Debug and audit output are redirected
 into the throwaway unpack so a build never writes to `~/.delta-exchange-mcp`. That is what makes

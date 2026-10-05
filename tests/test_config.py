@@ -56,6 +56,19 @@ def test_blank_credentials_read_as_absent(monkeypatch, value):
     assert cfg.partial_credentials is False
 
 
+def test_unexpanded_bundle_placeholders_read_as_absent(monkeypatch, tmp_path):
+    """Claude Desktop passes an empty optional field through as its literal placeholder."""
+    shared = tmp_path / "config.env"
+    shared.write_text("DELTA_API_KEY=file-key\nDELTA_API_SECRET=file-secret\n")
+    monkeypatch.setenv("DELTA_MCP_CONFIG_FILE", str(shared))
+    monkeypatch.setenv("DELTA_API_KEY", "${user_config.api_key}")
+    monkeypatch.setenv("DELTA_API_SECRET", "${user_config.api_secret}")
+    monkeypatch.setenv("DELTA_MCP_ENV", "${user_config.environment}")
+    cfg = config_mod.load()
+    assert (cfg.api_key, cfg.api_secret) == ("file-key", "file-secret")
+    assert cfg.env == "india_prod"
+
+
 def test_a_pasted_credential_keeps_its_trailing_newline_out(monkeypatch):
     """Copying from the dashboard brings a newline, which breaks signing, not the load."""
     monkeypatch.setenv("DELTA_API_KEY", "  a-real-key\n")

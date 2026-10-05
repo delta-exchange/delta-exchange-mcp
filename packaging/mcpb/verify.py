@@ -69,7 +69,9 @@ def check_archive(mcpb: Path) -> None:
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
+def launch_env(
+    manifest: dict, mode: str, workdir: Path, with_key: bool = True
+) -> dict[str, str]:
     """The environment a host would build, over a deliberately hostile one.
 
     The ambient half sets DELTA_MCP_MODE=trade and supplies credentials, which is what a
@@ -92,8 +94,10 @@ def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
     here for a reason CI could never reproduce. Left at their defaults, every build also
     wrote three files into a home directory a build has no business touching.
     """
-    config = {k: v.get("default", "") for k, v in manifest["user_config"].items()}
-    config.update({"mode": mode, "api_key": "placeholder", "api_secret": "placeholder"})
+    config = {k: v["default"] for k, v in manifest["user_config"].items() if "default" in v}
+    config["mode"] = mode
+    if with_key:
+        config.update({"api_key": "placeholder", "api_secret": "placeholder"})
 
     env = dict(os.environ)
     env.update({
@@ -107,7 +111,8 @@ def launch_env(manifest: dict, mode: str, workdir: Path) -> dict[str, str]:
     })
     for key, raw in manifest["server"]["mcp_config"]["env"].items():
         env[key] = re.sub(
-            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), "")), raw
+            # Claude Desktop leaves an unfilled field without a default unexpanded.
+            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), m.group(0))), raw
         )
     return env
 
@@ -250,6 +255,19 @@ def main() -> None:
             )
         if not default:
             raise SystemExit("no tools registered")
+
+        keyless = handshake(
+            tmp,
+            launch_env(
+                manifest, manifest["user_config"]["mode"]["default"], tmp, with_key=False
+            ),
+        )
+        print(f"  no key:       {len(keyless)} tools")
+        if len(keyless) >= len(default):
+            raise SystemExit(
+                "empty key fields registered the account tools: the unexpanded "
+                "${user_config.api_key} placeholder was read as a key"
+            )
 
         # And the opt-in has to actually reach trading, or the field is decorative.
         opted = handshake(tmp, launch_env(manifest, "trade", tmp))
