@@ -165,7 +165,7 @@ def _api_error(error: DeltaApiError) -> Outcome:
         return Outcome("invalid_key", failed=True)
     if error.code in _INVALID_SIGNATURE_CODES:
         return Outcome("invalid_signature", failed=True)
-    if error.code == "SignatureExpired":
+    if error.code in {"SignatureExpired", "expired_signature"}:
         return Outcome("clock_error", failed=True)
     if error.code == "ip_not_whitelisted_for_api_key":
         return Outcome("ip_restricted", failed=True)

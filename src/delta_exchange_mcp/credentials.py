@@ -89,7 +89,7 @@ def save(env: str, key: str, secret: str) -> str | None:
 
     The environment goes in alongside them deliberately. It is not a separate preference
     but part of what makes the key usable at all, and saving a testnet key while the file
-    still says india_prod produces InvalidApiKey on every call.
+    still says india_prod produces invalid_api_key on every call.
     """
     return store.write(
         {"DELTA_MCP_ENV": env, "DELTA_API_KEY": key, "DELTA_API_SECRET": secret}

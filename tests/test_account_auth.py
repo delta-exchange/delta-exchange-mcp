@@ -157,13 +157,13 @@ async def test_idle_rebinds_close_retired_transports_promptly():
 async def test_invalid_api_key_message_hints_env():
     respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(
-            401, json={"success": False, "error": {"code": "InvalidApiKey"}}
+            401, json={"success": False, "error": {"code": "invalid_api_key"}}
         )
     )
     client = _client_with_creds()
     with pytest.raises(DeltaApiError) as exc:
         await client.get("/wallet/balances", auth=True)
-    assert exc.value.code == "InvalidApiKey"
+    assert exc.value.code == "invalid_api_key"
     assert "DELTA_MCP_ENV" in str(exc.value)
 
 
@@ -242,7 +242,7 @@ async def test_ip_not_whitelisted_includes_ip_in_message():
 async def test_signature_expired_message_hints_clock_sync():
     respx.get(f"{INDIA_TESTNET_REST}/wallet/balances").mock(
         return_value=httpx.Response(
-            401, json={"success": False, "error": {"code": "SignatureExpired"}}
+            401, json={"success": False, "error": {"code": "expired_signature"}}
         )
     )
     client = _client_with_creds()
