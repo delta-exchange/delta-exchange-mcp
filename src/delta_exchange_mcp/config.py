@@ -137,9 +137,10 @@ def ignored_settings(shared: dict[str, str] | None = None) -> list[str]:
 
 def ignored_fix(names: list[str]) -> str:
     """What to tell someone whose saved settings this client is ignoring."""
+    one = len(names) == 1
     return (
-        f"This client's own MCP server config sets {', '.join(names)}, which outranks "
-        f"{store.path()}. To use the saved settings, remove "
-        f"{'it' if len(names) == 1 else 'them'} from this client's config for the Delta "
-        "server and restart the client. Saving again will not help."
+        f"This client's own MCP server config sets {' and '.join(names)}, which "
+        f"{'outranks' if one else 'outrank'} the saved values in {store.path()}. To use the "
+        f"saved settings, remove {'it' if one else 'them'} from this client's config for "
+        "the Delta server and restart the client. Saving again will not help."
     )
