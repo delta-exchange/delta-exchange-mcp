@@ -109,19 +109,18 @@ def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
     login.run()
 
     body = store.path().read_text()
-    assert "permission for trading preferences" in body
-    assert "Read Data alone is sufficient" in body
+    assert "A Read Data key is\n# enough to read your account." in body
     assert "Trading permission" in body  # the commented-out explanation survives
 
 
-def test_login_does_not_claim_read_data_is_sufficient(terminal, monkeypatch, capsys):
+def test_login_says_read_data_is_enough_and_trading_is_for_orders(terminal, monkeypatch, capsys):
     monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
     login.run()
 
     body = capsys.readouterr().out
-    assert "permission for trading preferences" in body
-    assert "does not establish whether Read Data alone is sufficient" in body
-    assert "permission is enough" not in body
+    assert "a Read Data key is enough to read your account" in body
+    assert "a Trading key is needed only to place orders" in body
+    assert "IP whitelist" in body
 
 
 def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):

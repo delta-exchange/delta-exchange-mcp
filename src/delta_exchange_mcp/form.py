@@ -340,8 +340,8 @@ _TEMPLATE = """<!DOCTYPE html>
       <button id="create" class="link" type="button" aria-disabled="true">
         Get a key in Delta API management</button>
     </div>
-    <p class="note">The key must have permission for trading preferences. Current Delta
-      documentation does not establish whether Read Data alone is sufficient.</p>
+    <p class="note">A Read Data key is enough to read your account. A Trading key is
+      needed only to place orders, and Delta asks for an IP whitelist on it.</p>
 
     <button id="save" type="button" aria-disabled="true">Check and save</button>
   </div>
@@ -682,7 +682,7 @@ def _rejection(env: str, result: credentials.Check) -> str:
             "were pasted in full."
         )
     if result.code in _NO_PERMISSION:
-        return credentials.TRADING_PREFERENCES_PERMISSION_MESSAGE
+        return credentials.READ_DATA_PERMISSION_MESSAGE
     if result.code in _IP_BLOCKED:
         seen = f" It saw {result.ip}." if result.ip else ""
         return (

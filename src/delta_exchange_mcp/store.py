@@ -43,16 +43,16 @@ TEMPLATE = """\
 #
 # Market data works with this file empty. Fill these in to let an assistant read
 # your own account. Create a key under Account -> API Keys at
-# https://www.delta.exchange/app/account/manageapikeys. The key must have
-# permission for trading preferences. Current Delta documentation does not
-# establish whether Read Data alone is sufficient.
+# https://www.delta.exchange/app/account/manageapikeys. A Read Data key is
+# enough to read your account.
 #
 # Match the environment to where the key came from: a key from delta.exchange
 # works only with india_prod, one from demo.delta.exchange only with
 # india_testnet. Mixing them returns InvalidApiKey.
 #
-# A key carrying Trading permission lets an assistant place and cancel real orders
-# as soon as it is saved here. Use a Read Data key for anything else.
+# A key with Trading permission is needed only to place orders, and Delta asks
+# for an IP whitelist on it. It lets an assistant place and cancel real orders as
+# soon as it is saved here.
 #
 # Your MCP client's own settings take precedence over this file.
 

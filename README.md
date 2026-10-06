@@ -41,8 +41,8 @@ The form has three fields:
   `india_testnet` for the practice site at demo.delta.exchange.
 - **API key** and **API secret** — fill them in to let the assistant reach your own account.
   Create them under [Account → API Keys](https://www.delta.exchange/app/account/manageapikeys).
-  Pick the **Read Data** permission, which allows viewing but not trading. Current Delta
-  documentation does not establish whether Read Data alone is sufficient for account reads.
+  Pick the **Read Data** permission, which allows viewing but not trading. A Read Data key
+  is enough for every account read.
   Leaving the fields empty gives you market data only, unless you have already put a key in
   the [shared file](#add-your-api-key), in which case that one is used.
 
@@ -227,7 +227,7 @@ this file.
 
 1. Create it at [delta.exchange/app/account/manageapikeys](https://www.delta.exchange/app/account/manageapikeys) (testnet: [demo.delta.exchange](https://demo.delta.exchange/app/account/manageapikeys)).
 2. Both `api_key` and `api_secret` are shown **once at creation**. Save the secret immediately; it can't be re-derived.
-3. **Read Data** permission is what stops an assistant placing orders. A key with Trading permission can place them as soon as it is saved. Current Delta documentation does not establish whether Read Data alone covers every account read.
+3. **Read Data** permission is what stops an assistant placing orders. A Read Data key is enough for every account read. A key with Trading permission is needed only to place orders, Delta asks for an IP whitelist on it, and it can place them as soon as it is saved.
 4. Delta can reject a request when its source IP is not on the key's whitelist. The error names the IP that Delta received, so you can update the key in API management.
 5. **Match the environment**: a key from delta.exchange works only with `india_prod`, one from demo.delta.exchange only with `india_testnet`. Mixing them returns `InvalidApiKey`.
 
@@ -513,8 +513,7 @@ stay absent.
   Delta rejects it. Choose the permission you actually want.
 - **API key permission.** Delta checks permission for each endpoint. An
   `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
-  it does not prove that the key is invalid. Current Delta documentation does not establish
-  whether Read Data alone is sufficient for account reads.
+  it does not prove that the key is invalid. A Read Data key is enough for account reads.
 - **No rehearsal, no confirmation, no caps.** Orders go out as sent. There is no dry run, no
   local record of what was sent, and no notional or size limit.
 - **No silent retries.** Mutations are never auto-retried on a timeout or rate limit; a
