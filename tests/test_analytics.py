@@ -1,11 +1,13 @@
 """What the server tells Delta about the client and tool behind each API request."""
 
+import asyncio
 import json
 import re
 from pathlib import Path
 
 import httpx
 import mcp.types as types
+import pytest
 import respx
 
 from delta_exchange_mcp import analytics
@@ -99,6 +101,24 @@ async def test_the_header_set_stays_under_4096_bytes():
 
     assert sum(len(k) + len(v) + 4 for k, v in sent.items()) <= 4096
     assert "ext0" not in sent["X-Delta-MCP-Context"]
+
+
+async def test_overlapping_calls_keep_their_own_labels():
+    async def call(name, tool):
+        with analytics.scope(params(name=name), tool):
+            await asyncio.sleep(0)
+            sent = analytics.headers()
+        return sent["X-Delta-MCP-Client"], sent["X-Delta-MCP-Tool"]
+
+    first, second = await asyncio.gather(call("a", "get_ticker"), call("b", "get_positions"))
+    assert first == ("a", "get_ticker")
+    assert second == ("b", "get_positions")
+
+
+async def test_a_failed_call_leaves_no_labels_behind():
+    with pytest.raises(RuntimeError), analytics.scope(params(), "get_ticker"):
+        raise RuntimeError
+    assert analytics.headers() == {"X-Delta-MCP-Version": PACKAGE_VERSION}
 
 
 async def test_a_request_outside_a_tool_call_still_names_the_package():
