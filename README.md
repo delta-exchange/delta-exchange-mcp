@@ -522,6 +522,25 @@ stay absent.
 - **Local stdio only.** Per-user keys never leave your machine; no shared hosted endpoint.
 - **Read the code.** It's a financial-tool MCP; treat it like one.
 
+## `X-Delta-MCP-*` request headers
+
+Every request to Delta's API carries these headers. They tell Delta which MCP client and
+which tool caused the request. There is no setting to turn them off.
+
+| Header | Example | What it holds |
+| --- | --- | --- |
+| `X-Delta-MCP-Version` | `0.7.0` | Version of this package. Sent on every request. |
+| `X-Delta-MCP-Client` | `claude-ai` | Name the client gave in the MCP handshake. |
+| `X-Delta-MCP-Client-Version` | `1.30096.5` | That client's version, as it reported it. |
+| `X-Delta-MCP-Tool` | `get_ticker` | Tool that caused the request. |
+| `X-Delta-MCP-Protocol` | `2025-06-18` | MCP protocol version the client and server agreed on. |
+| `X-Delta-MCP-Context` | `{"capabilities":["roots"],"platform":"Darwin arm64","python":"3.12"}` | OS and CPU, Python version, and the optional MCP features the client declared. |
+
+- No API key, secret, signature or account detail goes into these headers.
+- The client names itself, and nothing checks that name. A client can report any name.
+- Client values are percent-encoded and cut to 200 characters, so a client name cannot add
+  or break a header.
+
 ## Updating
 
 `uvx` caches the resolved package, so a new PyPI release isn't picked up automatically. To move to the latest version:
