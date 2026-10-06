@@ -85,7 +85,7 @@ import json
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
@@ -96,6 +96,7 @@ from delta_exchange_mcp.config import (
     BASE_URLS,
     DASHBOARDS,
     DEFAULT_ENV,
+    ignored_fix,
 )
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ class Activation:
 
     account_ready: bool
     expected_current: bool = True
+    ignored: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -720,7 +722,7 @@ def _opened_message() -> str:
         "because anything sent that way is stored in this conversation and visible to "
         "you. You will not see what they type or whether it saved: call "
         "get_connection_status once they say they are done, which reports whether a key "
-        "is configured and whether this client still has to be restarted. If no form "
+        "is configured and where it comes from. If no form "
         "appeared, this client cannot display one — tell them to run "
         "`uvx delta-exchange-mcp login` in a terminal, or to open "
         f"{store.path()} and fill in DELTA_API_KEY and DELTA_API_SECRET, then to restart "
@@ -903,12 +905,12 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
         if not live_state.expected_current:
             return common | {
                 "status": "superseded",
-                "message": (
-                    "Saved, but this session is not using it: either another client changed "
-                    "the shared Delta settings after this key was checked, or a DELTA_API_KEY, "
-                    "DELTA_API_SECRET or DELTA_MCP_ENV set in this server's own environment "
-                    "outranks the file. This session follows whatever it actually resolved, so "
-                    "it is not claiming the checked account is connected."
+                "message": "Saved, but this session is not using it. "
+                + (
+                    ignored_fix(live_state.ignored)
+                    if live_state.ignored
+                    else "Another client changed the shared Delta settings after this key "
+                    "was checked, so this session follows that change instead."
                 ),
             }
         if not result.reachable:
