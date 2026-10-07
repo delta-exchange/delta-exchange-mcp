@@ -1,3 +1,8 @@
+import io
+import os
+import threading
+from types import SimpleNamespace
+
 import httpx
 import pytest
 import respx
@@ -17,7 +22,7 @@ def terminal(monkeypatch):
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
     secrets = iter(["a-real-key", "a-real-secret"])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(secrets))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(secrets))
 
 
 def check_returning(**kwargs):
@@ -41,7 +46,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
         pass
 
     monkeypatch.setattr("delta_exchange_mcp.client.asyncio.sleep", no_sleep)
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             status,
             json={"success": False, "error": {"code": code}},
@@ -58,7 +63,7 @@ async def test_api_unavailability_is_not_a_credential_rejection(
 @respx.mock
 async def test_api_key_rejection_is_a_credential_rejection():
     """A documented authentication failure is decisive and must prevent a save."""
-    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/profile").mock(
+    route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             401,
             json={"success": False, "error": {"code": "InvalidApiKey"}},
@@ -104,8 +109,19 @@ def test_saving_keeps_the_template_and_its_instructions(terminal, monkeypatch):
     login.run()
 
     body = store.path().read_text()
-    assert "Read Data" in body
-    assert "DELTA_MCP_MODE=trade" in body  # the commented-out explanation survives
+    assert "permission for trading preferences" in body
+    assert "Read Data alone is sufficient" in body
+    assert "Trading permission" in body  # the commented-out explanation survives
+
+
+def test_login_does_not_claim_read_data_is_sufficient(terminal, monkeypatch, capsys):
+    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
+    login.run()
+
+    body = capsys.readouterr().out
+    assert "permission for trading preferences" in body
+    assert "does not establish whether Read Data alone is sufficient" in body
+    assert "permission is enough" not in body
 
 
 def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):
@@ -169,8 +185,8 @@ def test_blank_answers_keep_a_saved_pair_and_its_environment(monkeypatch, capsys
     secret_prompts = []
     answers = iter(["", ""])
     monkeypatch.setattr(
-        login.getpass,
-        "getpass",
+        login,
+        "_ask_secret",
         lambda prompt="": secret_prompts.append(prompt) or next(answers),
     )
     checked = []
@@ -210,7 +226,7 @@ def test_changing_environment_requires_a_new_pair_even_without_verify(
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
     answers = iter(["", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(answers))
 
     assert login.run(verify=False) == 1
 
@@ -228,7 +244,7 @@ def test_a_new_pair_can_move_the_saved_environment(monkeypatch):
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "india_testnet")
     answers = iter(["testnet-key", "testnet-secret"])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(answers))
 
     assert login.run(verify=False) == 0
     assert store.read() == {
@@ -242,7 +258,7 @@ def test_blank_credentials_without_a_saved_pair_are_explained(monkeypatch, capsy
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "")
     answers = iter(["", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(answers))
 
     assert login.run(verify=False) == 1
 
@@ -260,8 +276,8 @@ def test_a_saved_pair_without_a_valid_environment_cannot_be_kept(monkeypatch, ca
     prompts = []
     answers = iter(["", ""])
     monkeypatch.setattr(
-        login.getpass,
-        "getpass",
+        login,
+        "_ask_secret",
         lambda prompt="": prompts.append(prompt) or next(answers),
     )
 
@@ -282,7 +298,7 @@ def test_a_partial_replacement_never_mixes_with_the_saved_pair(monkeypatch, caps
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "")
     answers = iter(["new-key", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(answers))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(answers))
 
     assert login.run(verify=False) == 1
 
@@ -294,7 +310,7 @@ def test_half_a_pair_is_refused(monkeypatch, capsys):
     monkeypatch.setattr(login.sys, "stdin", FakeTty())
     monkeypatch.setattr("builtins.input", lambda prompt="": "")
     secrets = iter(["only-a-key", ""])
-    monkeypatch.setattr(login.getpass, "getpass", lambda prompt="": next(secrets))
+    monkeypatch.setattr(login, "_ask_secret", lambda prompt="": next(secrets))
 
     assert login.run() == 1
     assert "both a key and its secret" in capsys.readouterr().err
@@ -309,12 +325,88 @@ def test_an_unknown_environment_is_refused(monkeypatch, capsys):
     assert "not an environment" in capsys.readouterr().err
 
 
-def test_a_shell_export_that_would_shadow_the_file_is_reported(terminal, monkeypatch, capsys):
-    """A client launched from this shell inherits the export, and the client always wins.
+def masked(keys):
+    out = io.StringIO()
+    return login._collect(iter(keys), out), out.getvalue()
 
-    Without this the key just saved would appear to do nothing at all.
-    """
-    monkeypatch.setenv("DELTA_API_KEY", "exported-in-the-shell")
-    monkeypatch.setattr(credentials, "check", check_returning(ok=True, reachable=True, detail=""))
-    assert login.run() == 0
-    assert "takes precedence over the file" in capsys.readouterr().err
+
+def test_each_character_shows_as_a_star_and_the_value_never_does():
+    assert masked("s3cr3t\r") == ("s3cr3t", "******\n")
+
+
+def test_a_bracketed_paste_keeps_only_what_was_pasted():
+    assert masked("\x1b[200~abc123\x1b[201~\n") == ("abc123", "******\n")
+
+
+def test_backspace_and_ctrl_u_erase_the_stars_they_remove():
+    assert masked("abx\x7fc\r") == ("abc", "***\b \b*\n")
+    assert masked("no\x15ok\r") == ("ok", "**" + "\b \b" * 2 + "**\n")
+
+
+def test_arrow_keys_and_control_characters_do_not_reach_the_value():
+    assert masked("a\x1b[Db\x1bOC\tc\r")[0] == "abc"
+
+
+def test_ctrl_c_cancels_and_ctrl_d_cancels_only_an_empty_prompt():
+    with pytest.raises(KeyboardInterrupt):
+        masked("ab\x03")
+    with pytest.raises(EOFError):
+        masked("\x04")
+    assert masked("ab\x04c\r")[0] == "abc"
+
+
+def test_escape_on_its_own_is_dropped_by_the_windows_console(monkeypatch):
+    keys = iter("\x1bk\xe0H\r")
+    console = SimpleNamespace(getwch=lambda: next(keys))
+    monkeypatch.setattr(login, "msvcrt", console, raising=False)
+    assert login._collect(login._windows_chars(), io.StringIO()) == "k"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal reads")
+def test_escape_on_its_own_does_not_swallow_the_next_key():
+    read, write = os.pipe()
+    typed_later = threading.Timer(login._ESC_WAIT * 5, os.write, (write, b"k\r"))
+    typed_later.start()
+    try:
+        os.write(write, b"a\x1b[Db\x1b")
+        assert login._collect(login._posix_chars(read), io.StringIO()) == "abk"
+    finally:
+        typed_later.join()
+        os.close(read)
+        os.close(write)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal modes")
+def test_a_real_terminal_is_masked_and_left_as_it_was(monkeypatch, capsys):
+    import termios
+
+    leader, follower = os.openpty()
+    cbreak = login.tty.setcbreak
+
+    def cbreak_then_type(fd, *args):
+        # Typed after the mode switch, since switching discards anything typed ahead.
+        cbreak(fd, *args)
+        os.write(leader, b"k3y\r")
+
+    shown = bytearray()
+
+    def screen():
+        # A terminal reads its output as it arrives; the mode switch waits for that drain.
+        while b"\n" not in shown:
+            shown.extend(os.read(leader, 1024))
+
+    monkeypatch.setattr(login.tty, "setcbreak", cbreak_then_type)
+    monkeypatch.setattr(login, "_TTY", os.ttyname(follower))
+    reader = threading.Thread(target=screen, daemon=True)
+    try:
+        before = termios.tcgetattr(follower)
+        reader.start()
+        assert login._ask_secret("API key: ") == "k3y"
+        reader.join(5)
+        assert termios.tcgetattr(follower) == before
+    finally:
+        os.close(leader)
+        os.close(follower)
+    assert bytes(shown).replace(b"\r\n", b"\n") == b"API key: ***\n"
+    # The prompt goes to the terminal, so a redirected stdout cannot hide it.
+    assert capsys.readouterr().out == ""
