@@ -26,7 +26,7 @@ _AUTH_HINTS: dict[str, str] = {
     "Unauthorized": (
         "this API key lacks Trading permission. A Read Data key can read the account but "
         "cannot place, edit or cancel orders. Create a key with Trading permission in "
-        "Delta API management."
+        "Delta API management. Delta asks for an IP whitelist on a Trading key."
     ),
     "ip_not_whitelisted_for_api_key": (
         "request IP not whitelisted for this API key. Add the IP shown in the error "

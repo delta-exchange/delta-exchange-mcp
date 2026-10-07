@@ -199,6 +199,7 @@ async def test_a_key_without_trading_permission_says_so():
         await client.post("/orders", {"size": 1}, auth=True)
     assert exc.value.code == "Unauthorized"
     assert "Trading permission" in str(exc.value)
+    assert "IP whitelist" in str(exc.value)
     assert is_permission_failure(exc.value) and not is_auth_failure(exc.value)
 
 
