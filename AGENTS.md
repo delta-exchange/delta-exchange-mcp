@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project in one line
 
-FastMCP server (stdio only) that wraps Delta Exchange India's REST API as MCP tools — public market data unconditionally, plus authenticated account reads and trading mutations when `DELTA_API_KEY`/`DELTA_API_SECRET` are set. The API key's own permissions are the authorization boundary; the server applies no gate of its own (DEA-881).
+MCP server (stdio only, built on the `mcp` SDK's `MCPServer`) that wraps Delta Exchange India's REST API as MCP tools — public market data unconditionally, plus authenticated account reads and trading mutations when `DELTA_API_KEY`/`DELTA_API_SECRET` are set. The API key's own permissions are the authorization boundary; the server applies no gate of its own (DEA-881).
 
 ## Style
 
@@ -39,7 +39,7 @@ bash scripts/inspect.sh                                                         
 
 ### Tool registration pattern
 
-Each tool module exposes `register(mcp: FastMCP, client: DeltaClient) -> None` that attaches `@mcp.tool()`-decorated closures. `server.py::build_server()` instantiates `DeltaClient` once and passes it into every `register` call. **To add a tool group**: create `src/delta_exchange_mcp/tools/<group>.py` with a `register(mcp, client)`, then call it from `build_server`.
+Each tool module exposes `register(mcp: MCPServer, client: DeltaClient) -> None` that attaches `@mcp.tool()`-decorated closures. `server.py::build_server()` instantiates `DeltaClient` once and passes it into every `register` call. **To add a tool group**: create `src/delta_exchange_mcp/tools/<group>.py` with a `register(mcp, client)`, then call it from `build_server`.
 
 `market.register` always runs; `account.register` and `trading.register` start together when `cfg.has_credentials` is true (both `DELTA_API_KEY` **and** `DELTA_API_SECRET` set), and reconciliation can add or remove that whole manifest later.
 
@@ -49,14 +49,18 @@ A credential saved through the in-chat form arrives in the running process, so `
 
 Three things here are load-bearing:
 
-- **The capability has to be declared.** `serve()` runs stdio with `initialization_options(mcp)`, which passes `NotificationOptions(tools_changed=True)`. FastMCP's own `run_stdio_async` leaves every flag off, so the server would advertise `tools.listChanged: false` and a client would never re-read the tool list — the notification would be silently useless. `main` therefore calls `anyio.run(serve, mcp)`, **not** `mcp.run()`. Regression test: `test_the_server_declares_that_its_tool_list_can_change`.
+- **The capability has to be declared.** `serve()` runs stdio with `initialization_options(mcp)`, which passes `NotificationOptions(tools_changed=True)`. The SDK's own `run_stdio_async` leaves every flag off, so the server would advertise `tools.listChanged: false` and a client would never re-read the tool list — the notification would be silently useless. `main` therefore calls `anyio.run(serve, mcp)`, **not** `mcp.run()`. Regression test: `test_the_server_declares_that_its_tool_list_can_change`.
 - **Credentials are the only gate.** Account reads and trading mutations arm and disarm together, hot, in `reconcile`. There is no mode, no per-client entitlement, and no restart. Regression tests: `test_trading_tools_register_with_credentials_and_no_env_var`, `test_trading_tools_absent_without_credentials`.
 - **Rotation and environment changes are coherent hot changes.** The shared client swaps its entire request identity before the next call; an in-flight request keeps the state it captured. Regression tests: `test_a_rotated_key_signs_the_next_account_request`, `test_the_first_save_rebinds_market_and_account_tools_to_one_environment`.
 - **Runtime transitions are observable without secrets.** Startup and each arm/disarm write one structured line to stderr with environment and registered surface. Never add keys, secrets, signatures, or credential fingerprints to this output.
 
-`get_connection_status` is registered unconditionally, reconciles safe external file changes, and reports `{environment, credentials_configured, account_tools_available, trading_tools_available, client_name, version, view_build}` — never a key, secret, or fingerprint. `client_name` is self-reported and carries no authority. `view_build` is `form.build_id()`, a 10-character SHA-256 prefix of the exact `VIEW_HTML` bytes the process would serve. It exists because `version` is identical on every commit of a branch and so cannot distinguish a client that fetched from one that reused a cached build — a question that cost several round trips of reading package caches, and once cost them against the wrong machine entirely. Ask the assistant for the connection status and compare `view_build` against `uv run python -c "from delta_exchange_mcp import form; print(form.build_id())"` before drawing any conclusion from how a rendered form looks. It exists because the save tools are hidden from the model, so after a save the model cannot see whether it worked; without this it has no way to answer "am I connected?".
+`get_connection_status` is registered unconditionally, reconciles safe external file changes, and reports `{environment, credentials_configured, account_tools_available, trading_tools_available, client_name, client_version, version, view_build}` — never a key, secret, or fingerprint. `client_name` is self-reported and carries no authority. `client_version` is the build behind that name, and it is the field that makes a "the form did not render" report actionable: one client name spans versions that differ in whether they render an MCP App at all. `view_build` is `form.build_id()`, a 10-character SHA-256 prefix of the exact `VIEW_HTML` bytes the process would serve. It exists because `version` is identical on every commit of a branch and so cannot distinguish a client that fetched from one that reused a cached build — a question that cost several round trips of reading package caches, and once cost them against the wrong machine entirely. Ask the assistant for the connection status and compare `view_build` against `uv run python -c "from delta_exchange_mcp import form; print(form.build_id())"` before drawing any conclusion from how a rendered form looks. It exists because the save tools are hidden from the model, so after a save the model cannot see whether it worked; without this it has no way to answer "am I connected?".
 
-`FastMCP` is constructed with `instructions=INSTRUCTIONS`, which is the only channel that reaches the model when no key is configured — there is no account tool then to carry a hint on its own description.
+`MCPServer` is constructed with `instructions=INSTRUCTIONS`, which is the only channel that reaches the model when no key is configured — there is no account tool then to carry a hint on its own description.
+
+`request.client(session)` is the one reader of the handshake identity (`name`, `title`, `version`); do not reach into `session.client_params`. The SDK substitutes `DEFAULT_CLIENT_INFO` (`mcp/0.1.0`) for a client that sends none, so an empty name only occurs with no session at all. `title` may be edited by the person, so it is never a key and never sent anywhere. A `ServerSession` is built per request; anything that must outlive one call, such as the form's one-use grant, keys on `request.peer(session)`, the connection behind it.
+
+`DeltaMCP` refreshes from the settings file before every `tools/list` through a `ServerMiddleware` passed to `MCPServer`, because `MCPServer.list_tools()` takes no context. Do not mutate the SDK's private request-handler table.
 
 ### DeltaClient — single point for HTTP concerns
 
@@ -106,7 +110,7 @@ Colour is split deliberately: surfaces, text and borders prefer the host's token
 
 `save_credentials` returns `account`, `path`, `next_step` and `client_name` as fields alongside `message` on a clean save, because the view renders its own connected state from them rather than printing the sentence. `message` stays for clients that show no view.
 
-Those `_meta` arguments are why `pyproject.toml` floors `mcp` at 1.26 — `meta=` landed on `FastMCP.tool` in 1.19 and on `FastMCP.resource` in 1.26, and below that the decorators reject it at import.
+Those `_meta` arguments need `meta=` on both the tool and the resource decorator, which 2.x carries on `MCPServer`.
 
 ### Trading surface (mutations)
 

@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from delta_exchange_mcp.client import DeltaClient
 
 Resolution = Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "1d", "1w"]
+
+# Models misread these fields: they called the data stale from `time` and showed
+# `funding_rate` 100x too high.
+TICKER_FIELDS = (
+    "`close` is the last traded price, `mark_price` the fair price, and `spot_price` the "
+    "external index. `timestamp` is the fetch time in microseconds. `open`, `high`, `low`, "
+    "`volume` and the `*_change_24h` fields cover a rolling 24h window that Delta refreshes "
+    "every few minutes; `time` is that window's start, not the fetch time. `funding_rate`, "
+    "`ltp_change_24h` and `mark_change_24h` are already percentages: 0.008 means 0.008%."
+)
 
 
 def _csv(values: list[str] | None) -> str | None:
@@ -18,7 +28,7 @@ def _csv(values: list[str] | None) -> str | None:
     return ",".join(values)
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
+def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mcp.tool()
     async def list_products(
         contract_types: list[str] | None = Field(
@@ -53,12 +63,13 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         """Get full product details for a single symbol (e.g. BTCUSD, C-BTC-66400-010824)."""
         return await client.get(f"/products/{symbol}")
 
-    @mcp.tool()
+    @mcp.tool(description=f"Get the ticker (price, volume, OI, mark/spot) for one symbol. {TICKER_FIELDS}")
     async def get_ticker(symbol: str) -> dict[str, Any]:
-        """Get 24h ticker (price, volume, OI, mark/spot) for one symbol."""
         return await client.get(f"/tickers/{symbol}")
 
-    @mcp.tool()
+    @mcp.tool(
+        description=f"List tickers across many products with optional contract-type / underlying filters. {TICKER_FIELDS}"
+    )
     async def list_tickers(
         contract_types: list[str] | None = Field(
             default=None, description="Filter: perpetual_futures, futures, call_options, put_options."
@@ -67,7 +78,6 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             default=None, description="Underlying symbols e.g. BTC, ETH, SOL."
         ),
     ) -> dict[str, Any]:
-        """List tickers across many products with optional contract-type / underlying filters."""
         return await client.get(
             "/tickers",
             params={
