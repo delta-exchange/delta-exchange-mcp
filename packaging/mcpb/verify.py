@@ -68,7 +68,9 @@ def check_archive(mcpb: Path) -> None:
     print(f"  payload: {', '.join(sorted(required))}, {wheels.pop()}")
 
 
-def launch_env(manifest: dict, workdir: Path) -> dict[str, str]:
+def launch_env(
+    manifest: dict, workdir: Path, key: str | None = "placeholder"
+) -> dict[str, str]:
     """The environment a host would build, over a deliberately hostile one.
 
     The ambient half supplies credentials, which is what a machine with those exported
@@ -87,8 +89,9 @@ def launch_env(manifest: dict, workdir: Path) -> dict[str, str]:
     does not declare, so a developer with DELTA_MCP_DEBUG=1 in their own file would fail the
     undeclared-tool check here for a reason CI could never reproduce.
     """
-    config = {k: v.get("default", "") for k, v in manifest["user_config"].items()}
-    config.update({"api_key": "placeholder", "api_secret": "placeholder"})
+    config = {k: v["default"] for k, v in manifest["user_config"].items() if "default" in v}
+    if key is not None:
+        config.update({"api_key": key, "api_secret": key})
 
     env = dict(os.environ)
     env.update({
@@ -100,7 +103,8 @@ def launch_env(manifest: dict, workdir: Path) -> dict[str, str]:
     })
     for key, raw in manifest["server"]["mcp_config"]["env"].items():
         env[key] = re.sub(
-            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), "")), raw
+            # Claude Desktop leaves an unfilled field without a default unexpanded.
+            r"\$\{user_config\.(\w+)\}", lambda m: str(config.get(m.group(1), m.group(0))), raw
         )
     return env
 
@@ -232,6 +236,20 @@ def main() -> None:
                 "a credentialled install registered no trading tools; the surface is "
                 "supposed to follow the key, not a mode"
             )
+
+        # A field left empty reaches the server blank from some hosts and as its unexpanded
+        # placeholder from Claude Desktop. Both must register the same no-key tool list.
+        blank = handshake(tmp, launch_env(manifest, tmp, key=""))
+        unexpanded = handshake(tmp, launch_env(manifest, tmp, key=None))
+        print(f"  no key:    {len(blank)} tools blank, {len(unexpanded)} unexpanded")
+        if set(unexpanded) != set(blank):
+            extra = sorted(set(unexpanded) - set(blank))
+            raise SystemExit(
+                "unexpanded ${user_config.api_key} was read as a key and registered "
+                f"{', '.join(extra[:5])}"
+            )
+        if set(blank) >= set(installed):
+            raise SystemExit("blank key fields registered every keyed tool")
 
         # tools_generated is false, which promises the manifest lists everything reachable.
         declared = {t["name"] for t in manifest["tools"]}

@@ -49,13 +49,16 @@ until all of this passes:
 - the archive is valid to a **strict** zip parser, which is what Claude Desktop uses
 - the packed payload is **exactly** the expected file set, so build tooling sitting beside
   it in this directory cannot leak in through a missed `.mcpbignore` rule
-- a real MCP **handshake** against a fresh unpack — `initialize`, then `tools/list`
+- three real MCP **handshakes** against a fresh unpack — `initialize`, then `tools/list`
 - **the surface follows the key**: a credentialled install registers the trading tools, so
   `place_order` is expected to be present rather than held back behind a mode
+- **empty key fields mean no key**: Claude Desktop passes an unfilled optional field as the
+  literal `${user_config.api_key}`, so that run must register the same tools as one with the
+  key fields blank, and fewer than one with a key
 - **nothing undeclared**: every tool the server registers appears in the manifest, which is
   what `tools_generated: false` promises
 
-The handshake starts from a deliberately hostile environment — credentials and
+Every handshake starts from a deliberately hostile environment — credentials and
 `DELTA_MCP_DEBUG=1` exported — and then applies the manifest's `env` over it with
 `${user_config.x}` resolved the way a host resolves it. Debug output is redirected into the
 throwaway unpack so a build never writes to `~/.delta-exchange-mcp`. That is what makes the
