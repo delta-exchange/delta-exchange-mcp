@@ -68,7 +68,7 @@ closes anything.
 
 
 class DeltaMCP(MCPServer):
-    """MCPServer with a pre-list hook for session-scoped entitlements."""
+    """MCPServer that runs a hook before each tools/list."""
 
     def __init__(self) -> None:
         self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = None
