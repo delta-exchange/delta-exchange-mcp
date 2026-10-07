@@ -401,12 +401,11 @@ async def test_a_blocked_ip_says_so_and_shows_the_address_delta_saw(monkeypatch)
         assert "demo.delta.exchange" not in message
 
 
-async def test_a_trading_preferences_permission_failure_is_not_an_invalid_key(monkeypatch):
+async def test_a_missing_read_data_permission_is_not_an_invalid_key(monkeypatch):
     monkeypatch.setattr(credentials, "check", rejecting("unauthorized_api_access"))
     async with connected() as session:
         message = (await save(session))["message"]
-        assert "lacks permission for trading preferences" in message
-        assert "does not establish whether Read Data alone is sufficient" in message
+        assert "lacks Read Data permission" in message
         assert "invalid" not in message.lower()
 
 
