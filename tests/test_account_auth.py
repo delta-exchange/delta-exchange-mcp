@@ -10,7 +10,7 @@ import respx
 
 from delta_exchange_mcp.client import DeltaClient, sign
 from delta_exchange_mcp.config import INDIA_PROD_REST, INDIA_TESTNET_REST, Config
-from delta_exchange_mcp.errors import DeltaApiError
+from delta_exchange_mcp.errors import DeltaApiError, is_auth_failure, is_permission_failure
 
 
 def _client_with_creds() -> DeltaClient:
@@ -186,6 +186,33 @@ async def test_account_permission_error_does_not_name_the_validation_endpoint(
     message = str(exc.value)
     assert "lacks permission for this endpoint" in message
     assert "trading preferences" not in message
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_key_without_trading_permission_says_so():
+    respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(401, json={"success": False, "error": "Unauthorized"})
+    )
+    client = _client_with_creds()
+    with pytest.raises(DeltaApiError) as exc:
+        await client.post("/orders", {"size": 1}, auth=True)
+    assert exc.value.code == "Unauthorized"
+    assert "Trading permission" in str(exc.value)
+    assert "IP whitelist" in str(exc.value)
+    assert is_permission_failure(exc.value) and not is_auth_failure(exc.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_string_error_on_a_raw_endpoint_keeps_delta_s_text():
+    respx.get(f"{INDIA_TESTNET_REST}/fills/history/download/csv").mock(
+        return_value=httpx.Response(401, json={"success": False, "error": "unauthorized"})
+    )
+    client = _client_with_creds()
+    with pytest.raises(DeltaApiError) as exc:
+        await client.get_raw("/fills/history/download/csv", auth=True)
+    assert exc.value.code == "unauthorized"
 
 
 @pytest.mark.asyncio

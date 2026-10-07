@@ -23,6 +23,11 @@ _AUTH_HINTS: dict[str, str] = {
         "API key lacks permission for this endpoint. Update the key's permissions in "
         "Delta API management."
     ),
+    "Unauthorized": (
+        "this API key lacks Trading permission. A Read Data key can read the account but "
+        "cannot place, edit or cancel orders. Create a key with Trading permission in "
+        "Delta API management. Delta asks for an IP whitelist on a Trading key."
+    ),
     "ip_not_whitelisted_for_api_key": (
         "request IP not whitelisted for this API key. Add the IP shown in the error "
         "context under Delta API management."
@@ -36,7 +41,7 @@ _AUTH_HINTS: dict[str, str] = {
 }
 
 _PERMISSION_FAILURE_CODES = frozenset(
-    {"UnauthorizedApiAccess", "unauthorized_api_access"}
+    {"UnauthorizedApiAccess", "unauthorized_api_access", "Unauthorized"}
 )
 
 # A response carrying one of these codes proves that the submitted credential pair
