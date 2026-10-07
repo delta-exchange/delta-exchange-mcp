@@ -21,7 +21,7 @@ BASE_URLS: dict[str, str] = {
 
 # Where someone creates the key for each environment. Beside BASE_URLS because it is the
 # same per-environment fact from the user's side, and because every place that asks for a
-# credential has to name the right one — a prod key sent to testnet returns InvalidApiKey.
+# credential has to name the right one — a prod key sent to testnet returns invalid_api_key.
 # india_devnet is internal and has no public dashboard, so it is absent by design.
 DASHBOARDS: dict[str, str] = {
     "india_prod": "https://www.delta.exchange/app/account/manageapikeys",

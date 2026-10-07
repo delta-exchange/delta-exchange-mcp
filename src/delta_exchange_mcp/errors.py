@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-# Documented in slate `_authentication.md`. Lookup of server error code → human hint.
+# Documented in slate `_authentication.md`, plus the spellings Delta's gateway sends
+# instead (`expired_signature`, `Unauthorized`). Lookup of server error code → human hint.
 _AUTH_HINTS: dict[str, str] = {
     "SignatureExpired": (
+        "request signature expired (>5s drift). Sync your system clock via NTP."
+    ),
+    "expired_signature": (
         "request signature expired (>5s drift). Sync your system clock via NTP."
     ),
     "InvalidApiKey": (
