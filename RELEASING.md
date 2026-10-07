@@ -2,7 +2,7 @@
 
 Runbook for cutting a new version to PyPI and GitHub. Aimed at maintainers with PyPI write access on the `delta-exchange-mcp` project and write access to this repo.
 
-This covers: bumping the version, publishing to PyPI, tagging, drafting the GitHub release. It does **not** cover CHANGELOG bookkeeping (GitHub release notes are the chronicle for now) or automatic version bumping.
+This covers: bumping the version, publishing to PyPI, tagging, drafting the GitHub release. It does **not** cover automatic version bumping. Notable changes go in `CHANGELOG.md`; the GitHub release notes repeat them.
 
 ## What gets versioned
 
@@ -28,6 +28,38 @@ SemVer while in Beta:
 5. **Node 22+**, for regenerating the bundle manifest. `packaging/mcpb/build.sh` compiles the `mcpb` CLI from a pinned upstream commit rather than installing the npm release, because the published one signs bundles Claude Desktop refuses. First run takes a few minutes; after that it is cached.
 
 ## Cut a release
+
+### Run the authenticated testnet permission matrix
+
+Before a release that changes account authorization, create two separate testnet keys.
+Give one key Read Data permission and the other key Trading permission. Load these values
+from the team's secret manager into the shell without putting them in command history:
+
+- `DELTA_MCP_TESTNET_READ_DATA_API_KEY`
+- `DELTA_MCP_TESTNET_READ_DATA_API_SECRET`
+- `DELTA_MCP_TESTNET_TRADING_API_KEY`
+- `DELTA_MCP_TESTNET_TRADING_API_SECRET`
+
+Run the matrix from the repository root:
+
+```bash
+uv run python scripts/permission_matrix.py
+```
+
+The script calls only these authenticated testnet GET endpoints:
+
+- `/users/trading_preferences`
+- `/positions/margined`
+- `/orders`
+- `/wallet/balances`
+
+Exit 0 means every cell produced either `allowed` or `permission_denied`. It means the
+run completed, not that every permission works. Claim Read Data compatibility only when
+all four `read_data` cells say `allowed`. Exit 1 means a request or response failed. Exit
+2 means one or both credential pairs were missing, so the release gate did not run.
+
+The output contains no response bodies or credential data. Remove the four variables
+from the shell after the run.
 
 ```bash
 # 1. Pick the new version
