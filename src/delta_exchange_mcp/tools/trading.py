@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from delta_exchange_mcp.account_identity import fetch_account_identity
@@ -90,7 +90,7 @@ def _require_one(product_id: int | None, product_symbol: str | None) -> None:
         raise ValueError("pass exactly one of product_id or product_symbol")
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
+def register(mcp: MCPServer, client: DeltaClient) -> None:
     _uid_cache: dict[tuple[str, str], int] = {}
 
     def mutation_tool(

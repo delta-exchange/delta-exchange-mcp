@@ -11,12 +11,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1,<1",
-    # 1.26 is the floor for the credential form, not a routine bump: `_meta` on a tool
-    # arrived in 1.19 and on a resource in 1.26, and those carry the whole MCP Apps
-    # association — which resource a tool opens, which tools stay hidden from the model,
-    # and how tall the frame opens. Below 1.26 the decorators reject the argument and the
-    # server fails at import. 2.0 removed `mcp.server.fastmcp` entirely.
-    "mcp>=1.26.0,<2",
+    "mcp>=2.0.0,<3",
     "pydantic>=2.13.2,<3",
     # Already resolved via mcp -> pydantic-settings, but declared because we import it
     # directly. Hand-rolling the parse is what it replaces: quoted values, an `export`

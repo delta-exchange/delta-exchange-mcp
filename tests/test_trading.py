@@ -15,7 +15,7 @@ from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
 from delta_exchange_mcp.errors import DeltaApiError
 from delta_exchange_mcp.server import build_server
 from delta_exchange_mcp.tools import trading
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 
 def _client() -> DeltaClient:
@@ -27,7 +27,7 @@ def _client() -> DeltaClient:
 
 
 async def _call(client: DeltaClient, name: str, **kwargs: Any) -> Any:
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client)
     return await mcp.call_tool(name, kwargs)
 
@@ -145,7 +145,7 @@ async def test_close_all_fetches_and_caches_user_id():
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client)
     await mcp.call_tool("close_all_positions", {})
     await mcp.call_tool("close_all_positions", {})
@@ -173,7 +173,7 @@ async def test_rotating_credentials_refetches_the_user_id():
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client)
     await mcp.call_tool("close_all_positions", {})
 
@@ -210,7 +210,7 @@ async def test_the_same_key_string_on_two_sites_is_two_accounts():
         return_value=httpx.Response(200, json={"success": True, "result": {}})
     )
     client = _client()
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     trading.register(mcp, client)
     await mcp.call_tool("close_all_positions", {})
 
@@ -293,7 +293,7 @@ async def test_batch_is_not_capped_and_response_is_returned_as_is():
     client = _client()
     result = await _call(client, "place_batch_orders", orders=sent, product_id=84)
     assert len(json.loads(route.calls[0].request.content)["orders"]) == 80
-    structured = result[1]
+    structured = result.structured_content
     payload = structured.get("result", structured)
     # No partial_failure annotation: 1 of 80 came back and the response is passed through.
     assert "partial_failure" not in json.dumps(payload)

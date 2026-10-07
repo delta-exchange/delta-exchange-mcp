@@ -5,8 +5,9 @@ import sys
 from collections.abc import Awaitable, Callable
 
 import anyio
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.lowlevel import NotificationOptions
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
@@ -14,6 +15,8 @@ from mcp.server.stdio import stdio_server
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import form
+from delta_exchange_mcp import identity
+from delta_exchange_mcp import request
 from delta_exchange_mcp import store
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.tools import account, market, trading
@@ -64,36 +67,38 @@ closes anything.
 """
 
 
-def _session_client_name(session: ServerSession) -> str:
-    params = session.client_params
-    return params.clientInfo.name if params and params.clientInfo else ""
-
-
-class DeltaMCP(FastMCP):
-    """FastMCP with a supported pre-list hook for session-scoped entitlements."""
+class DeltaMCP(MCPServer):
+    """MCPServer that runs a hook before each tools/list."""
 
     def __init__(self) -> None:
         self._before_list_tools: Callable[[ServerSession], Awaitable[None]] | None = None
         self.live_client: DeltaClient | None = None
-        super().__init__("delta-exchange", instructions=INSTRUCTIONS)
+        super().__init__(
+            "delta-exchange",
+            # What a client shows a person, as against `name`, which is what it keys on.
+            # These are the same strings the bundle's install dialog uses, read from the
+            # one place that holds them.
+            title=identity.DISPLAY_NAME,
+            description=identity.SHORT_DESCRIPTION,
+            website_url=identity.HOMEPAGE,
+            version=PACKAGE_VERSION,
+            instructions=INSTRUCTIONS,
+            middleware=[self._serve],
+        )
 
     def before_list_tools(
         self, callback: Callable[[ServerSession], Awaitable[None]]
     ) -> None:
         self._before_list_tools = callback
 
-    async def list_tools(self):
-        """Apply a session entitlement before FastMCP builds the public tool list."""
-        if self._before_list_tools is not None:
-            try:
-                session = self.get_context().session
-            except ValueError:
-                # Direct in-process inspection has no MCP request or handshake. Startup
-                # registration is still complete, so there is no entitlement to apply.
-                pass
-            else:
-                await self._before_list_tools(session)
-        return await super().list_tools()
+    async def _serve(
+        self, ctx: ServerRequestContext, call_next: CallNext
+    ) -> HandlerResult:
+        """Run the pre-list hook. `MCPServer.list_tools()` takes no context, so middleware
+        is the one place the session is in reach before the tool list is built."""
+        if ctx.method == "tools/list" and self._before_list_tools is not None:
+            await self._before_list_tools(ctx.session)
+        return await call_next(ctx)
 
     async def close_live_client(self) -> None:
         if self.live_client is not None:
@@ -103,9 +108,6 @@ class DeltaMCP(FastMCP):
 def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     cfg = cfg or config_mod.load()
     mcp = DeltaMCP()
-    # FastMCP has no version argument, and the server it wraps reports the mcp SDK's own
-    # version when this is left unset — so clients would see the SDK version as ours.
-    mcp._mcp_server.version = PACKAGE_VERSION
 
     live = cfg
     client = DeltaClient(live)
@@ -218,6 +220,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         or credential fingerprint.
         """
         session = ctx.session
+        who = request.client(session)
         next_config, shared = await reconcile(session, notify=True)
         ignored = config_mod.ignored_settings(shared)
         status: dict[str, object] = {
@@ -227,7 +230,11 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             "trading_tools_available": authenticated_registered,
             "key_source": next_config.key_source,
             "shared_file_ignored": ignored,
-            "client_name": _session_client_name(session),
+            "client_name": who.name,
+            # The build behind the name. A report of "the form did not render" is only
+            # actionable with it: the same client name covers versions that differ in
+            # whether they render an MCP App at all.
+            "client_version": who.version,
             "version": PACKAGE_VERSION,
             "view_build": form.build_id(),
         }
@@ -255,25 +262,25 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
     return mcp
 
 
-def initialization_options(mcp: FastMCP) -> InitializationOptions:
+def initialization_options(mcp: MCPServer) -> InitializationOptions:
     """What this server tells a client about itself, declaring a changeable tool list.
 
-    FastMCP's own `run_stdio_async` builds these with every notification flag off, so the
+    The SDK's own `run_stdio_async` builds these with every notification flag off, so the
     server would advertise `tools.listChanged: false`. A client told that has no reason to
     re-read the tool list, which makes the notification sent when a saved credential
     brings the account tools up a no-op — leaving the restart it exists to avoid as the
     only way through.
     """
-    return mcp._mcp_server.create_initialization_options(
+    return mcp._lowlevel_server.create_initialization_options(
         NotificationOptions(tools_changed=True)
     )
 
 
-async def serve(mcp: FastMCP) -> None:
+async def serve(mcp: MCPServer) -> None:
     """Serve over stdio, the only transport."""
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await mcp._mcp_server.run(
+            await mcp._lowlevel_server.run(
                 read_stream, write_stream, initialization_options(mcp)
             )
     finally:
