@@ -18,7 +18,6 @@ def test_help_exits_zero_and_prints_usage(capsys):
     # The env vars are the whole configuration surface, so help is useless without them.
     assert "DELTA_MCP_ENV" in out
     assert "DELTA_API_KEY" in out
-    assert "DELTA_MCP_MODE" in out
 
 
 def test_version_flag_reports_the_package_version(capsys):

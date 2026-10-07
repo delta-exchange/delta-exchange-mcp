@@ -34,7 +34,6 @@ ACCOUNT_TOOLS = {
     "get_product_leverage",
     "get_trading_stats",
     "get_trading_preferences",
-    "get_profile",
 }
 
 
@@ -88,7 +87,6 @@ def test_trading_removal_manifest_matches_the_registered_surface():
             base_url=INDIA_TESTNET_REST,
             api_key="k",
             api_secret="s",
-            mode="trade",
         )
     )
     trading.register(mcp, client)
