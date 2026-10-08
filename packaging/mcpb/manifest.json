@@ -92,7 +92,7 @@
     },
     {
       "name": "get_connection_status",
-      "description": "Whether an API key is configured and where it points."
+      "description": "Whether an API key is configured, where it points, and where it comes from."
     },
     {
       "name": "get_debug_status",

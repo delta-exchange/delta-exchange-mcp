@@ -58,8 +58,8 @@ If the user asks about their own account and no account tool is available, call
 setup_credentials: it opens a form they type the key into. Never ask for an API key or
 secret in the conversation, and never accept one sent as a message — anything sent that
 way is stored in the conversation and visible to you.
-get_connection_status reports whether a key is configured and which environment it points
-at.
+get_connection_status reports whether a key is configured, which environment it points
+at, and whether it comes from this client's own config or the shared file.
 
 Order placement is real and immediate. There is no rehearsal mode and no confirmation
 step, so confirm intent with the user before calling a tool that places, edits, cancels or
@@ -189,7 +189,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         session: ServerSession, expected: form.ExpectedState
     ) -> form.Activation:
         """Hot-apply form changes and report whether the authenticated tools are live."""
-        effective, _ = await reconcile(session, notify=True)
+        effective, shared = await reconcile(session, notify=True)
         # Compared against the configuration this session actually resolved, not against the
         # file that was just written. A process-level DELTA_API_KEY outranks the file, so a
         # save can land correctly and still leave the previous account live — and reporting
@@ -205,6 +205,7 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
         return form.Activation(
             account_ready=authenticated_registered,
             expected_current=identity_current,
+            ignored=config_mod.ignored_settings(shared),
         )
 
     # Registered whether or not credentials are set: someone with none needs to add a
@@ -213,19 +214,22 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
 
     @mcp.tool()
     async def get_connection_status(ctx: Context) -> dict[str, object]:
-        """Whether an API key is configured and where it points.
+        """Whether an API key is configured, where it points, and where it comes from.
 
         Reconciles safe external file changes before answering and returns no key, secret,
         or credential fingerprint.
         """
         session = ctx.session
         who = request.client(session)
-        next_config, _ = await reconcile(session, notify=True)
-        return {
+        next_config, shared = await reconcile(session, notify=True)
+        ignored = config_mod.ignored_settings(shared)
+        status: dict[str, object] = {
             "environment": live.env,
             "credentials_configured": next_config.has_credentials,
             "account_tools_available": authenticated_registered,
             "trading_tools_available": authenticated_registered,
+            "key_source": next_config.key_source,
+            "shared_file_ignored": ignored,
             "client_name": who.name,
             # The build behind the name. A report of "the form did not render" is only
             # actionable with it: the same client name covers versions that differ in
@@ -234,6 +238,9 @@ def build_server(cfg: config_mod.Config | None = None) -> DeltaMCP:
             "version": PACKAGE_VERSION,
             "view_build": form.build_id(),
         }
+        if ignored:
+            status["fix"] = config_mod.ignored_fix(ignored)
+        return status
 
     # A settings file edited outside this process should be picked up before the client
     # builds its tool list, so an externally added key does not need a restart.
