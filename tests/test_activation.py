@@ -148,6 +148,16 @@ async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
         instructions = session.initialized.instructions
         assert "setup_credentials" in instructions
         assert "Never ask for an API key" in instructions
+        assert "it opens a form they type the key into" not in instructions
+
+
+async def test_the_setup_tool_does_not_promise_a_form_before_it_runs():
+    """Cursor's agent repeated the old description to the user before the tool answered."""
+    async with connected(client_name="Cursor") as session:
+        tools = await session.client.list_tools()
+        setup = next(t for t in tools.tools if t.name == "setup_credentials")
+        assert not setup.description.startswith("Open a form")
+        assert "Do not tell the user a form is open" in setup.description
 
 
 APPS = {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}

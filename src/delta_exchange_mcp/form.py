@@ -824,7 +824,11 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
 
     @mcp.tool(meta=_OPENS_VIEW)
     async def setup_credentials(ctx: Context) -> CallToolResult:
-        """Open a form for the user to enter their Delta API key, kept out of the chat.
+        """Help the user add their Delta API key without putting it in the chat.
+
+        On a client that can display a form this opens one. Otherwise it returns the
+        terminal and settings-file steps instead. Do not tell the user a form is open
+        before this tool's result says so.
 
         Call this whenever the user wants to log in, sign in, connect their Delta
         account, add or replace an API key, turn trading on or off for this client, or
