@@ -66,7 +66,7 @@ async def test_api_key_rejection_is_a_credential_rejection():
     route = respx.get(f"{config_mod.INDIA_TESTNET_REST}/users/trading_preferences").mock(
         return_value=httpx.Response(
             401,
-            json={"success": False, "error": {"code": "InvalidApiKey"}},
+            json={"success": False, "error": {"code": "invalid_api_key"}},
         )
     )
 
@@ -136,7 +136,7 @@ def test_a_rejected_key_is_not_saved(terminal, monkeypatch, capsys):
         check_returning(
             ok=False,
             reachable=True,
-            detail="delta api error: InvalidApiKey — API key not found.",
+            detail="delta api error: invalid_api_key — API key not found.",
         ),
     )
     assert login.run() == 1

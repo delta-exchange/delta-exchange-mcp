@@ -150,8 +150,9 @@ The one thing that has not changed: unlike GET reads, mutations are never auto-r
 timeout or a rate limit. A failure is surfaced, not silently re-sent, because re-sending an
 order can place it twice.
 
-Delta checks permission for each endpoint. An `UnauthorizedApiAccess` response means the
-key cannot reach that endpoint; it does not mean the key is invalid.
+Delta checks permission for each endpoint. An `Unauthorized` response means the key cannot
+reach that endpoint, such as a Read Data key placing an order; it does not mean the key is
+invalid.
 
 ## Add your API key
 
@@ -512,7 +513,7 @@ stay absent.
   permission can place orders as soon as it is saved, and a Read Data key cannot, because
   Delta rejects it. Choose the permission you actually want.
 - **API key permission.** Delta checks permission for each endpoint. An
-  `UnauthorizedApiAccess` response means that the key cannot access the requested endpoint;
+  `Unauthorized` response means that the key cannot access the requested endpoint;
   it does not prove that the key is invalid. Current Delta documentation does not establish
   whether Read Data alone is sufficient for account reads.
 - **No rehearsal, no confirmation, no caps.** Orders go out as sent. There is no dry run, no
