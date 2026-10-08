@@ -351,12 +351,37 @@ async def test_a_save_under_a_shell_export_is_not_reported_as_connected(accepted
         assert result["status"] == "superseded"
         assert "someone@delta.exchange" not in result["message"]
         assert "DELTA_API_KEY" in result["message"]
+        assert "restart the client" in result["message"]
         assert session.server.live_client.config.api_key == "exported-in-the-shell-key"
         # The file still carries what was typed: it is what every other client reads.
         assert store.read()["DELTA_API_KEY"] == KEY
 
 
-def rejecting(code, detail="delta api error: raw [http 401] (context={...})", ip=""):
+async def test_the_status_names_a_client_key_that_outranks_the_saved_one(accepted, monkeypatch):
+    store.write({"DELTA_API_KEY": "saved-key", "DELTA_API_SECRET": "saved-secret"})
+    monkeypatch.setenv("DELTA_API_KEY", "client-config-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "client-config-secret")
+    async with connected() as session:
+        status = await session.call("get_connection_status")
+
+    assert status["key_source"] == "client"
+    assert status["shared_file_ignored"] == ["DELTA_API_KEY", "DELTA_API_SECRET"]
+    assert "remove them from this client's config" in status["fix"]
+    assert "client-config-key" not in json.dumps(status)
+    assert "saved-key" not in json.dumps(status)
+
+
+async def test_the_status_has_no_fix_when_the_saved_key_is_in_use(accepted):
+    async with connected() as session:
+        await save(session)
+        status = await session.call("get_connection_status")
+
+    assert status["key_source"] == "shared_file"
+    assert status["shared_file_ignored"] == []
+    assert "fix" not in status
+
+
+def rejecting(code,detail="delta api error: raw [http 401] (context={...})", ip=""):
     async def check(env, key, secret):
         return credentials.Check(
             ok=False, reachable=True, detail=detail, code=code, ip=ip
