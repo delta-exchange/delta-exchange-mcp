@@ -216,7 +216,7 @@
     },
     {
       "name": "setup_credentials",
-      "description": "Open a form for the user to enter their Delta API key, kept out of the chat."
+      "description": "Help the user add their Delta API key without putting it in the chat."
     }
   ],
   "tools_generated": false,
