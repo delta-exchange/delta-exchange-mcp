@@ -138,6 +138,14 @@ def test_a_client_environment_overrides_the_saved_one(monkeypatch):
     assert config_mod.ignored_settings(FILE) == ["DELTA_MCP_ENV"]
 
 
+def test_the_template_environment_without_a_saved_key_is_not_ignored(monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_devnet")
+    monkeypatch.delenv("DELTA_API_KEY", raising=False)
+    monkeypatch.delenv("DELTA_API_SECRET", raising=False)
+    template = {"DELTA_MCP_ENV": "india_prod", "DELTA_API_KEY": "", "DELTA_API_SECRET": ""}
+    assert config_mod.ignored_settings(template) == []
+
+
 def test_an_empty_file_has_nothing_ignored(monkeypatch):
     monkeypatch.setenv("DELTA_API_KEY", "client-key")
     monkeypatch.setenv("DELTA_API_SECRET", "client-secret")

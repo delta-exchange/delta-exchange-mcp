@@ -127,7 +127,10 @@ def ignored_settings(shared: dict[str, str] | None = None) -> list[str]:
     values = store.read() if shared is None else shared
     live = _load_snapshot(values, None)
     saved_env = (values.get("DELTA_MCP_ENV") or "").strip().lower()
-    names = ["DELTA_MCP_ENV"] if saved_env and saved_env != live.env else []
+    # The file template writes india_prod before any key exists, so a saved environment
+    # only counts when a saved key goes with it.
+    saved_key = (values.get("DELTA_API_KEY") or "").strip()
+    names = ["DELTA_MCP_ENV"] if saved_key and saved_env and saved_env != live.env else []
     for name, value in (("DELTA_API_KEY", live.api_key), ("DELTA_API_SECRET", live.api_secret)):
         saved = (values.get(name) or "").strip()
         if saved and saved != value:
