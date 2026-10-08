@@ -55,11 +55,11 @@ Delta Exchange India. Market data needs no setup and always works. The user's ow
 — positions, orders, fills, balances — and order placement both need an API key.
 
 If the user asks about their own account and no account tool is available, call
-setup_credentials and relay what it returns. It opens a form on a client that can show one,
-and otherwise gives the terminal and settings-file steps. Do not tell the user a form is
-open before its result says so. Never ask for an API key or
-secret in the conversation, and never accept one sent as a message — anything sent that
-way is stored in the conversation and visible to you.
+setup_credentials and relay what it returns. It opens a form on a client that can show
+one, and otherwise gives the terminal and settings-file steps. Do not tell the user a
+form is open before its result says so. Never ask for an API key or secret in the
+conversation, and never accept one sent as a message — anything sent that way is stored
+in the conversation and visible to you.
 get_connection_status reports whether a key is configured and which environment it points
 at.
 
