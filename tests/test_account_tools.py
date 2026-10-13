@@ -14,6 +14,7 @@ import httpx
 import pytest
 import respx
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.config import INDIA_TESTNET_REST, Config
@@ -259,7 +260,7 @@ def test_safe_export_path_accepts_home_tilde():
 
 def test_safe_export_path_rejects_outside_scope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(ValueError, match="must be inside"):
+    with pytest.raises(ToolError, match="must be inside"):
         _safe_export_path("/etc/passwd")
 
 
@@ -267,7 +268,7 @@ def test_safe_export_path_rejects_dotdot_traversal(tmp_path, monkeypatch):
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     monkeypatch.chdir(sandbox)
-    with pytest.raises(ValueError, match="must be inside"):
+    with pytest.raises(ToolError, match="must be inside"):
         _safe_export_path("../../../../etc/passwd")
 
 
