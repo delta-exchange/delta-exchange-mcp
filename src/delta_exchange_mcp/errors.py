@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 # Documented in slate `_authentication.md`, plus the spellings Delta's gateway sends
 # instead (`expired_signature`, `Unauthorized`). Lookup of server error code → human hint.
 _AUTH_HINTS: dict[str, str] = {
@@ -65,7 +67,7 @@ def extract_ip(context: Any) -> str | None:
     return None
 
 
-class DeltaApiError(Exception):
+class DeltaApiError(ToolError):
     def __init__(self, code: str, context: Any = None, status: int | None = None):
         self.code = code
         self.context = context
