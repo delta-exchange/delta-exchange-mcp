@@ -7,6 +7,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
+from delta_exchange_mcp import hints
 from delta_exchange_mcp.client import DeltaClient
 
 Resolution = Literal["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "1d", "1w"]
@@ -29,7 +30,7 @@ def _csv(values: list[str] | None) -> str | None:
 
 
 def register(mcp: MCPServer, client: DeltaClient) -> None:
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("List products"))
     async def list_products(
         contract_types: list[str] | None = Field(
             default=None,
@@ -58,16 +59,20 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Product details"))
     async def get_product(symbol: str) -> dict[str, Any]:
         """Get full product details for a single symbol (e.g. BTCUSD, C-BTC-66400-010824)."""
         return await client.get(f"/products/{symbol}")
 
-    @mcp.tool(description=f"Get the ticker (price, volume, OI, mark/spot) for one symbol. {TICKER_FIELDS}")
+    @mcp.tool(
+        annotations=hints.reads("Ticker"),
+        description=f"Get the ticker (price, volume, OI, mark/spot) for one symbol. {TICKER_FIELDS}",
+    )
     async def get_ticker(symbol: str) -> dict[str, Any]:
         return await client.get(f"/tickers/{symbol}")
 
     @mcp.tool(
+        annotations=hints.reads("Tickers"),
         description=f"List tickers across many products with optional contract-type / underlying filters. {TICKER_FIELDS}"
     )
     async def list_tickers(
@@ -86,7 +91,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Order book"))
     async def get_orderbook(
         symbol: str,
         depth: int | None = Field(default=None, ge=1, le=100, description="Levels per side (max 100)."),
@@ -94,12 +99,12 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         """L2 orderbook snapshot for a symbol."""
         return await client.get(f"/l2orderbook/{symbol}", params={"depth": depth})
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Recent trades"))
     async def get_recent_trades(symbol: str) -> dict[str, Any]:
         """Recent public trades for a symbol."""
         return await client.get(f"/trades/{symbol}")
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Candles"))
     async def get_candles(
         symbol: str,
         resolution: Resolution,
@@ -115,7 +120,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             params={"symbol": symbol, "resolution": resolution, "start": start, "end": end},
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Settlement prices"))
     async def get_settlement_prices(
         contract_types: list[str] | None = Field(
             default=None,
@@ -144,7 +149,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Funding history"))
     async def get_funding_history(
         symbol: str = Field(description="Perpetual symbol, e.g. BTCUSD or ETHUSD."),
         resolution: Resolution = "1h",
@@ -166,7 +171,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Mark price history"))
     async def get_mark_price_history(
         symbol: str = Field(description="Product symbol, e.g. BTCUSD or C-BTC-66400-010824."),
         resolution: Resolution = "1m",
@@ -188,7 +193,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Open interest history"))
     async def get_oi_history(
         symbol: str = Field(description="Product symbol, e.g. BTCUSD or ETHUSD."),
         resolution: Resolution = "1h",
@@ -210,7 +215,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Options chain"))
     async def get_options_chain(
         underlying: str = Field(description="Underlying asset symbol, e.g. BTC or ETH."),
         expiry_date: str = Field(description="Expiry date in DD-MM-YYYY format (note: different from /products)."),
@@ -225,7 +230,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
             },
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Indices"))
     async def get_indices() -> dict[str, Any]:
         """Spot price indices that Delta builds by combining prices from prominent exchanges.
 
@@ -239,7 +244,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         """
         return await client.get("/indices")
 
-    @mcp.tool()
+    @mcp.tool(annotations=hints.reads("Reference data"))
     async def get_reference_data() -> dict[str, Any]:
         """Merged assets + indices listing — useful for symbol/asset metadata lookups.
 

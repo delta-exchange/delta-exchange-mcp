@@ -91,7 +91,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, TextContent
 
-from delta_exchange_mcp import credentials, request, store
+from delta_exchange_mcp import credentials, hints, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
     DASHBOARDS,
@@ -824,7 +824,14 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             else "Restart this client to use your account."
         )
 
-    @mcp.tool(meta=_OPENS_VIEW)
+    # Not idempotent: a second call replaces the outstanding one-use grant, so a form
+    # already on screen can no longer save.
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Connect your Delta account", destructive=False, idempotent=False, external=False
+        ),
+        meta=_OPENS_VIEW,
+    )
     async def setup_credentials(ctx: Context) -> CallToolResult:
         """Help the user add their Delta API key without putting it in the chat.
 
@@ -855,7 +862,12 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             },
         )
 
-    @mcp.tool(meta=_APP_ONLY)
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Save your Delta credentials", destructive=True, idempotent=True
+        ),
+        meta=_APP_ONLY,
+    )
     async def save_credentials(
         environment: str,
         api_key: str,
