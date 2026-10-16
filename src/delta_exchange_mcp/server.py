@@ -101,15 +101,12 @@ class DeltaMCP(MCPServer):
         is the one place the session is in reach before the tool list is built."""
         if ctx.method == "tools/list" and self._before_list_tools is not None:
             await self._before_list_tools(ctx.session)
+        if ctx.method == "tools/call" and ctx.params:
+            with analytics.scope(
+                ctx.session.client_params, ctx.protocol_version, ctx.params["name"]
+            ):
+                return await call_next(ctx)
         return await call_next(ctx)
-
-    async def call_tool(self, name, arguments):
-        try:
-            client = self.get_context().session.client_params
-        except ValueError:
-            client = None
-        with analytics.scope(client, name):
-            return await super().call_tool(name, arguments)
 
     async def close_live_client(self) -> None:
         if self.live_client is not None:

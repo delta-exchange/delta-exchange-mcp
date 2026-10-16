@@ -20,11 +20,11 @@ SECRET = "env-secret-never-forwarded"
 README = Path(__file__).parent.parent / "README.md"
 
 
-def params(name="probe", version="1", protocol="2025-06-18", **capabilities):
+def params(name="probe", version="1", **capabilities):
     return types.InitializeRequestParams(
-        protocolVersion=protocol,
+        protocol_version="2025-06-18",
         capabilities=types.ClientCapabilities(**capabilities),
-        clientInfo=types.Implementation(name=name, version=version),
+        client_info=types.Implementation(name=name, version=version),
     )
 
 
@@ -40,7 +40,7 @@ async def test_a_tool_call_names_the_client_and_tool(monkeypatch):
     )
     async with connected(client_name="probe-client") as session:
         await session.call("get_ticker", symbol="BTCUSD")
-        negotiated = str(session.initialized.protocolVersion)
+        negotiated = str(session.initialized.protocol_version)
 
     sent = route.calls.last.request.headers
     assert sent["Source"].startswith("delta-exchange-mcp/")
@@ -50,11 +50,6 @@ async def test_a_tool_call_names_the_client_and_tool(monkeypatch):
     assert sent["X-Delta-MCP-Tool"] == "get_ticker"
     assert sent["X-Delta-MCP-Protocol"] == negotiated
     assert {"platform", "python"} <= json.loads(sent["X-Delta-MCP-Context"]).keys()
-
-
-async def test_an_unsupported_protocol_reports_the_version_the_server_answered():
-    with analytics.scope(params(protocol="1999-01-01"), "get_ticker"):
-        assert analytics.headers()["X-Delta-MCP-Protocol"] == types.LATEST_PROTOCOL_VERSION
 
 
 @respx.mock
@@ -73,14 +68,14 @@ async def test_nothing_credential_shaped_is_ever_forwarded(monkeypatch):
     for value in forwarded(request).values():
         assert not any(secret in value for secret in leaked)
 
-    with analytics.scope(params(), "get_ticker"):
+    with analytics.scope(params(), "2025-06-18", "get_ticker"):
         analytics.headers()["api-key"] = KEY
         assert "api-key" not in analytics.headers()
 
 
 async def test_a_client_name_cannot_forge_a_header():
     hostile = params(name="evil\r\nX-Injected: 1", version="Клод\x00")
-    with analytics.scope(hostile, "get_ticker"):
+    with analytics.scope(hostile, "2025-06-18", "get_ticker"):
         sent = httpx.Request("GET", "https://example.test", headers=analytics.headers())
 
     assert "x-injected" not in sent.headers
@@ -96,7 +91,7 @@ async def test_the_header_set_stays_under_4096_bytes():
         sampling=types.SamplingCapability(),
         roots=types.RootsCapability(),
     )
-    with analytics.scope(huge, "x" * 5000):
+    with analytics.scope(huge, "2025-06-18", "x" * 5000):
         sent = analytics.headers()
 
     assert sum(len(k) + len(v) + 4 for k, v in sent.items()) <= 4096
@@ -105,7 +100,7 @@ async def test_the_header_set_stays_under_4096_bytes():
 
 async def test_overlapping_calls_keep_their_own_labels():
     async def call(name, tool):
-        with analytics.scope(params(name=name), tool):
+        with analytics.scope(params(name=name), "2025-06-18", tool):
             await asyncio.sleep(0)
             sent = analytics.headers()
         return sent["X-Delta-MCP-Client"], sent["X-Delta-MCP-Tool"]
@@ -116,7 +111,7 @@ async def test_overlapping_calls_keep_their_own_labels():
 
 
 async def test_a_failed_call_leaves_no_labels_behind():
-    with pytest.raises(RuntimeError), analytics.scope(params(), "get_ticker"):
+    with pytest.raises(RuntimeError), analytics.scope(params(), "2025-06-18", "get_ticker"):
         raise RuntimeError
     assert analytics.headers() == {"X-Delta-MCP-Version": PACKAGE_VERSION}
 
@@ -126,7 +121,7 @@ async def test_a_request_outside_a_tool_call_still_names_the_package():
 
 
 async def test_the_readme_lists_exactly_what_gets_forwarded():
-    with analytics.scope(params(roots=types.RootsCapability()), "get_ticker"):
+    with analytics.scope(params(roots=types.RootsCapability()), "2025-06-18", "get_ticker"):
         sent = set(analytics.headers())
     documented = set(re.findall(r"^\| `(X-Delta-MCP-[\w-]+)` \|", README.read_text(), re.M))
     assert documented == sent
