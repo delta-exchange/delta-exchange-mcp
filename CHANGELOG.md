@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Versions follow SemVer,
 major bumps deferred until the package leaves Beta — so a breaking change lands as a minor
 bump and is marked BREAKING.
 
-## 0.8.0
+## 0.7.1
 
 ### Changed
 
