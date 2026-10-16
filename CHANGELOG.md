@@ -9,6 +9,8 @@ bump and is marked BREAKING.
 ### Changed
 
 - The `mcp` SDK dependency moves to `>=2.0.0,<3`. Tools and behaviour do not change.
+- Every Delta API request carries `X-Delta-MCP-*` headers naming the package version, and
+  inside a tool call the client, tool and protocol version. The README lists each header.
 - `get_connection_status` returns `key_source` (`client`, `shared_file` or `null`) and
   `shared_file_ignored`, the shared-file settings that the client's own config overrides,
   with a `fix` when that list is not empty.

@@ -12,6 +12,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
 
+from delta_exchange_mcp import analytics
 from delta_exchange_mcp import config as config_mod
 from delta_exchange_mcp import debug_log
 from delta_exchange_mcp import form
@@ -100,6 +101,11 @@ class DeltaMCP(MCPServer):
         is the one place the session is in reach before the tool list is built."""
         if ctx.method == "tools/list" and self._before_list_tools is not None:
             await self._before_list_tools(ctx.session)
+        if ctx.method == "tools/call" and ctx.params:
+            with analytics.scope(
+                ctx.session.client_params, ctx.protocol_version, ctx.params["name"]
+            ):
+                return await call_next(ctx)
         return await call_next(ctx)
 
     async def close_live_client(self) -> None:
