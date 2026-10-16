@@ -153,6 +153,29 @@ order can place it twice.
 Delta checks permission for each endpoint. An `UnauthorizedApiAccess` response means the
 key cannot reach that endpoint; it does not mean the key is invalid.
 
+## Skills
+
+A skill is a written procedure for a task that needs more than one tool: the tool
+sequence, the calculations, and the output shape. The server ships three:
+
+| Skill | Task | Needs an API key |
+|---|---|---|
+| `pnl-analytics` | Review P&L and trading performance | yes |
+| `position-risk` | Report open positions and risk | yes |
+| `funding-carry` | Compare perpetual funding rates | no |
+| `daily-market-brief` | What moved today: gainers, losers, activity, funding | no |
+
+`list_skills` and `get_skill` read every procedure through plain tool calls, for a client
+that only calls tools. Clients that browse resources can read the same text under
+`skill://delta/<name>`, and each procedure also has its own prompt. A key-gated skill
+joins all three surfaces the moment its key is saved — no restart, the same as the
+account and trading tools.
+
+The P&L procedure exports fills to a local CSV and runs the installed
+`delta-exchange-pnl` command, which matches them in first-in, first-out order and writes
+an HTML dashboard to `~/.delta-exchange-mcp/reports/`. The raw fill history never enters
+the conversation.
+
 ## Add your API key
 
 **You may not need one.** Market data works with no key at all, so if you only want prices,
