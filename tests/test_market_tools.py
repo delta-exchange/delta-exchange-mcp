@@ -98,6 +98,32 @@ async def test_get_settlement_prices_filters_states_expired(client: DeltaClient)
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_get_orderbook_defaults_to_max_depth(client: DeltaClient):
+    """An omitted depth must not fall through to Delta's own unbounded default.
+
+    Measured against the live API: no `depth` param returns the full book (2000+
+    levels per side, ~170KB for BTCUSD) versus ~9.5KB at depth=100, the tool's own
+    documented maximum. Passing depth explicitly (including None) is unaffected.
+    """
+    route = respx.get(f"{INDIA_TESTNET_REST}/l2orderbook/BTCUSD").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    await _call_market_tool(client, "get_orderbook", symbol="BTCUSD")
+    assert "depth=100" in str(route.calls[0].request.url)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_orderbook_respects_an_explicit_depth(client: DeltaClient):
+    route = respx.get(f"{INDIA_TESTNET_REST}/l2orderbook/BTCUSD").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    await _call_market_tool(client, "get_orderbook", symbol="BTCUSD", depth=5)
+    assert "depth=5" in str(route.calls[0].request.url)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_get_indices_hits_indices_endpoint(client: DeltaClient):
     route = respx.get(f"{INDIA_TESTNET_REST}/indices").mock(
         return_value=httpx.Response(200, json={"success": True, "result": []})

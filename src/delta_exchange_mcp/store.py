@@ -72,16 +72,47 @@ def path() -> Path:
     return Path(override).expanduser() if override else DEFAULT_DIR / DEFAULT_NAME
 
 
+_ReadCacheEntry = tuple[int, int, dict[str, str]]
+_read_cache: dict[Path, _ReadCacheEntry] = {}
+
+
+def _invalidate_cache(target: Path) -> None:
+    _read_cache.pop(target, None)
+
+
 def read() -> dict[str, str]:
     """Values from the shared file, dropping any left blank.
 
     A missing file is the ordinary first-run state, and an unreadable one must not
     stop market data from working, so neither is an error.
+
+    `reconcile()` calls this on every `tools/list` (before FastMCP builds the tool
+    list) so an externally edited file is picked up without a restart — see
+    `server.py::refresh_before_list`. That makes this the hottest path in the whole
+    server: `dotenv_values` re-opens and re-parses the file even when nothing about
+    it changed since the last call. Cached on `(mtime_ns, size)` of the target path,
+    which turns the common no-change case into a single `stat()`. A write through
+    this module's own `write()` invalidates its entry directly rather than relying
+    on the new mtime differing, because two writes landing inside one filesystem's
+    mtime-resolution window would otherwise read back the pre-write value.
     """
+    target = path()
     try:
-        return {key: value for key, value in dotenv_values(path()).items() if value}
+        st = target.stat()
     except OSError:
+        _invalidate_cache(target)
         return {}
+    cache_key = (st.st_mtime_ns, st.st_size)
+    cached = _read_cache.get(target)
+    if cached is not None and (cached[0], cached[1]) == cache_key:
+        return dict(cached[2])  # a copy, so a caller mutating the result can't poison the cache
+    try:
+        values = {key: value for key, value in dotenv_values(target).items() if value}
+    except OSError:
+        _invalidate_cache(target)
+        return {}
+    _read_cache[target] = (*cache_key, values)
+    return dict(values)
 
 
 def ensure() -> Path | None:
@@ -205,6 +236,13 @@ def write(values: dict[str, str]) -> str | None:
             os.chmod(staged, mode)
             os.replace(staged, target)
             staged = None
+            # The replaced file can land on the same (mtime_ns, size) `read()` cached
+            # for the pre-write version — same byte count is common (key/secret/env
+            # are similar lengths) and two writes inside one filesystem's mtime
+            # resolution window is exactly the case a passive cache would get wrong.
+            # Dropping the entry here, at the one place this process changes the
+            # file, means `read()` never has to guess.
+            _invalidate_cache(target)
     except OSError as exc:
         # Reported rather than raised because a caller may be a tool answering a form,
         # where an exception becomes a protocol error the person cannot act on.
