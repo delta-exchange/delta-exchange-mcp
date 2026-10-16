@@ -8,6 +8,7 @@ from typing import Literal
 from delta_exchange_mcp import store
 
 Env = Literal["india_prod", "india_testnet", "india_devnet"]
+KeySource = Literal["client", "shared_file"]
 
 INDIA_PROD_REST = "https://api.india.delta.exchange/v2"
 INDIA_TESTNET_REST = "https://cdn-ind.testnet.deltaex.org/v2"
@@ -41,6 +42,7 @@ class Config:
     api_secret: str | None = None
     debug: bool = False
     config_file: Path | None = None
+    key_source: KeySource | None = None
 
     @property
     def has_credentials(self) -> bool:
@@ -72,7 +74,9 @@ def _from_env(name: str) -> str | None:
     return value or None
 
 
-def _credentials(shared: dict[str, str]) -> tuple[str | None, str | None]:
+def _credentials(
+    shared: dict[str, str],
+) -> tuple[str | None, str | None, KeySource | None]:
     """The API key and its secret, always taken from the same source.
 
     Resolving them independently could pair a leftover DELTA_API_KEY in someone's
@@ -88,11 +92,10 @@ def _credentials(shared: dict[str, str]) -> tuple[str | None, str | None]:
     key = _from_env("DELTA_API_KEY")
     secret = _from_env("DELTA_API_SECRET")
     if key or secret:
-        return key, secret
-    return (
-        (shared.get("DELTA_API_KEY") or "").strip() or None,
-        (shared.get("DELTA_API_SECRET") or "").strip() or None,
-    )
+        return key, secret, "client"
+    key = (shared.get("DELTA_API_KEY") or "").strip() or None
+    secret = (shared.get("DELTA_API_SECRET") or "").strip() or None
+    return key, secret, "shared_file" if key or secret else None
 
 
 def _load_snapshot(shared: dict[str, str], config_file: Path | None) -> Config:
@@ -103,7 +106,7 @@ def _load_snapshot(shared: dict[str, str], config_file: Path | None) -> Config:
             f"DELTA_MCP_ENV must be one of {sorted(BASE_URLS)}, got {env!r}"
         )
 
-    api_key, api_secret = _credentials(shared)
+    api_key, api_secret, key_source = _credentials(shared)
 
     return Config(
         env=env,  # type: ignore[arg-type]
@@ -112,6 +115,7 @@ def _load_snapshot(shared: dict[str, str], config_file: Path | None) -> Config:
         api_secret=api_secret,
         debug=(setting("DELTA_MCP_DEBUG", shared) or "").lower() in TRUTHY,
         config_file=config_file,
+        key_source=key_source,
     )
 
 
@@ -121,3 +125,34 @@ def load(shared: dict[str, str] | None = None) -> Config:
     # cannot combine the environment from the old file with credentials from the new.
     values = store.read() if shared is None else shared
     return _load_snapshot(values, config_file)
+
+
+def ignored_settings(shared: dict[str, str] | None = None) -> list[str]:
+    """Settings saved in the shared file that the client's own config replaces.
+
+    Compares what `load` resolves against what the file holds, so it cannot drift from the
+    precedence rules. A client value equal to the saved one replaces nothing that matters.
+    """
+    values = store.read() if shared is None else shared
+    live = _load_snapshot(values, None)
+    saved_env = (values.get("DELTA_MCP_ENV") or "").strip().lower()
+    # The file template writes india_prod before any key exists, so a saved environment
+    # only counts when a saved key goes with it.
+    saved_key = (values.get("DELTA_API_KEY") or "").strip()
+    names = ["DELTA_MCP_ENV"] if saved_key and saved_env and saved_env != live.env else []
+    for name, value in (("DELTA_API_KEY", live.api_key), ("DELTA_API_SECRET", live.api_secret)):
+        saved = (values.get(name) or "").strip()
+        if saved and saved != value:
+            names.append(name)
+    return names
+
+
+def ignored_fix(names: list[str]) -> str:
+    """What to tell someone whose saved settings this client is ignoring."""
+    one = len(names) == 1
+    return (
+        f"This client's own MCP server config sets {' and '.join(names)}, which "
+        f"{'outranks' if one else 'outrank'} the saved values in {store.path()}. To use the "
+        f"saved settings, remove {'it' if one else 'them'} from this client's config for "
+        "the Delta server and restart the client. Saving again will not help."
+    )
