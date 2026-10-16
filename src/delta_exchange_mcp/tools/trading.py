@@ -13,6 +13,7 @@ from functools import wraps
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from delta_exchange_mcp.account_identity import fetch_account_identity
@@ -87,7 +88,7 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _require_one(product_id: int | None, product_symbol: str | None) -> None:
     if (product_id is None) == (product_symbol is None):
-        raise ValueError("pass exactly one of product_id or product_symbol")
+        raise ToolError("pass exactly one of product_id or product_symbol")
 
 
 def register(mcp: MCPServer, client: DeltaClient) -> None:
@@ -231,7 +232,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
-            raise ValueError("pass exactly one of id or client_order_id")
+            raise ToolError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("DELETE", "/orders", payload)
 
@@ -335,7 +336,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
-            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
+            raise ToolError("provide at least one of stop_loss_order or take_profit_order")
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,

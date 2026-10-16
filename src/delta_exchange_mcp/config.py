@@ -22,7 +22,7 @@ BASE_URLS: dict[str, str] = {
 
 # Where someone creates the key for each environment. Beside BASE_URLS because it is the
 # same per-environment fact from the user's side, and because every place that asks for a
-# credential has to name the right one — a prod key sent to testnet returns InvalidApiKey.
+# credential has to name the right one — a prod key sent to testnet returns invalid_api_key.
 # india_devnet is internal and has no public dashboard, so it is absent by design.
 DASHBOARDS: dict[str, str] = {
     "india_prod": "https://www.delta.exchange/app/account/manageapikeys",
@@ -52,17 +52,26 @@ class Config:
 def setting(name: str, shared: dict[str, str] | None = None) -> str | None:
     """Resolve one setting: the process environment first, then the shared file.
 
-    Empty means unanswered rather than answered-with-nothing. A bundle substitutes
-    every variable it declares whether or not the user filled that field in, so a
-    cleared input arrives as "" — it has to fall through to the file rather than
-    override it, or the shared file could never reach a bundle user at all. `shared`
+    Empty means unanswered rather than answered-with-nothing. A bundle host sets every
+    variable it declares whether or not the user filled that field in, so a cleared
+    input arrives blank or as its unexpanded placeholder. It has to fall through to the
+    file rather than override it, or the shared file could never reach a bundle user. `shared`
     lets one caller resolve several settings from the same file snapshot.
     """
-    from_env = (os.environ.get(name) or "").strip()
+    from_env = _from_env(name)
     if from_env:
         return from_env
     values = store.read() if shared is None else shared
     return (values.get(name) or "").strip() or None
+
+
+def _from_env(name: str) -> str | None:
+    # Claude Desktop does not expand an optional bundle field left empty: the server gets
+    # the literal "${user_config.api_key}", which would otherwise read as a real key.
+    value = (os.environ.get(name) or "").strip()
+    if value.startswith("${") and value.endswith("}"):
+        return None
+    return value or None
 
 
 def _credentials(
@@ -80,8 +89,8 @@ def _credentials(
     # Stripped like every other setting, so a whitespace-only field reads as unanswered
     # and falls through. Stripping also absorbs the trailing newline a pasted key
     # usually carries, which would otherwise fail signing and look like a wrong key.
-    key = (os.environ.get("DELTA_API_KEY") or "").strip() or None
-    secret = (os.environ.get("DELTA_API_SECRET") or "").strip() or None
+    key = _from_env("DELTA_API_KEY")
+    secret = _from_env("DELTA_API_SECRET")
     if key or secret:
         return key, secret, "client"
     key = (shared.get("DELTA_API_KEY") or "").strip() or None
