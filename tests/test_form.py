@@ -267,11 +267,11 @@ async def test_a_key_delta_rejects_is_not_saved(server, monkeypatch):
     monkeypatch.setattr(
         credentials,
         "check",
-        checking(ok=False, reachable=True, detail="delta api error: InvalidApiKey"),
+        checking(ok=False, reachable=True, detail="delta api error: invalid_api_key"),
     )
     structured, _ = await save(await opened(server))
     assert structured["status"] == "rejected"
-    assert "InvalidApiKey" in structured["message"]
+    assert "invalid_api_key" in structured["message"]
     assert config_mod.load().has_credentials is False
 
 
@@ -355,7 +355,7 @@ async def test_the_credentials_never_appear_in_anything_the_tool_returns(server,
     """
     for check in (
         checking(ok=True, reachable=True, detail="57354187"),
-        checking(ok=False, reachable=True, detail="delta api error: InvalidApiKey"),
+        checking(ok=False, reachable=True, detail="delta api error: invalid_api_key"),
         checking(ok=False, reachable=False, detail="timeout"),
     ):
         monkeypatch.setattr(credentials, "check", check)
