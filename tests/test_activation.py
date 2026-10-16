@@ -57,7 +57,7 @@ class Session:
 
 
 @asynccontextmanager
-async def connected(cfg=None, client_name=None, mcp=None):
+async def connected(cfg=None, client_name=None, mcp=None, extensions=None):
     """A client talking to a server started the way `main` starts it.
 
     The SDK's own `create_connected_server_and_client_session` builds initialization
@@ -90,7 +90,11 @@ async def connected(cfg=None, client_name=None, mcp=None):
                     else None
                 )
                 async with ClientSession(
-                    client_read, client_write, message_handler=collect, client_info=info
+                    client_read,
+                    client_write,
+                    message_handler=collect,
+                    client_info=info,
+                    extensions=extensions,
                 ) as client:
                     initialized = await client.initialize()
                     box["session"] = Session(client, initialized, app)
@@ -144,6 +148,37 @@ async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
         instructions = session.initialized.instructions
         assert "setup_credentials" in instructions
         assert "Never ask for an API key" in instructions
+        assert "it opens a form they type the key into" not in instructions
+
+
+async def test_the_setup_tool_does_not_promise_a_form_before_it_runs():
+    """Cursor's agent repeated the old description to the user before the tool answered."""
+    async with connected(client_name="Cursor") as session:
+        tools = await session.client.list_tools()
+        setup = next(t for t in tools.tools if t.name == "setup_credentials")
+        assert not setup.description.startswith("Open a form")
+        assert "Do not tell the user a form is open" in setup.description
+
+
+APPS = {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}
+
+
+async def test_a_client_that_renders_apps_is_told_the_form_is_open():
+    async with connected(extensions=APPS) as session:
+        result = await session.raw_call("setup_credentials")
+        assert result.structured_content["status"] == "form_opened"
+        assert "A form is now open" in result.content[0].text
+
+
+async def test_a_client_that_cannot_render_apps_is_sent_to_the_login_command():
+    async with connected(client_name="Cursor") as session:
+        result = await session.raw_call("setup_credentials")
+        text = result.content[0].text
+        assert result.structured_content["status"] == "form_unavailable"
+        assert "form is now open" not in text.lower()
+        assert text.startswith("Tell the user to run `uvx delta-exchange-mcp login`")
+        assert str(store.path()) in text
+        assert "never ask them to send a key" in text
 
 
 async def test_the_status_tool_exists_with_no_credentials(accepted):
