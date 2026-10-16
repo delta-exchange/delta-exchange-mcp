@@ -6,6 +6,12 @@ bump and is marked BREAKING.
 
 ## 0.7.1
 
+### Added
+
+- Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`, `openWorldHint` and a title), so a client can tell a read from a
+  call that changes the account before it calls it.
+
 ### Changed
 
 - The `mcp` SDK dependency moves to `>=2.0.0,<3`. Tools and behaviour do not change.

@@ -39,7 +39,9 @@ bash scripts/inspect.sh                                                         
 
 ### Tool registration pattern
 
-Each tool module exposes `register(mcp: MCPServer, client: DeltaClient) -> None` that attaches `@mcp.tool()`-decorated closures. `server.py::build_server()` instantiates `DeltaClient` once and passes it into every `register` call. **To add a tool group**: create `src/delta_exchange_mcp/tools/<group>.py` with a `register(mcp, client)`, then call it from `build_server`.
+Each tool module exposes `register(mcp: MCPServer, client: DeltaClient) -> None` that attaches `@mcp.tool(annotations=...)`-decorated closures. `server.py::build_server()` instantiates `DeltaClient` once and passes it into every `register` call. **To add a tool group**: create `src/delta_exchange_mcp/tools/<group>.py` with a `register(mcp, client)`, then call it from `build_server`.
+
+Every tool carries MCP annotations built by `hints.py`: `hints.reads(title)` or `hints.mutates(title, destructive=, idempotent=)`, with `external=False` for tools that touch only local state. They are advisory hints for the client, not a gate. `tests/test_hints.py` names every tool that is not read-only, so a new write fails it until it is listed.
 
 `market.register` always runs; `account.register` and `trading.register` start together when `cfg.has_credentials` is true (both `DELTA_API_KEY` **and** `DELTA_API_SECRET` set), and reconciliation can add or remove that whole manifest later.
 
@@ -126,7 +128,7 @@ Consequences worth knowing before you touch this file:
 - Batch tools pass the list straight through and return Delta's response unchanged. A short response means some legs were not accepted; nothing annotates that.
 
 Conventions in `trading.py`:
-- Register every mutation through the shared `@mutation_tool` decorator. It wraps the call in `client.pin()` so a credential rebind landing mid-call cannot sign part of it with a different key.
+- Register every mutation through the shared `@mutation_tool(title, destructive=, idempotent=)` decorator. It wraps the call in `client.pin()` so a credential rebind landing mid-call cannot sign part of it with a different key, and attaches the tool's annotations.
 - The shared `_finish(method, path, payload)` helper strips `None` keys and sends via `client.post/put/delete`.
 - Order-level boolean flags (`post_only`, `reduce_only`, `cancel_*`) are Delta **string enums** — convert with `_bs()` to `"true"`/`"false"`. Position-level flags (`auto_topup`, `close_all_*`) are real JSON booleans.
 - `close_all_positions` needs `user_id`; it is resolved from `/users/trading_preferences` through `account_identity` and cached per base URL and key in the `register` closure — never a tool param.
