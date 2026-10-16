@@ -181,10 +181,10 @@ def run(verify: bool = True) -> int:
         if env is None:
             return 1
         print(f"  create a key at {DASHBOARDS.get(env, DASHBOARDS[DEFAULT_ENV])}")
-        print("  the key must have permission for trading preferences")
+        print("  a Read Data key is enough to read your account")
         print(
-            "  current Delta documentation does not establish whether Read Data alone "
-            "is sufficient\n"
+            "  a Trading key is needed only to place orders, and Delta asks for an IP "
+            "whitelist on it\n"
         )
         keep = " (Enter keeps saved)" if can_keep_saved else ""
         entered_key = _ask_secret(f"API key{keep}: ").strip()
