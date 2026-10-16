@@ -358,6 +358,10 @@ class DeltaClient:
     def _response_error(data: dict[str, Any], status: int) -> DeltaApiError:
         """Build an API error only from a valid string code."""
         error = data.get("error")
+        # Delta sends `error` as an object with a code, or as a bare string such as the
+        # "Unauthorized" a key without the route's permission gets.
+        if isinstance(error, str) and error:
+            return DeltaApiError(error, status=status)
         if not isinstance(error, dict):
             return DeltaApiError("invalid_response", status=status)
         code = error.get("code")

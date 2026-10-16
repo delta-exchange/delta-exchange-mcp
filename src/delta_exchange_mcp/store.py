@@ -48,7 +48,7 @@ TEMPLATE = """\
 #
 # Match the environment to where the key came from: a key from delta.exchange
 # works only with india_prod, one from demo.delta.exchange only with
-# india_testnet. Mixing them returns InvalidApiKey.
+# india_testnet. Mixing them returns invalid_api_key.
 #
 # A key with Trading permission is needed only to place orders, and Delta asks
 # for an IP whitelist on it. It lets an assistant place and cancel real orders as

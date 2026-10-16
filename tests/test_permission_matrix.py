@@ -172,6 +172,7 @@ async def test_permission_denials_are_conclusive_matrix_outcomes() -> None:
         ("InvalidApiKey", "invalid_key"),
         ("Signature Mismatch", "invalid_signature"),
         ("SignatureExpired", "clock_error"),
+        ("expired_signature", "clock_error"),
         ("ip_not_whitelisted_for_api_key", "ip_restricted"),
         (f"unknown\n{READ_SECRET}", "api_error:unknown"),
     ],
