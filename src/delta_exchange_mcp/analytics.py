@@ -14,7 +14,6 @@ from contextvars import ContextVar
 from urllib.parse import quote
 
 import mcp.types as types
-from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
 from delta_exchange_mcp.version import PACKAGE_VERSION
 
@@ -34,25 +33,25 @@ def headers() -> dict[str, str]:
 
 
 @contextmanager
-def scope(client: types.InitializeRequestParams | None, tool: str) -> Iterator[None]:
+def scope(
+    client: types.InitializeRequestParams | None, protocol: str, tool: str
+) -> Iterator[None]:
     """Label every request made while one tool call runs."""
-    token = _call.set(_describe(client, tool))
+    token = _call.set(_describe(client, protocol, tool))
     try:
         yield
     finally:
         _call.reset(token)
 
 
-def _describe(client: types.InitializeRequestParams | None, tool: str) -> dict[str, str]:
-    fields = {"Tool": tool}
+def _describe(
+    client: types.InitializeRequestParams | None, protocol: str, tool: str
+) -> dict[str, str]:
+    fields = {"Tool": tool, "Protocol": protocol}
     context: dict[str, object] = dict(_HOST)
     if client is not None:
-        requested = client.protocolVersion
-        fields["Client"] = client.clientInfo.name
-        fields["Client-Version"] = client.clientInfo.version
-        fields["Protocol"] = str(
-            requested if requested in SUPPORTED_PROTOCOL_VERSIONS else types.LATEST_PROTOCOL_VERSION
-        )
+        fields["Client"] = client.client_info.name
+        fields["Client-Version"] = client.client_info.version
         context["capabilities"] = [
             name
             for name in types.ClientCapabilities.model_fields

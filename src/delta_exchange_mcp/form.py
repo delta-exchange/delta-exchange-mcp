@@ -20,13 +20,12 @@ Three constraints came out of that probe and are load-bearing here:
   external fetch, so a stylesheet, font or script from a CDN leaves the frame blank.
 * The handshake must complete. A view that does not answer `ui/initialize` and then send
   `ui/notifications/initialized` stays collapsed with nothing shown.
-* Host capabilities cannot be used as a feature test. Claude Desktop renders MCP Apps
-  without advertising the `io.modelcontextprotocol/ui` extension at all, so gating on
-  that capability would disable the form on a client that supports it.
+* The view itself must not feature-test on host capabilities. Claude Desktop 1.0.0
+  rendered MCP Apps without advertising the `io.modelcontextprotocol/ui` extension.
 
-Not every client renders MCP Apps. `setup_credentials` therefore returns text that names
-the file and the `login` command as well, so on a client that shows nothing the model
-still has something correct to say.
+Not every client renders MCP Apps. `setup_credentials` tells the model a form is open only
+when the client declared the extension; otherwise it leads with the file and the `login`
+command, so the model never points the user at a form that cannot appear.
 
 Two later facts come from the spec itself (`src/spec.types.ts` in
 modelcontextprotocol/ext-apps) rather than from the probe. The host's reply to
@@ -85,17 +84,19 @@ import json
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.apps import client_supports_apps
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.session import ServerSession
 from mcp.types import CallToolResult, TextContent
 
-from delta_exchange_mcp import credentials, store
+from delta_exchange_mcp import credentials, hints, request, store
 from delta_exchange_mcp.config import (
     BASE_URLS,
     DASHBOARDS,
     DEFAULT_ENV,
+    ignored_fix,
 )
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ class Activation:
 
     account_ready: bool
     expected_current: bool = True
+    ignored: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -340,8 +342,8 @@ _TEMPLATE = """<!DOCTYPE html>
       <button id="create" class="link" type="button" aria-disabled="true">
         Get a key in Delta API management</button>
     </div>
-    <p class="note">The key must have permission for trading preferences. Current Delta
-      documentation does not establish whether Read Data alone is sufficient.</p>
+    <p class="note">A Read Data key is enough to read your account. A Trading key is
+      needed only to place orders, and Delta asks for an IP whitelist on it.</p>
 
     <button id="save" type="button" aria-disabled="true">Check and save</button>
   </div>
@@ -682,7 +684,7 @@ def _rejection(env: str, result: credentials.Check) -> str:
             "were pasted in full."
         )
     if result.code in _NO_PERMISSION:
-        return credentials.TRADING_PREFERENCES_PERMISSION_MESSAGE
+        return credentials.READ_DATA_PERMISSION_MESSAGE
     if result.code in _IP_BLOCKED:
         seen = f" It saw {result.ip}." if result.ip else ""
         return (
@@ -696,15 +698,22 @@ def _rejection(env: str, result: credentials.Check) -> str:
 def _client_name(ctx: Context) -> str:
     """What the connected client called itself, or "" when there is no session to ask.
 
-    The session hangs off the request context, and FastMCP raises rather than returning
+    The session hangs off the request context, and the SDK raises rather than returning
     None when there is none — which is what calling the tool in-process does, as the
     tests do. An empty name is handled by the caller; it is reported back, not acted on.
     """
     try:
-        params = ctx.session.client_params
+        session = ctx.session
     except ValueError:
         return ""
-    return params.clientInfo.name if params and params.clientInfo else ""
+    return request.client(session).name
+
+
+def _shows_form(ctx: Context) -> bool:
+    try:
+        return client_supports_apps(ctx)
+    except ValueError:
+        return False
 
 
 def _opened_message() -> str:
@@ -720,7 +729,7 @@ def _opened_message() -> str:
         "because anything sent that way is stored in this conversation and visible to "
         "you. You will not see what they type or whether it saved: call "
         "get_connection_status once they say they are done, which reports whether a key "
-        "is configured and whether this client still has to be restarted. If no form "
+        "is configured and where it comes from. If no form "
         "appeared, this client cannot display one — tell them to run "
         "`uvx delta-exchange-mcp login` in a terminal, or to open "
         f"{store.path()} and fill in DELTA_API_KEY and DELTA_API_SECRET, then to restart "
@@ -728,7 +737,19 @@ def _opened_message() -> str:
     )
 
 
-def register(mcp: FastMCP, activate: Activate | None = None) -> None:
+def _login_message() -> str:
+    """What the model is told when the client did not declare MCP Apps support."""
+    return (
+        "Tell the user to run `uvx delta-exchange-mcp login` in a terminal, or to open "
+        f"{store.path()} and fill in DELTA_API_KEY and DELTA_API_SECRET, then to restart "
+        "this client. This client cannot display a form, so do not mention one, and "
+        "never ask them to send a key or secret as a chat message, because anything sent that "
+        "way is stored in this conversation and visible to you. Call "
+        "get_connection_status once they say they are done."
+    )
+
+
+def register(mcp: MCPServer, activate: Activate | None = None) -> None:
     """Add the credential form and the two tools that drive it.
 
     `activate` brings up the surface a newly saved credential unlocks, in the running
@@ -744,15 +765,15 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
     the tool result metadata as well; the grant is deliberately documented as a second gate,
     not as authenticated user presence.
     """
-    # Keep the session object itself as the key. An integer ``id(session)`` can be reused
-    # after a connection closes while its grant is still live, which would let a new
-    # session inherit that old grant. Retaining the object for at most the grant TTL makes
-    # that identity unambiguous and bounds the lifetime of the reference.
+    # Keep the connection object itself as the key. An integer id can be reused after a
+    # connection closes while its grant is still live, which would let a new client inherit
+    # that old grant. Retaining the object for at most the grant TTL makes that identity
+    # unambiguous and bounds the lifetime of the reference.
     grants: dict[object, _Grant] = {}
 
     def session_key(ctx: Context) -> object:
         try:
-            return ctx.session
+            return request.peer(ctx.session)
         except ValueError:
             # Direct in-process tests have no protocol session. They still exercise the
             # grant lifecycle under one sentinel rather than bypassing it.
@@ -803,9 +824,20 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
             else "Restart this client to use your account."
         )
 
-    @mcp.tool(meta=_OPENS_VIEW)
+    # Not idempotent: a second call replaces the outstanding one-use grant, so a form
+    # already on screen can no longer save.
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Connect your Delta account", destructive=False, idempotent=False, external=False
+        ),
+        meta=_OPENS_VIEW,
+    )
     async def setup_credentials(ctx: Context) -> CallToolResult:
-        """Open a form for the user to enter their Delta API key, kept out of the chat.
+        """Help the user add their Delta API key without putting it in the chat.
+
+        On a client that can display a form this opens one. Otherwise it returns the
+        terminal and settings-file steps instead. Do not tell the user a form is open
+        before this tool's result says so.
 
         Call this whenever the user wants to log in, sign in, connect their Delta
         account, add or replace an API key, turn trading on or off for this client, or
@@ -814,11 +846,14 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
         clients that cannot display a form, and whether this one can is reported back to
         you by this tool. Never ask for the key or secret in the conversation instead.
         """
-        message = _opened_message()
+        if _shows_form(ctx):
+            status, message = "form_opened", _opened_message()
+        else:
+            status, message = "form_unavailable", _login_message()
         pending = issue_grant(ctx)
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
-            structuredContent={"status": "form_opened", "instructions": message},
+            structuredContent={"status": status, "instructions": message},
             _meta={
                 "ui": {
                     "saveGrant": pending.token,
@@ -827,7 +862,12 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
             },
         )
 
-    @mcp.tool(meta=_APP_ONLY)
+    @mcp.tool(
+        annotations=hints.mutates(
+            "Save your Delta credentials", destructive=True, idempotent=True
+        ),
+        meta=_APP_ONLY,
+    )
     async def save_credentials(
         environment: str,
         api_key: str,
@@ -903,12 +943,12 @@ def register(mcp: FastMCP, activate: Activate | None = None) -> None:
         if not live_state.expected_current:
             return common | {
                 "status": "superseded",
-                "message": (
-                    "Saved, but this session is not using it: either another client changed "
-                    "the shared Delta settings after this key was checked, or a DELTA_API_KEY, "
-                    "DELTA_API_SECRET or DELTA_MCP_ENV set in this server's own environment "
-                    "outranks the file. This session follows whatever it actually resolved, so "
-                    "it is not claiming the checked account is connected."
+                "message": "Saved, but this session is not using it. "
+                + (
+                    ignored_fix(live_state.ignored)
+                    if live_state.ignored
+                    else "Another client changed the shared Delta settings after this key "
+                    "was checked, so this session follows that change instead."
                 ),
             }
         if not result.reachable:

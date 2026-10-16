@@ -43,3 +43,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked
       - run: uv run pytest
+      # uvx and the bundle ignore uv.lock and install the newest mcp 2.x, so test that too.
+      - run: uv pip install --upgrade "mcp>=2,<3"
+      - run: uv run --no-sync pytest

@@ -4,6 +4,41 @@ All notable changes to this project are documented here. Versions follow SemVer,
 major bumps deferred until the package leaves Beta — so a breaking change lands as a minor
 bump and is marked BREAKING.
 
+## 0.7.1
+
+### Added
+
+- Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`, `openWorldHint` and a title), so a client can tell a read from a
+  call that changes the account before it calls it.
+
+### Changed
+
+- The `mcp` SDK dependency moves to `>=2.0.0,<3`. Tools and behaviour do not change.
+- Every Delta API request carries `X-Delta-MCP-*` headers naming the package version, and
+  inside a tool call the client, tool and protocol version. The README lists each header.
+- `get_connection_status` returns `key_source` (`client`, `shared_file` or `null`) and
+  `shared_file_ignored`, the shared-file settings that the client's own config overrides,
+  with a `fix` when that list is not empty.
+- `setup_credentials` says a form is open only when the client declares MCP Apps support.
+  Other clients get the `uvx delta-exchange-mcp login` command and the settings-file path,
+  with status `form_unavailable`.
+- The key form, `login`, the README and the bundle description say a Read Data key is
+  enough for account reads, and a Trading key is needed only to place orders.
+- `get_ticker` describes its time and percent fields, so a model does not read `time` as
+  the fetch time or multiply `funding_rate` by 100.
+
+### Fixed
+
+- An optional bundle field left empty in Claude Desktop arrives as the literal
+  `${user_config.api_key}`. The server read it as a key, listed the account and trading
+  tools, and ignored a key saved through the form. It now reads it as no key.
+- A Read Data key placing an order gets Delta's bare `"Unauthorized"` string. 0.7.0
+  showed `invalid_response [http 401]`; the error now names the missing Trading permission.
+- The auth error hints match the codes Delta's gateway sends (`expired_signature`,
+  `invalid_api_key`, `Unauthorized`, `ip_not_whitelisted_for_api_key`,
+  `Signature Mismatch`), so the clock hint for an expired signature shows.
+
 ## 0.7.0
 
 ### BREAKING — the trading guardrails are gone

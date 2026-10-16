@@ -19,7 +19,7 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 
 from delta_exchange_mcp import config as config_mod
-from delta_exchange_mcp import credentials, server, store
+from delta_exchange_mcp import credentials, request, server, store
 
 KEY = "typed-into-the-form-key"
 SECRET = "typed-into-the-form-secret"
@@ -39,8 +39,8 @@ class Session:
 
     async def call(self, name, **arguments):
         result = await self.client.call_tool(name, arguments)
-        if result.structuredContent is not None:
-            return result.structuredContent
+        if result.structured_content is not None:
+            return result.structured_content
         return json.loads(result.content[0].text)
 
     async def raw_call(self, name, **arguments):
@@ -57,7 +57,7 @@ class Session:
 
 
 @asynccontextmanager
-async def connected(cfg=None, client_name=None, mcp=None):
+async def connected(cfg=None, client_name=None, mcp=None, extensions=None):
     """A client talking to a server started the way `main` starts it.
 
     The SDK's own `create_connected_server_and_client_session` builds initialization
@@ -71,7 +71,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
             server_read, server_write = server_streams
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
-                    lambda: app._mcp_server.run(
+                    lambda: app._lowlevel_server.run(
                         server_read,
                         server_write,
                         server.initialization_options(app),
@@ -82,7 +82,7 @@ async def connected(cfg=None, client_name=None, mcp=None):
 
                 async def collect(message):
                     if isinstance(message, types.ServerNotification):
-                        box["session"].notifications.append(message.root)
+                        box["session"].notifications.append(message)
 
                 info = (
                     types.Implementation(name=client_name, version="1")
@@ -90,7 +90,11 @@ async def connected(cfg=None, client_name=None, mcp=None):
                     else None
                 )
                 async with ClientSession(
-                    client_read, client_write, message_handler=collect, client_info=info
+                    client_read,
+                    client_write,
+                    message_handler=collect,
+                    client_info=info,
+                    extensions=extensions,
                 ) as client:
                     initialized = await client.initialize()
                     box["session"] = Session(client, initialized, app)
@@ -135,7 +139,7 @@ async def test_the_server_declares_that_its_tool_list_can_change():
     to say so.
     """
     async with connected() as session:
-        assert session.initialized.capabilities.tools.listChanged is True
+        assert session.initialized.capabilities.tools.list_changed is True
 
 
 async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
@@ -144,6 +148,37 @@ async def test_the_model_is_told_how_to_reach_the_form_before_any_key_exists():
         instructions = session.initialized.instructions
         assert "setup_credentials" in instructions
         assert "Never ask for an API key" in instructions
+        assert "it opens a form they type the key into" not in instructions
+
+
+async def test_the_setup_tool_does_not_promise_a_form_before_it_runs():
+    """Cursor's agent repeated the old description to the user before the tool answered."""
+    async with connected(client_name="Cursor") as session:
+        tools = await session.client.list_tools()
+        setup = next(t for t in tools.tools if t.name == "setup_credentials")
+        assert not setup.description.startswith("Open a form")
+        assert "Do not tell the user a form is open" in setup.description
+
+
+APPS = {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}
+
+
+async def test_a_client_that_renders_apps_is_told_the_form_is_open():
+    async with connected(extensions=APPS) as session:
+        result = await session.raw_call("setup_credentials")
+        assert result.structured_content["status"] == "form_opened"
+        assert "A form is now open" in result.content[0].text
+
+
+async def test_a_client_that_cannot_render_apps_is_sent_to_the_login_command():
+    async with connected(client_name="Cursor") as session:
+        result = await session.raw_call("setup_credentials")
+        text = result.content[0].text
+        assert result.structured_content["status"] == "form_unavailable"
+        assert "form is now open" not in text.lower()
+        assert text.startswith("Tell the user to run `uvx delta-exchange-mcp login`")
+        assert str(store.path()) in text
+        assert "never ask them to send a key" in text
 
 
 async def test_the_status_tool_exists_with_no_credentials(accepted):
@@ -157,6 +192,46 @@ async def test_the_status_tool_exists_with_no_credentials(accepted):
 
 
 # --- bringing the surface up ---------------------------------------------------------
+
+
+async def test_the_server_introduces_itself_with_the_names_a_person_reads(accepted):
+    """`name` is what a client keys on; these are what it shows someone.
+
+    They are the same strings the bundle's install dialog uses, and the point of reading
+    them from `identity` is that the two cannot drift apart. Asserting the values here
+    rather than comparing against the constants is deliberate: a test that reads the same
+    constant as the code passes even when both are wrong.
+    """
+    async with connected() as session:
+        info = session.initialized.server_info
+        assert info.name == "delta-exchange"
+        assert info.title == "Delta Exchange"
+        assert info.description == "Live market data and your Delta Exchange India account."
+        assert info.website_url == "https://www.delta.exchange"
+
+
+async def test_the_status_tool_reports_the_client_that_asked(accepted):
+    """A "the form did not render" report is only actionable with the build behind it."""
+    async with connected(client_name="claude-desktop") as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "claude-desktop"
+        assert status["client_version"] == "1"
+
+
+async def test_a_client_that_names_itself_nothing_still_arrives_named(accepted):
+    """The empty-name guard never fires over a real connection, and that is worth pinning.
+
+    The SDK substitutes `DEFAULT_CLIENT_INFO` — `mcp/0.1.0` — for a client that sends no
+    identity of its own. So every such client scopes its trading mode under the one name
+    `mcp` and shares that entitlement with the others, which is within the documented
+    "convenience scope, not authentication" model but does not read that way from the
+    guard alone. Only a call with no session at all yields an empty name.
+    """
+    assert request.client(None) == request.UNKNOWN
+    async with connected() as session:
+        status = await session.call("get_connection_status")
+        assert status["client_name"] == "mcp"
+        assert status["client_version"] == "0.1.0"
 
 
 async def test_a_saved_key_makes_the_account_tools_reachable_without_a_restart(accepted):
@@ -194,7 +269,7 @@ async def test_the_status_tool_reports_the_surface_that_is_actually_live(accepte
 
 
 async def test_a_second_save_does_not_register_the_account_tools_twice(accepted):
-    """Rotating a key goes through the same path, and FastMCP would keep both copies."""
+    """Rotating a key goes through the same path, and the SDK would keep both copies."""
     async with connected() as session:
         await save(session)
         first = await session.tool_names()
@@ -311,12 +386,37 @@ async def test_a_save_under_a_shell_export_is_not_reported_as_connected(accepted
         assert result["status"] == "superseded"
         assert "someone@delta.exchange" not in result["message"]
         assert "DELTA_API_KEY" in result["message"]
+        assert "restart the client" in result["message"]
         assert session.server.live_client.config.api_key == "exported-in-the-shell-key"
         # The file still carries what was typed: it is what every other client reads.
         assert store.read()["DELTA_API_KEY"] == KEY
 
 
-def rejecting(code, detail="delta api error: raw [http 401] (context={...})", ip=""):
+async def test_the_status_names_a_client_key_that_outranks_the_saved_one(accepted, monkeypatch):
+    store.write({"DELTA_API_KEY": "saved-key", "DELTA_API_SECRET": "saved-secret"})
+    monkeypatch.setenv("DELTA_API_KEY", "client-config-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "client-config-secret")
+    async with connected() as session:
+        status = await session.call("get_connection_status")
+
+    assert status["key_source"] == "client"
+    assert status["shared_file_ignored"] == ["DELTA_API_KEY", "DELTA_API_SECRET"]
+    assert "remove them from this client's config" in status["fix"]
+    assert "client-config-key" not in json.dumps(status)
+    assert "saved-key" not in json.dumps(status)
+
+
+async def test_the_status_has_no_fix_when_the_saved_key_is_in_use(accepted):
+    async with connected() as session:
+        await save(session)
+        status = await session.call("get_connection_status")
+
+    assert status["key_source"] == "shared_file"
+    assert status["shared_file_ignored"] == []
+    assert "fix" not in status
+
+
+def rejecting(code,detail="delta api error: raw [http 401] (context={...})", ip=""):
     async def check(env, key, secret):
         return credentials.Check(
             ok=False, reachable=True, detail=detail, code=code, ip=ip
@@ -361,12 +461,11 @@ async def test_a_blocked_ip_says_so_and_shows_the_address_delta_saw(monkeypatch)
         assert "demo.delta.exchange" not in message
 
 
-async def test_a_trading_preferences_permission_failure_is_not_an_invalid_key(monkeypatch):
+async def test_a_missing_read_data_permission_is_not_an_invalid_key(monkeypatch):
     monkeypatch.setattr(credentials, "check", rejecting("unauthorized_api_access"))
     async with connected() as session:
         message = (await save(session))["message"]
-        assert "lacks permission for trading preferences" in message
-        assert "does not establish whether Read Data alone is sufficient" in message
+        assert "lacks Read Data permission" in message
         assert "invalid" not in message.lower()
 
 

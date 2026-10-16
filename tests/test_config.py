@@ -52,6 +52,19 @@ def test_blank_credentials_read_as_absent(monkeypatch, value):
     assert cfg.has_credentials is False
 
 
+def test_unexpanded_bundle_placeholders_read_as_absent(monkeypatch, tmp_path):
+    """Claude Desktop passes an empty optional field through as its literal placeholder."""
+    shared = tmp_path / "config.env"
+    shared.write_text("DELTA_API_KEY=file-key\nDELTA_API_SECRET=file-secret\n")
+    monkeypatch.setenv("DELTA_MCP_CONFIG_FILE", str(shared))
+    monkeypatch.setenv("DELTA_API_KEY", "${user_config.api_key}")
+    monkeypatch.setenv("DELTA_API_SECRET", "${user_config.api_secret}")
+    monkeypatch.setenv("DELTA_MCP_ENV", "${user_config.environment}")
+    cfg = config_mod.load()
+    assert (cfg.api_key, cfg.api_secret) == ("file-key", "file-secret")
+    assert cfg.env == "india_prod"
+
+
 def test_a_pasted_credential_keeps_its_trailing_newline_out(monkeypatch):
     """Copying from the dashboard brings a newline, which breaks signing, not the load."""
     monkeypatch.setenv("DELTA_API_KEY", "  a-real-key\n")
@@ -99,3 +112,54 @@ def test_debug_truthy_values(monkeypatch, value):
 def test_debug_falsy_values(monkeypatch, value):
     monkeypatch.setenv("DELTA_MCP_DEBUG", value)
     assert config_mod.load().debug is False
+
+
+FILE = {
+    "DELTA_MCP_ENV": "india_testnet",
+    "DELTA_API_KEY": "file-key",
+    "DELTA_API_SECRET": "file-secret",
+}
+
+
+def test_key_source_names_where_the_key_came_from(monkeypatch):
+    monkeypatch.delenv("DELTA_API_KEY", raising=False)
+    monkeypatch.delenv("DELTA_API_SECRET", raising=False)
+    assert config_mod.load({}).key_source is None
+    assert config_mod.load(FILE).key_source == "shared_file"
+    monkeypatch.setenv("DELTA_API_KEY", "client-key")
+    assert config_mod.load(FILE).key_source == "client"
+
+
+def test_a_client_key_overrides_the_saved_pair(monkeypatch):
+    monkeypatch.delenv("DELTA_MCP_ENV", raising=False)
+    monkeypatch.setenv("DELTA_API_KEY", "client-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "client-secret")
+    assert config_mod.ignored_settings(FILE) == ["DELTA_API_KEY", "DELTA_API_SECRET"]
+
+
+def test_a_client_value_equal_to_the_saved_one_ignores_nothing(monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_ENV", "INDIA_TESTNET")
+    monkeypatch.setenv("DELTA_API_KEY", "file-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "file-secret")
+    assert config_mod.ignored_settings(FILE) == []
+
+
+def test_a_client_environment_overrides_the_saved_one(monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_prod")
+    monkeypatch.delenv("DELTA_API_KEY", raising=False)
+    monkeypatch.delenv("DELTA_API_SECRET", raising=False)
+    assert config_mod.ignored_settings(FILE) == ["DELTA_MCP_ENV"]
+
+
+def test_the_template_environment_without_a_saved_key_is_not_ignored(monkeypatch):
+    monkeypatch.setenv("DELTA_MCP_ENV", "india_devnet")
+    monkeypatch.delenv("DELTA_API_KEY", raising=False)
+    monkeypatch.delenv("DELTA_API_SECRET", raising=False)
+    template = {"DELTA_MCP_ENV": "india_prod", "DELTA_API_KEY": "", "DELTA_API_SECRET": ""}
+    assert config_mod.ignored_settings(template) == []
+
+
+def test_an_empty_file_has_nothing_ignored(monkeypatch):
+    monkeypatch.setenv("DELTA_API_KEY", "client-key")
+    monkeypatch.setenv("DELTA_API_SECRET", "client-secret")
+    assert config_mod.ignored_settings({}) == []

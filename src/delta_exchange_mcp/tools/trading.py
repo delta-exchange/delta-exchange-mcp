@@ -12,9 +12,11 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
+from delta_exchange_mcp import hints
 from delta_exchange_mcp.account_identity import fetch_account_identity
 from delta_exchange_mcp.client import DeltaClient
 from delta_exchange_mcp.errors import DeltaApiError
@@ -87,33 +89,46 @@ def _clean(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _require_one(product_id: int | None, product_symbol: str | None) -> None:
     if (product_id is None) == (product_symbol is None):
-        raise ValueError("pass exactly one of product_id or product_symbol")
+        raise ToolError("pass exactly one of product_id or product_symbol")
 
 
-def register(mcp: FastMCP, client: DeltaClient) -> None:
+def register(mcp: MCPServer, client: DeltaClient) -> None:
     _uid_cache: dict[tuple[str, str], int] = {}
 
     def mutation_tool(
-        function: Callable[..., Awaitable[Any]],
-    ) -> Callable[..., Awaitable[Any]]:
+        title: str, *, destructive: bool, idempotent: bool
+    ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
         """Pin every request in one dispatched mutation to the same client state.
 
         A transport failure after the mutation was sent leaves its outcome unknown, so the
-        error names the reads that settle it before anyone resubmits.
+        error names the reads that settle it before anyone resubmits. The annotations live
+        here so a new mutation cannot register without them.
         """
-        unknown_outcome = _OUTCOME_UNKNOWN_BY_TOOL[function.__name__]
 
-        @wraps(function)
-        async def pinned(*args: Any, **kwargs: Any) -> Any:
-            async with client.pin():
-                try:
-                    return await function(*args, **kwargs)
-                except DeltaApiError as e:
-                    if e.code != "execution_outcome_unknown":
-                        raise
-                    raise DeltaApiError(e.code, context=unknown_outcome, status=e.status) from e
+        def decorate(
+            function: Callable[..., Awaitable[Any]],
+        ) -> Callable[..., Awaitable[Any]]:
+            unknown_outcome = _OUTCOME_UNKNOWN_BY_TOOL[function.__name__]
 
-        return mcp.tool()(pinned)
+            @wraps(function)
+            async def pinned(*args: Any, **kwargs: Any) -> Any:
+                async with client.pin():
+                    try:
+                        return await function(*args, **kwargs)
+                    except DeltaApiError as e:
+                        if e.code != "execution_outcome_unknown":
+                            raise
+                        raise DeltaApiError(
+                            e.code, context=unknown_outcome, status=e.status
+                        ) from e
+
+            return mcp.tool(
+                annotations=hints.mutates(
+                    title, destructive=destructive, idempotent=idempotent
+                )
+            )(pinned)
+
+        return decorate
 
     async def _user_id() -> int:
         # Keyed by the whole HTTP identity, not cached once per process: credentials now
@@ -134,7 +149,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     # ---------------------------------------------------------------- single order
 
-    @mutation_tool
+    @mutation_tool("Place order", destructive=False, idempotent=False)
     async def place_order(
         size: int = Field(description="Order size in contracts."),
         side: str = Field(description="buy or sell."),
@@ -194,7 +209,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("POST", "/orders", payload)
 
-    @mutation_tool
+    @mutation_tool("Edit order", destructive=True, idempotent=True)
     async def edit_order(
         id: int = Field(description="Order id to edit."),
         size: int = Field(description="Total size after the edit."),
@@ -223,7 +238,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("PUT", "/orders", payload)
 
-    @mutation_tool
+    @mutation_tool("Cancel order", destructive=True, idempotent=True)
     async def cancel_order(
         product_id: int = Field(description="Product id the order belongs to."),
         id: int | None = Field(default=None, description="Order id to cancel."),
@@ -231,11 +246,11 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Cancel a single order by id or client_order_id."""
         if (id is None) == (client_order_id is None):
-            raise ValueError("pass exactly one of id or client_order_id")
+            raise ToolError("pass exactly one of id or client_order_id")
         payload = {"product_id": product_id, "id": id, "client_order_id": client_order_id}
         return await _finish("DELETE", "/orders", payload)
 
-    @mutation_tool
+    @mutation_tool("Cancel all orders", destructive=True, idempotent=True)
     async def cancel_all_orders(
         product_id: int | None = Field(default=None, description="Limit to one product."),
         contract_types: list[str] | None = Field(
@@ -258,7 +273,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     # ---------------------------------------------------------------- batch orders
 
-    @mutation_tool
+    @mutation_tool("Place orders in batch", destructive=False, idempotent=False)
     async def place_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Orders, each {size, side, order_type, limit_price?, "
@@ -280,7 +295,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("POST", "/orders/batch", payload)
 
-    @mutation_tool
+    @mutation_tool("Edit orders in batch", destructive=True, idempotent=True)
     async def edit_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Edits, each {id, size, order_type, limit_price?, post_only?}."
@@ -297,7 +312,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("PUT", "/orders/batch", payload)
 
-    @mutation_tool
+    @mutation_tool("Cancel orders in batch", destructive=True, idempotent=True)
     async def cancel_batch_orders(
         orders: list[dict[str, Any]] = Field(
             description="Orders to cancel, each {id} or {client_order_id}."
@@ -316,7 +331,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     # ---------------------------------------------------------------- bracket orders
 
-    @mutation_tool
+    @mutation_tool("Place bracket order", destructive=False, idempotent=False)
     async def place_bracket_order(
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
@@ -335,7 +350,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
-            raise ValueError("provide at least one of stop_loss_order or take_profit_order")
+            raise ToolError("provide at least one of stop_loss_order or take_profit_order")
         payload = {
             "product_id": product_id,
             "product_symbol": product_symbol,
@@ -345,7 +360,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("POST", "/orders/bracket", payload)
 
-    @mutation_tool
+    @mutation_tool("Edit bracket order", destructive=True, idempotent=True)
     async def edit_bracket_order(
         id: int = Field(description="Order id whose bracket params to update."),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
@@ -379,7 +394,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
 
     # ---------------------------------------------------------------- positions & leverage
 
-    @mutation_tool
+    @mutation_tool("Set leverage", destructive=True, idempotent=True)
     async def set_product_leverage(
         product_id: int = Field(description="Product id to set order leverage for."),
         leverage: str = Field(description="Leverage multiplier, e.g. '10'."),
@@ -389,7 +404,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
             "POST", f"/products/{product_id}/orders/leverage", {"leverage": leverage}
         )
 
-    @mutation_tool
+    @mutation_tool("Adjust position margin", destructive=True, idempotent=False)
     async def adjust_position_margin(
         product_id: int = Field(description="Product id of the position."),
         delta_margin: str = Field(description="Margin to add (positive) or remove (negative), e.g. '5.0'."),
@@ -398,7 +413,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         payload = {"product_id": product_id, "delta_margin": delta_margin}
         return await _finish("POST", "/positions/change_margin", payload)
 
-    @mutation_tool
+    @mutation_tool("Close all positions", destructive=True, idempotent=True)
     async def close_all_positions() -> dict[str, Any]:
         """Close every open position on the account, both cross/portfolio and isolated.
 
@@ -414,7 +429,7 @@ def register(mcp: FastMCP, client: DeltaClient) -> None:
         }
         return await _finish("POST", "/positions/close_all", payload)
 
-    @mutation_tool
+    @mutation_tool("Configure auto top-up", destructive=True, idempotent=True)
     async def configure_auto_topup(
         product_id: int = Field(description="Product id of the position."),
         auto_topup: bool = Field(description="Enable or disable auto top-up for this position."),
