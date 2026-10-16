@@ -1,0 +1,49 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.delta-exchange/delta-exchange-mcp",
+  "title": "Delta Exchange",
+  "description": "Official Delta Exchange India MCP server: market data, account reads and order placement.",
+  "version": "0.7.0",
+  "repository": {
+    "url": "https://github.com/delta-exchange/delta-exchange-mcp",
+    "source": "github",
+    "id": "1237840847"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "delta-exchange-mcp",
+      "version": "0.7.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DELTA_API_KEY",
+          "description": "Delta Exchange API key. Optional — market data works without one; set this with DELTA_API_SECRET to enable account reads and trading.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "DELTA_API_SECRET",
+          "description": "Delta Exchange API secret, paired with DELTA_API_KEY.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "DELTA_MCP_ENV",
+          "description": "Which Delta Exchange environment to talk to.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "india_prod",
+          "choices": [
+            "india_prod",
+            "india_testnet"
+          ]
+        }
+      ]
+    }
+  ]
+}
