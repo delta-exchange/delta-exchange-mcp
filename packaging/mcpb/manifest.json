@@ -119,6 +119,10 @@
       "description": "Historical mark-price candles for a product."
     },
     {
+      "name": "get_market_movers",
+      "description": "Factual snapshot of which contracts are up/down over the last 24h \u2014 market data only, not investment advice."
+    },
+    {
       "name": "get_oi_history",
       "description": "Historical open-interest candles for a product."
     },
