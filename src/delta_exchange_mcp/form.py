@@ -357,6 +357,7 @@ _TEMPLATE = """<!DOCTYPE html>
   var pending = {};
   var ready = false;
   var saving = false;
+  var restoreConnection = true;
   var saveGrant = "";
 
   var root = document.documentElement;
@@ -507,13 +508,19 @@ _TEMPLATE = """<!DOCTYPE html>
     secretEl.type = type;
   });
 
-  keyEl.addEventListener("input", refreshSaveState);
-  secretEl.addEventListener("input", refreshSaveState);
-  envsEl.addEventListener("change", refreshSaveState);
+  function editCredentials() {
+    restoreConnection = false;
+    refreshSaveState();
+  }
+
+  keyEl.addEventListener("input", editCredentials);
+  secretEl.addEventListener("input", editCredentials);
+  envsEl.addEventListener("change", editCredentials);
 
   againEl.addEventListener("click", function () {
     request("tools/call", { name: "setup_credentials", arguments: {} }, 15000)
       .then(function (result) {
+        restoreConnection = false;
         captureGrant(result);
         document.body.classList.remove("done");
         resize();
@@ -533,6 +540,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
   saveEl.addEventListener("click", function () {
     if (off(saveEl) || saving) return;
+    restoreConnection = false;
     var key = keyEl.value.trim();
     var secret = secretEl.value.trim();
     saving = true;
@@ -613,8 +621,35 @@ _TEMPLATE = """<!DOCTYPE html>
     request("tools/call", { name: "get_connection_status", arguments: {} }, 15000)
       .then(function (status) {
         var now = readResult(status);
+        if (!restoreConnection) return;
         if (now && now.environment) selectEnv(now.environment);
         refreshSaveState();
+        if (!now.credentials_configured) return;
+        doneWho.textContent = "Credentials configured";
+        doneWhere.textContent = now.key_source === "shared_file"
+          ? "Loaded from shared settings on this computer"
+          : "Loaded from this client's settings";
+        doneNext.textContent = "Checking the connected account...";
+        againEl.textContent = "Use another key";
+        document.body.classList.add("done");
+        resize();
+        request("tools/call", { name: "get_trading_preferences", arguments: {} }, 120000)
+          .then(function (result) {
+            if (!restoreConnection) return;
+            var payload = readResult(result);
+            var account = payload.result && payload.result.user_id;
+            if (result.isError || !Number.isInteger(account)) {
+              throw new Error("Account could not be verified");
+            }
+            doneWho.textContent = "Connected to account " + account;
+            doneNext.textContent = "Your account and trading tools are live in this session.";
+            resize();
+          })
+          .catch(function () {
+            if (!restoreConnection) return;
+            doneNext.textContent = "Could not verify the account. Try reopening this chat, or use another key.";
+            resize();
+          });
       })
       .catch(function () {});
     resize();

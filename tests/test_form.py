@@ -1,5 +1,8 @@
 import json
 import re
+import shutil
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -373,3 +376,17 @@ async def test_opening_the_form_reveals_nothing_and_offers_a_fallback(server):
     # The one instruction that matters: a model asked for help with a key will otherwise
     # offer to take it in the chat, and people accept.
     assert "never ask them to send a key" in text
+
+
+def test_the_view_restores_connection_after_recreation():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js required for the form lifecycle test")
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("form_lifecycle.cjs"))],
+        input=form.VIEW_HTML,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
