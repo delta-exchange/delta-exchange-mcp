@@ -489,3 +489,22 @@ async def test_a_key_delta_rejects_changes_nothing(monkeypatch):
         assert (await save(session))["status"] == "rejected"
         assert not session.saw_tool_list_changed()
         assert "get_positions" not in await session.tool_names()
+
+
+@pytest.mark.parametrize("client_name", ["Claude", "Claude Desktop", "claude-desktop", "ClaudeDesktop"])
+async def test_claude_desktop_save_names_the_required_app_restart(accepted, client_name):
+    async with connected(client_name=client_name) as session:
+        result = await save(session)
+        assert result["status"] == "saved"
+        assert "Cmd+Q" in result["next_step"]
+        assert "Turning the extension off and on is not enough" in result["message"]
+        assert "live in this session" not in result["message"]
+        assert "get_positions" in await session.tool_names()
+
+
+@pytest.mark.parametrize("client_name", ["Cursor", "claude-code", "codex-mcp-client"])
+async def test_other_clients_keep_immediate_account_guidance(accepted, client_name):
+    async with connected(client_name=client_name) as session:
+        result = await save(session)
+        assert "live in this session" in result["next_step"]
+        assert "Cmd+Q" not in result["message"]

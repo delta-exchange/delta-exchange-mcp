@@ -51,10 +51,10 @@ function openView() {
   };
 }
 
-async function initialize(view, configured) {
+async function initialize(view, configured, clientName = "Cursor") {
   await view.reply('ui/initialize', {});
   await view.reply('get_connection_status', { structuredContent: {
-    environment: 'india_testnet', credentials_configured: configured, key_source: 'shared_file',
+    environment: 'india_testnet', credentials_configured: configured, key_source: 'shared_file', client_name: clientName,
   } });
 }
 
@@ -76,6 +76,19 @@ async function initialize(view, configured) {
   assert.equal(first.elements.get('done-who').textContent, 'Connected to account 56766408');
   assert.equal(first.elements.get('key').value, '');
   assert.equal(first.elements.get('secret').value, '');
+
+  for (const clientName of ['Claude', 'Claude Desktop', 'claude-desktop', 'ClaudeDesktop', 'Cursor', 'claude-code']) {
+    const restored = openView();
+    await initialize(restored, true, clientName);
+    await restored.reply('get_trading_preferences', { structuredContent: { result: { user_id: 123 } } });
+    const next = restored.elements.get('done-next').textContent;
+    if (clientName === 'Cursor' || clientName === 'claude-code') {
+      assert.match(next, /live in this session/);
+    } else {
+      assert.match(next, /Cmd\+Q/);
+      assert.doesNotMatch(next, /live in this session/);
+    }
+  }
 
   const reopened = openView();
   await initialize(reopened, true);

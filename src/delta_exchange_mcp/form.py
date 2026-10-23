@@ -147,6 +147,12 @@ _OPENS_VIEW = {"ui": {"resourceUri": VIEW_URI}, "ui/resourceUri": VIEW_URI}
 # honoured by both hosts. See `register` for what happens on a client that ignores it.
 _APP_ONLY = {"ui": {"visibility": ["app"]}}
 
+CLAUDE_DESKTOP_CLIENTS = ("claude", "claude desktop", "claude-desktop", "claudedesktop")
+CLAUDE_DESKTOP_NEXT_STEP = (
+    "Quit Claude Desktop completely (Cmd+Q on macOS), reopen it, then ask for your "
+    "positions. Turning the extension off and on is not enough."
+)
+
 ENVIRONMENTS = [
     {
         "value": "india_prod",
@@ -642,7 +648,10 @@ _TEMPLATE = """<!DOCTYPE html>
               throw new Error("Account could not be verified");
             }
             doneWho.textContent = "Connected to account " + account;
-            doneNext.textContent = "Your account and trading tools are live in this session.";
+            doneNext.textContent = CONFIG.claude_desktop_clients.indexOf(
+              (now.client_name || "").toLowerCase()
+            ) !== -1 ? CONFIG.claude_desktop_next_step
+              : "Your account and trading tools are live in this session.";
             resize();
           })
           .catch(function () {
@@ -672,6 +681,8 @@ VIEW_HTML = _TEMPLATE.replace(
             "environments": ENVIRONMENTS,
             "dashboards": DASHBOARDS,
             "default_environment": DEFAULT_ENV,
+            "claude_desktop_clients": CLAUDE_DESKTOP_CLIENTS,
+            "claude_desktop_next_step": CLAUDE_DESKTOP_NEXT_STEP,
         }
     ),
 )
@@ -851,7 +862,9 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
         else:
             pending.in_use = False
 
-    def next_step(live_state: Activation) -> str:
+    def next_step(live_state: Activation, client: str) -> str:
+        if client.casefold() in CLAUDE_DESKTOP_CLIENTS:
+            return CLAUDE_DESKTOP_NEXT_STEP
         return (
             "Your account and trading tools are live in this session — just ask. If this "
             "client does not show them yet, restart it."
@@ -969,7 +982,7 @@ def register(mcp: MCPServer, activate: Activate | None = None) -> None:
             if activate is not None
             else Activation(account_ready=False)
         )
-        follow_up = next_step(live_state)
+        follow_up = next_step(live_state, client)
         common = {
             "path": str(store.path()),
             "next_step": follow_up,
