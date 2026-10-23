@@ -147,7 +147,7 @@ _OPENS_VIEW = {"ui": {"resourceUri": VIEW_URI}, "ui/resourceUri": VIEW_URI}
 # honoured by both hosts. See `register` for what happens on a client that ignores it.
 _APP_ONLY = {"ui": {"visibility": ["app"]}}
 
-CLAUDE_DESKTOP_CLIENTS = ("claude", "claude desktop", "claude-desktop", "claudedesktop")
+CLAUDE_DESKTOP_CLIENTS = ("claude", "claude-ai", "claude desktop", "claude-desktop", "claudedesktop")
 CLAUDE_DESKTOP_NEXT_STEP = (
     "Quit Claude Desktop completely (Cmd+Q on macOS), reopen it, then ask for your "
     "positions. Turning the extension off and on is not enough."

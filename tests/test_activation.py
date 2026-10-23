@@ -491,7 +491,7 @@ async def test_a_key_delta_rejects_changes_nothing(monkeypatch):
         assert "get_positions" not in await session.tool_names()
 
 
-@pytest.mark.parametrize("client_name", ["Claude", "Claude Desktop", "claude-desktop", "ClaudeDesktop"])
+@pytest.mark.parametrize("client_name", ["Claude", "claude-ai", "Claude Desktop", "claude-desktop", "ClaudeDesktop"])
 async def test_claude_desktop_save_names_the_required_app_restart(accepted, client_name):
     async with connected(client_name=client_name) as session:
         result = await save(session)

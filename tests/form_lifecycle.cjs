@@ -77,7 +77,7 @@ async function initialize(view, configured, clientName = "Cursor") {
   assert.equal(first.elements.get('key').value, '');
   assert.equal(first.elements.get('secret').value, '');
 
-  for (const clientName of ['Claude', 'Claude Desktop', 'claude-desktop', 'ClaudeDesktop', 'Cursor', 'claude-code']) {
+  for (const clientName of ['Claude', 'claude-ai', 'Claude Desktop', 'claude-desktop', 'ClaudeDesktop', 'Cursor', 'claude-code']) {
     const restored = openView();
     await initialize(restored, true, clientName);
     await restored.reply('get_trading_preferences', { structuredContent: { result: { user_id: 123 } } });
