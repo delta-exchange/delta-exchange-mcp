@@ -42,10 +42,10 @@ function openView() {
   const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
   return {
     document, elements, messages, flush,
-    async reply(method, result) {
+    async reply(method, result, error) {
       const message = messages.findLast(message => message.id && (message.method === method || message.params.name === method));
       assert.ok(message, `No request for ${method}`);
-      receive({ source: parent, data: { jsonrpc: '2.0', id: message.id, result } });
+      receive({ source: parent, data: { jsonrpc: '2.0', id: message.id, result, error } });
       await flush();
     },
   };
@@ -91,8 +91,39 @@ async function initialize(view, configured) {
   await initialize(delayed, true);
   delayed.elements.get('again').listeners.click();
   await delayed.reply('setup_credentials', grant);
-  await delayed.reply('get_trading_preferences', { structuredContent: { result: { user_id: 99 } } });
   assert.equal(delayed.document.body.classList.contains('done'), false);
+  delayed.elements.get('key').value = 'replacement-key';
+  delayed.elements.get('secret').value = 'replacement-secret';
+  delayed.elements.get('key').listeners.input();
+  delayed.elements.get('save').listeners.click();
+  await delayed.reply('save_credentials', { structuredContent: {
+    status: 'saved', account: '123', next_step: 'Replacement ready',
+  } });
+  await delayed.reply('get_trading_preferences', { structuredContent: { result: { user_id: 99 } } });
+  assert.equal(delayed.elements.get('done-who').textContent, 'Connected to account 123');
+  assert.equal(delayed.elements.get('done-next').textContent, 'Replacement ready');
+
+  for (const field of ['key', 'secret', 'envs']) {
+    const editing = openView();
+    await editing.reply('ui/initialize', {});
+    editing.elements.get(field).value = 'editing';
+    editing.elements.get(field).listeners[field === 'envs' ? 'change' : 'input']();
+    await editing.reply('get_connection_status', { structuredContent: {
+      credentials_configured: true, environment: 'india_testnet', key_source: 'shared_file',
+    } });
+    assert.equal(editing.document.body.classList.contains('done'), false, field);
+    assert.equal(editing.elements.get(field).value, 'editing');
+  }
+
+  const rejected = openView();
+  await initialize(rejected, true);
+  rejected.elements.get('again').listeners.click();
+  await rejected.reply('setup_credentials', undefined, { message: 'denied' });
+  await rejected.reply('get_trading_preferences', { structuredContent: { result: { user_id: 99 } } });
+  assert.equal(rejected.document.body.classList.contains('done'), true);
+  assert.equal(rejected.elements.get('done-who').textContent, 'Connected to account 99');
+  assert.doesNotMatch(rejected.elements.get('done-next').textContent, /Checking/);
+  assert.match(rejected.elements.get('state').textContent, /Could not reopen/);
 
   for (const result of [ { isError: true }, { structuredContent: { result: { user_id: 'invalid' } } } ]) {
     const failed = openView();

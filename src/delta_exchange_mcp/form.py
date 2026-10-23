@@ -508,14 +508,19 @@ _TEMPLATE = """<!DOCTYPE html>
     secretEl.type = type;
   });
 
-  keyEl.addEventListener("input", refreshSaveState);
-  secretEl.addEventListener("input", refreshSaveState);
-  envsEl.addEventListener("change", refreshSaveState);
+  function editCredentials() {
+    restoreConnection = false;
+    refreshSaveState();
+  }
+
+  keyEl.addEventListener("input", editCredentials);
+  secretEl.addEventListener("input", editCredentials);
+  envsEl.addEventListener("change", editCredentials);
 
   againEl.addEventListener("click", function () {
-    restoreConnection = false;
     request("tools/call", { name: "setup_credentials", arguments: {} }, 15000)
       .then(function (result) {
+        restoreConnection = false;
         captureGrant(result);
         document.body.classList.remove("done");
         resize();
