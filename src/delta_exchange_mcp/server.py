@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import anyio
 from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
+from mcp.types import CallToolResult, InputRequiredResult, Tool
 
 from delta_exchange_mcp import analytics
 from delta_exchange_mcp import config as config_mod
@@ -94,6 +97,26 @@ class DeltaMCP(MCPServer):
         self, callback: Callable[[ServerSession], Awaitable[None]]
     ) -> None:
         self._before_list_tools = callback
+
+    async def list_tools(self) -> list[Tool]:
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.input_schema["additionalProperties"] = False
+        return tools
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        tool = next((tool for tool in await self.list_tools() if tool.name == name), None)
+        if tool is not None:
+            accepted = tool.input_schema.get("properties", {})
+            unknown = arguments.keys() - accepted.keys()
+            if unknown:
+                raise ToolError(
+                    f"Unknown arguments for {name}: {', '.join(sorted(unknown))}. "
+                    f"Accepted arguments: {', '.join(sorted(accepted)) or '(none)'}."
+                )
+        return await super().call_tool(name, arguments, context)
 
     async def _serve(
         self, ctx: ServerRequestContext, call_next: CallNext
