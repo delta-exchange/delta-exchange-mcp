@@ -4,6 +4,27 @@ All notable changes to this project are documented here. Versions follow SemVer,
 major bumps deferred until the package leaves Beta — so a breaking change lands as a minor
 bump and is marked BREAKING.
 
+## 0.7.2
+
+### Changed
+
+- After a key is saved, Claude Desktop tells the user to quit the app completely (Cmd+Q
+  on macOS), reopen it, and ask for their positions. A reopened form for a connected
+  account shows the same guidance. Cursor and other clients keep the immediate-use
+  guidance. The README setup and bundle-update steps name the same restart.
+
+### Fixed
+
+- A tool call with an unknown argument name returns an error that lists the accepted
+  arguments, and makes no Delta API request. Before, the server dropped the argument and
+  returned unfiltered data, so `list_tickers({"underlying": "BTC"})` listed every ticker.
+  Tool schemas declare that extra top-level arguments are not accepted.
+- A credential form reopened after a key is saved shows the connected account instead of
+  an empty form. When the account check fails, the form says credentials are configured
+  without claiming the account is connected.
+- `uv.lock` pins certifi `2026.10.19`, which drops the revoked `emSign ECC Root CA - G3`
+  root.
+
 ## 0.7.1
 
 ### Added
