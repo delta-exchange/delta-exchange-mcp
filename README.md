@@ -196,6 +196,10 @@ so and point you at one of the other two ways.
 > message is in the assistant's context and is stored in the conversation. The form exists
 > precisely so it isn't. If an assistant offers to take the key that way, decline.
 
+**Claude Desktop:** after saving, quit the app completely (Cmd+Q on macOS), reopen
+it, then ask for your positions. Turning the extension off and on does not refresh
+the account tools. Clients that reload the tool list immediately can carry on.
+
 **At a terminal**, which shows a `*` for each character you type or paste and checks the
 key works before saving anything:
 
@@ -542,6 +546,10 @@ which tool caused the request. There is no setting to turn them off.
   or break a header.
 
 ## Updating
+
+**Claude Desktop bundle:** download and open the latest bundle, then quit Claude
+Desktop completely (Cmd+Q on macOS) and reopen it. Turning the extension off and on
+is not enough.
 
 `uvx` caches the resolved package, so a new PyPI release isn't picked up automatically. To move to the latest version:
 
