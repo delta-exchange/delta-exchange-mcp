@@ -94,7 +94,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mcp.tool(annotations=hints.reads("Order book"))
     async def get_orderbook(
         symbol: str,
-        depth: int | None = Field(default=None, ge=1, le=100, description="Levels per side (max 100)."),
+        depth: int | None = Field(default=100, ge=1, le=100, description="Levels per side (max 100)."),
     ) -> dict[str, Any]:
         """L2 orderbook snapshot for a symbol."""
         return await client.get(f"/l2orderbook/{symbol}", params={"depth": depth})
