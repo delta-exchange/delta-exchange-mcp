@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.delta-exchange/delta-exchange-mcp -->
+
 <div align="center">
 
 <!-- Pinned to a commit, not a branch. PyPI renders this file for every published version, so
