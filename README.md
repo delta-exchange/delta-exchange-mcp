@@ -47,8 +47,8 @@ The form has three fields:
   the [shared file](#add-your-api-key), in which case that one is used.
 
 > [!WARNING]
-> A key carrying the **Trading** permission can place **real orders with no size cap**, sized
-> in **contracts rather than coins**, from the moment it is saved. There is no separate mode,
+> A key carrying the **Trading** permission can place **real orders with no size cap**, with
+> futures and options sized in **contracts rather than coins**, from the moment it is saved. There is no separate mode,
 > no restart and no confirmation step. Give the server a **Read Data** key unless letting an
 > assistant trade your account is exactly what you want.
 

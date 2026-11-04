@@ -110,7 +110,7 @@ The verifier enables debug on top, so it sees `get_debug_status` as one extra de
 
 The default is `read` rather than `trade` because a bundle is a double-click and a form, so
 whatever the default is becomes what most people run — and these tools have no notional cap,
-size orders in contracts rather than coins, and act on the live exchange.
+size futures and options orders in contracts rather than coins, and act on the live exchange.
 
 **`server.type: "uv"`.** No prerequisite on the user's machine — not `uv`, and not Python.
 Claude Desktop resolves `uv` in three steps: it looks for a system installation, else reuses

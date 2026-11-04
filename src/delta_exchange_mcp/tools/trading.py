@@ -9,6 +9,7 @@ is surfaced, not silently re-sent.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from functools import wraps
 from typing import Any
 
@@ -40,6 +41,10 @@ TOOL_NAMES = frozenset(
 )
 
 _STOP_TRIGGER_METHODS = "mark_price, last_traded_price, spot_price"
+_SIZE = (
+    "Futures and options: whole contracts. Spot: the amount of the base asset, such as "
+    "0.001 BTC, at least the product's product_specs.min_order_size."
+)
 _ORDER_OUTCOME_UNKNOWN = (
     "The order mutation may have reached Delta. Do not resubmit it. "
     "Use get_open_orders and get_order_history to reconcile the order state first."
@@ -74,6 +79,13 @@ def _bs(value: bool | None) -> str | None:
     if value is None:
         return None
     return "true" if value else "false"
+
+
+def _size(value: Decimal) -> int | str:
+    """Whole sizes go as integers; a fractional spot amount goes as a decimal string."""
+    if value == value.to_integral_value():
+        return int(value)
+    return format(value, "f")
 
 
 def _csv(values: list[str] | None) -> str | None:
@@ -151,7 +163,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
 
     @mutation_tool("Place order", destructive=False, idempotent=False)
     async def place_order(
-        size: int = Field(description="Order size in contracts."),
+        size: Decimal = Field(description=f"Order size. {_SIZE}"),
         side: str = Field(description="buy or sell."),
         order_type: str = Field(description="limit_order or market_order."),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
@@ -186,7 +198,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         """
         _require_one(product_id, product_symbol)
         payload = {
-            "size": size,
+            "size": _size(size),
             "side": side,
             "order_type": order_type,
             "product_id": product_id,
@@ -212,7 +224,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mutation_tool("Edit order", destructive=True, idempotent=True)
     async def edit_order(
         id: int = Field(description="Order id to edit."),
-        size: int = Field(description="Total size after the edit."),
+        size: Decimal = Field(description=f"Total size after the edit. {_SIZE}"),
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
         limit_price: str | None = Field(default=None, description="New limit price."),
@@ -228,7 +240,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         _require_one(product_id, product_symbol)
         payload = {
             "id": id,
-            "size": size,
+            "size": _size(size),
             "product_id": product_id,
             "product_symbol": product_symbol,
             "limit_price": limit_price,
