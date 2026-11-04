@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Versions follow SemVer,
 major bumps deferred until the package leaves Beta — so a breaking change lands as a minor
 bump and is marked BREAKING.
 
+## Unreleased
+
+### Fixed
+
+- `place_order` and `edit_order` take a fractional `size` for spot, the amount of the base
+  asset, such as `0.001` BTC (DEA-988). Before, `size` was a whole number of contracts,
+  and a spot contract is one unit of the base asset, so the smallest spot order was 1 BTC.
+  A whole size is still sent as an integer, so futures and options orders are unchanged.
+
 ## 0.7.2
 
 ### Changed

@@ -73,6 +73,55 @@ async def test_post_only_bool_becomes_string_enum():
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize("size", ["0.001", 0.001])
+async def test_a_fractional_spot_size_is_sent_as_a_decimal_string(size):
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    await _call(
+        _client(), "place_order",
+        product_symbol="BTC_USDT", size=size, side="sell", order_type="limit_order",
+        limit_price="100000",
+    )
+    assert json.loads(route.calls[0].request.content)["size"] == "0.001"
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("size", [5, "5", 5.0])
+async def test_a_whole_size_is_still_sent_as_an_integer(size):
+    route = respx.post(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    await _call(
+        _client(), "place_order",
+        product_id=27, size=size, side="buy", order_type="market_order",
+    )
+    assert b'"size":5,' in route.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_edit_order_sends_a_fractional_spot_size_as_a_decimal_string():
+    route = respx.put(f"{INDIA_TESTNET_REST}/orders").mock(
+        return_value=httpx.Response(200, json={"success": True, "result": {}})
+    )
+    await _call(_client(), "edit_order", id=9, product_symbol="BTC_USDT", size="0.0005")
+    assert json.loads(route.calls[0].request.content)["size"] == "0.0005"
+
+
+def test_order_sizes_accept_a_number_or_a_decimal_string():
+    mcp = MCPServer("test")
+    trading.register(mcp, _client())
+    tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    for name in ("place_order", "edit_order"):
+        size = tools[name].input_schema["properties"]["size"]
+        assert [branch["type"] for branch in size["anyOf"]] == ["number", "string"]
+        assert "whole contracts" in size["description"]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_auto_topup_bool_stays_json_bool():
     route = respx.put(f"{INDIA_TESTNET_REST}/positions/auto_topup").mock(
         return_value=httpx.Response(200, json={"success": True, "result": {}})
