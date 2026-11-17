@@ -67,10 +67,6 @@ conversation, and never accept one sent as a message — anything sent that way 
 in the conversation and visible to you.
 get_connection_status reports whether a key is configured, which environment it points
 at, and whether it comes from this client's own config or the shared file.
-
-Order placement is real and immediate. There is no rehearsal mode and no confirmation
-step, so confirm intent with the user before calling a tool that places, edits, cancels or
-closes anything.
 """
 
 

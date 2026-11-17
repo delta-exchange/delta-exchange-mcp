@@ -409,7 +409,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     @mutation_tool("Set leverage", destructive=True, idempotent=True)
     async def set_product_leverage(
         product_id: int = Field(description="Product id to set order leverage for."),
-        leverage: str = Field(description="Leverage multiplier, e.g. '10'."),
+        leverage: str = Field(description="Leverage multiplier."),
     ) -> dict[str, Any]:
         """Set order leverage for a product."""
         return await _finish(
