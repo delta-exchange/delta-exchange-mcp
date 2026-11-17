@@ -192,7 +192,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         To attach a bracket (TP/SL) you can later edit, pass the bracket_* params here — this
         creates an *entry-order* bracket whose id (the returned order id) is what
         edit_bracket_order expects. (place_bracket_order instead attaches a bracket to an open
-        position; those legs are not editable via edit_bracket_order — cancel and re-place.)
+        position; change those legs with edit_order.)
         Prices are sent exactly as given. Delta moves an off-tick price onto the product tick,
         so the limit_price in the response is the one that applies.
         """
@@ -364,8 +364,8 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Attach a take-profit / stop-loss bracket to a position. Provide at least one leg.
 
-        Note: these legs are not editable via edit_bracket_order (cancel + re-place to change
-        them). Prices are sent exactly as given.
+        Each leg is an order of its own: change one with edit_order, not edit_bracket_order.
+        Prices are sent exactly as given.
         """
         _require_one(product_id, product_symbol)
         if stop_loss_order is None and take_profit_order is None:
