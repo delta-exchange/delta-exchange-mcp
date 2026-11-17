@@ -172,7 +172,7 @@
     },
     {
       "name": "get_trading_preferences",
-      "description": "User trading preferences (margin mode, notifications, etc.)."
+      "description": "User trading preferences."
     },
     {
       "name": "get_trading_stats",

@@ -42,7 +42,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         ),
         expiry: str | None = Field(
             default=None,
-            description="Expiry date filter in YYYY-MM-DD format (current and future expiries only).",
+            description="Only the products that expire on this date, YYYY-MM-DD.",
         ),
         page_size: int = Field(default=100, ge=1, le=500),
         after: str | None = Field(default=None, description="Cursor from a previous response's meta.after."),
