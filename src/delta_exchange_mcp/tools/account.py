@@ -365,7 +365,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
 
     @mcp.tool(annotations=hints.reads("Trading preferences"))
     async def get_trading_preferences() -> dict[str, Any]:
-        """User trading preferences (margin mode, notifications, etc.)."""
+        """User trading preferences."""
         return (await fetch_account_identity(client)).response
 
     # Not read-only: the CSV write replaces whatever already sits at output_path.
