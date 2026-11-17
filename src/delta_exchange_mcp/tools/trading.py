@@ -171,7 +171,13 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         limit_price: str | None = Field(default=None, description="Required for limit_order."),
         stop_order_type: str | None = Field(default=None, description="stop_loss_order or take_profit_order."),
         stop_price: str | None = Field(default=None, description="Trigger price for stop orders."),
-        trail_amount: str | None = Field(default=None, description="Trailing-stop amount."),
+        trail_amount: str | None = Field(
+            default=None,
+            description=(
+                'Trailing-stop amount, signed by side. A sell needs a negative amount such as "-200";'
+                " Delta refuses a positive one. A buy takes a positive amount."
+            ),
+        ),
         stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
         time_in_force: str | None = Field(default=None, description="gtc or ioc."),
         post_only: bool | None = Field(default=None, description="Reject if it would take liquidity."),
@@ -181,13 +187,20 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         bracket_stop_loss_limit_price: str | None = Field(default=None, description="Bracket SL limit price."),
         bracket_take_profit_price: str | None = Field(default=None, description="Bracket TP trigger price."),
         bracket_take_profit_limit_price: str | None = Field(default=None, description="Bracket TP limit price."),
-        bracket_trail_amount: str | None = Field(default=None, description="Bracket trailing-stop amount."),
+        bracket_trail_amount: str | None = Field(
+            default=None,
+            description=(
+                "Bracket trailing-stop amount, signed by the bracket's side, which is opposite to this"
+                " order's: negative when this order is a buy, positive when it is a sell."
+            ),
+        ),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
     ) -> dict[str, Any]:
         """Place a single order. Pass exactly one of product_id or product_symbol.
 
         The API requires limit_price for limit_order and ignores it on market_order. For stop
-        orders set stop_order_type plus stop_price (or trail_amount).
+        orders set stop_order_type plus stop_price (or trail_amount). A trailing stop's
+        trail_amount is signed by the order's side: negative for a sell, positive for a buy.
 
         To attach a bracket (TP/SL) you can later edit, pass the bracket_* params here — this
         creates an *entry-order* bracket whose id (the returned order id) is what
@@ -229,10 +242,16 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
         limit_price: str | None = Field(default=None, description="New limit price."),
         stop_price: str | None = Field(default=None, description="New stop trigger price."),
-        trail_amount: str | None = Field(default=None, description="New trailing-stop amount."),
+        trail_amount: str | None = Field(
+            default=None,
+            description="New trailing-stop amount, signed as on place_order: negative on a sell order, positive on a buy.",
+        ),
         post_only: bool | None = Field(default=None, description="Reject if it would take liquidity."),
     ) -> dict[str, Any]:
         """Edit an open order. Pass exactly one of product_id or product_symbol.
+
+        A trailing stop's trail_amount is signed by the order's side: negative for a sell,
+        positive for a buy.
 
         Prices are sent exactly as given. Delta moves an off-tick price onto the product tick,
         so the limit_price in the response is the one that applies.
@@ -355,7 +374,11 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
         stop_loss_order: dict[str, Any] | None = Field(
-            default=None, description="{order_type, stop_price, limit_price?, trail_amount?}."
+            default=None,
+            description=(
+                "{order_type, stop_price, limit_price?, trail_amount?}. trail_amount is negative on a long"
+                " position, which this leg sells, and positive on a short one."
+            ),
         ),
         take_profit_order: dict[str, Any] | None = Field(
             default=None, description="{order_type, stop_price, limit_price?}."
@@ -388,7 +411,13 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         bracket_stop_loss_limit_price: str | None = Field(default=None, description="Stop-loss limit price."),
         bracket_take_profit_price: str | None = Field(default=None, description="Take-profit trigger price."),
         bracket_take_profit_limit_price: str | None = Field(default=None, description="Take-profit limit price."),
-        bracket_trail_amount: str | None = Field(default=None, description="Trailing-stop amount."),
+        bracket_trail_amount: str | None = Field(
+            default=None,
+            description=(
+                "Trailing-stop amount, signed as on place_order: negative when the bracketed order is a"
+                " buy, positive when it is a sell."
+            ),
+        ),
         bracket_stop_trigger_method: str | None = Field(default=None, description=_STOP_TRIGGER_METHODS),
     ) -> dict[str, Any]:
         """Edit the bracket (TP/SL) params on an existing order.
