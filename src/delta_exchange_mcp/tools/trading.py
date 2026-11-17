@@ -296,8 +296,7 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
     ) -> dict[str, Any]:
         """Place orders on one contract in a single request.
 
-        The API's response is returned as-is. When it comes back with fewer orders than were
-        sent, the ones missing from the response were not accepted.
+        The API's response is returned as-is.
         """
         _require_one(product_id, product_symbol)
         payload = {
@@ -315,7 +314,11 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
     ) -> dict[str, Any]:
-        """Edit orders on one contract in a single request."""
+        """Edit orders on one contract in a single request.
+
+        The API's response is returned as-is. When it lists fewer orders than were sent, the
+        ones missing from it were not edited.
+        """
         _require_one(product_id, product_symbol)
         payload = {
             "product_id": product_id,
@@ -332,7 +335,11 @@ def register(mcp: MCPServer, client: DeltaClient) -> None:
         product_id: int | None = Field(default=None, description="Product id (or pass product_symbol)."),
         product_symbol: str | None = Field(default=None, description="e.g. BTCUSD (or pass product_id)."),
     ) -> dict[str, Any]:
-        """Cancel orders on one contract in a single request."""
+        """Cancel orders on one contract in a single request.
+
+        The API's response is returned as-is. When it lists fewer orders than were sent, the
+        ones missing from it were not cancelled.
+        """
         _require_one(product_id, product_symbol)
         payload = {
             "product_id": product_id,
